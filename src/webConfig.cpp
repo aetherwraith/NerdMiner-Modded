@@ -6,8 +6,15 @@
 #include "drivers/storage/storage.h"
 #include "currency.h"
 #include "timezone.h"
+#include "version.h"
+#include "utils.h"
+#include "monitor.h"
 
 extern TSettings Settings;
+extern double best_diff;
+extern uint32_t shares;
+extern uint32_t valids;
+extern uint64_t upTime;
 
 // Basic HTTP auth for the LAN settings page. Reuses the same password as
 // the device's own setup AP (DEFAULT_WIFIPW, "MineYourCoins" unless changed
@@ -175,6 +182,52 @@ static void handleSave()
   ESP.restart();
 }
 
+static void handleStatus()
+{
+  char best_diff_str[16] = {0};
+  suffix_string(best_diff, best_diff_str, sizeof(best_diff_str), 0);
+
+  double khs = getHashrateKhs();
+  float temp = temperatureRead();
+
+  String json;
+  json.reserve(512);
+  json += "{\"nerdminer\":true";
+  json += ",\"hostname\":\"NerdMiner\"";
+  json += ",\"version\":\"" + String(CURRENT_VERSION) + "\"";
+  json += ",\"deviceModel\":\"NerdMiner v2\"";
+  json += ",\"khash\":" + String(khs, 2);
+  json += ",\"hashRate\":" + String(khs, 2);
+  json += ",\"validShares\":" + String(valids);
+  json += ",\"invalidShares\":" + String(shares > valids ? shares - valids : 0);
+  json += ",\"sharesAccepted\":" + String(valids);
+  json += ",\"sharesRejected\":" + String(shares > valids ? shares - valids : 0);
+  json += ",\"bestDiff\":\"" + String(best_diff_str) + "\"";
+  json += ",\"bestSessionDiff\":\"" + String(best_diff_str) + "\"";
+  json += ",\"uptime\":" + String((unsigned long)upTime);
+  json += ",\"poolDiff\":1000";
+  json += ",\"stratumURL\":\"" + htmlEscape(Settings.PoolAddress) + "\"";
+  json += ",\"stratumPort\":" + String(Settings.PoolPort);
+  json += ",\"stratumUser\":\"" + htmlEscape(String(Settings.BtcWallet)) + "\"";
+  json += ",\"temp\":" + String(temp, 1);
+  json += ",\"power\":1.5";
+  json += ",\"frequency\":240";
+  json += ",\"macAddr\":\"" + WiFi.macAddress() + "\"";
+  json += ",\"freeHeap\":" + String(ESP.getFreeHeap());
+  json += "}";
+
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.send(200, "application/json", json);
+}
+
+static void handleRestart()
+{
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.send(200, "application/json", "{\"success\":true,\"message\":\"Restarting...\"}");
+  delay(500);
+  ESP.restart();
+}
+
 void setup_webConfig(void)
 {
   if (webCfgStarted)
@@ -182,6 +235,9 @@ void setup_webConfig(void)
 
   webCfgServer.on("/", HTTP_GET, handleRoot);
   webCfgServer.on("/save", HTTP_POST, handleSave);
+  webCfgServer.on("/status", HTTP_GET, handleStatus);
+  webCfgServer.on("/api/system/info", HTTP_GET, handleStatus);
+  webCfgServer.on("/api/system/restart", HTTP_POST, handleRestart);
   webCfgServer.onNotFound([]()
   {
     webCfgServer.sendHeader("Location", "/");

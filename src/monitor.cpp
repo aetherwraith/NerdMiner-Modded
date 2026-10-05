@@ -340,6 +340,18 @@ String getCurrentHashRate(unsigned long mElapsed)
   }
 }
 
+double getHashrateKhs(void)
+{
+  if (!s_hashrate_avg_list.empty())
+  {
+    double avg = s_hashrate_summ / (double)s_hashrate_avg_list.size();
+    return avg > 0.0 ? avg : 0.0;
+  }
+  if (upTime > 0)
+    return (double)totalKHashes / (double)upTime;
+  return 0.0;
+}
+
 mining_data getMiningData(unsigned long mElapsed)
 {
   mining_data data;

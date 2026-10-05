@@ -135,5 +135,6 @@ pool_data getPoolData(void);
 
 clock_data_t getClockData_t(unsigned long mElapsed);
 String getPoolAPIUrl(void);
+double getHashrateKhs(void);
 
 #endif //MONITOR_API_H
