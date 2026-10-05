@@ -5,6 +5,7 @@
 #include "wManager.h"
 #include "drivers/storage/storage.h"
 #include "currency.h"
+#include "timezone.h"
 
 extern TSettings Settings;
 
@@ -45,14 +46,32 @@ static void handleRoot()
     return;
 
   String page;
-  page.reserve(3600);
+  page.reserve(8192);
   page += F("<!DOCTYPE html><html><head><meta charset='utf-8'>"
              "<meta name='viewport' content='width=device-width, initial-scale=1'>"
              "<title>NerdMiner Settings</title>"
              "<style>body{font-family:sans-serif;max-width:480px;margin:2em auto;padding:0 1em}"
              "label{display:block;margin-top:1em;font-weight:bold}"
              "input[type=text],input[type=number],input[type=password],select{width:100%;padding:.4em;box-sizing:border-box}"
-             "input[type=submit]{margin-top:1.5em;padding:.6em 1.2em}</style></head><body>"
+             "input[type=submit]{margin-top:1.5em;padding:.6em 1.2em}</style>"
+             "<script>"
+             "function filterTZ(){"
+             "var q=document.getElementById('tz_search').value.toLowerCase();"
+             "var sel=document.getElementById('tz_select');"
+             "var opts=sel.options;"
+             "for(var i=0;i<opts.length;i++){"
+             "var m=opts[i].text.toLowerCase().indexOf(q)!==-1;"
+             "opts[i].hidden=!m;"
+             "opts[i].style.display=m?'':'none';"
+             "}"
+             "}"
+             "window.addEventListener('DOMContentLoaded',function(){"
+             "var sel=document.getElementById('tz_select');"
+             "if(sel&&sel.selectedIndex>=0){"
+             "sel.options[sel.selectedIndex].scrollIntoView({block:'nearest'});"
+             "}"
+             "});"
+             "</script></head><body>"
              "<h2>NerdMiner Settings</h2>"
              "<form method='POST' action='/save'>");
 
@@ -60,7 +79,30 @@ static void handleRoot()
   page += "<label>Pool Port</label><input type='number' name='port' value='" + String(Settings.PoolPort) + "'>";
   page += "<label>Pool Password (optional)</label><input type='text' name='poolpass' value='" + htmlEscape(String(Settings.PoolPassword)) + "'>";
   page += "<label>BTC Address</label><input type='text' name='wallet' value='" + htmlEscape(String(Settings.BtcWallet)) + "'>";
-  page += "<label>Timezone (UTC offset, -12/+12)</label><input type='number' name='tz' value='" + String(Settings.Timezone) + "'>";
+  page += F("<label>Time Zone</label>"
+            "<input type='text' id='tz_search' placeholder='Search time zone (e.g. London, New York)...' oninput='filterTZ()' autocomplete='off'>"
+            "<select name='tz' id='tz_select' size='6' style='margin-top:4px;'>");
+
+  bool tzMatched = false;
+  for (int i = 0; i < kTimeZoneCount; i++)
+  {
+    page += "<option value='";
+    page += kTimeZones[i].id;
+    page += "'";
+    if (Settings.Timezone.equalsIgnoreCase(kTimeZones[i].id) || Settings.Timezone.equalsIgnoreCase(kTimeZones[i].posix))
+    {
+      page += " selected";
+      tzMatched = true;
+    }
+    page += ">";
+    page += kTimeZones[i].label;
+    page += "</option>";
+  }
+  if (!tzMatched && Settings.Timezone.length() > 0)
+  {
+    page += "<option value='" + htmlEscape(Settings.Timezone) + "' selected>Custom: " + htmlEscape(Settings.Timezone) + "</option>";
+  }
+  page += "</select>";
   page += "<label>BTC price currency</label><select name='currency'>";
   for (int i = 0; i < kCurrencyCount; i++)
   {
@@ -104,7 +146,7 @@ static void handleSave()
   if (webCfgServer.hasArg("wallet"))
     strncpy(Settings.BtcWallet, webCfgServer.arg("wallet").c_str(), sizeof(Settings.BtcWallet) - 1);
   if (webCfgServer.hasArg("tz"))
-    Settings.Timezone = webCfgServer.arg("tz").toInt();
+    Settings.Timezone = webCfgServer.arg("tz");
   if (webCfgServer.hasArg("currency"))
     Settings.Currency = currencyFor(webCfgServer.arg("currency")).code;
   Settings.saveStats = webCfgServer.hasArg("savestats");

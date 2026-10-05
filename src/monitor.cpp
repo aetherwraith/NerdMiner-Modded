@@ -3,8 +3,7 @@
 #include "mbedtls/md.h"
 #include "HTTPClient.h"
 #include <WiFiClientSecure.h>
-#include <NTPClient.h>
-#include <WiFiUdp.h>
+#include <time.h>
 #include <list>
 #include "mining.h"
 #include "utils.h"
@@ -12,6 +11,7 @@
 #include "drivers/storage/storage.h"
 #include "drivers/devices/device.h"
 #include "currency.h"
+#include "timezone.h"
 
 extern uint32_t templates;
 extern uint32_t hashes;
@@ -31,8 +31,6 @@ extern monitor_data mMonitor;
 extern TSettings Settings; 
 bool invertColors = false;
 
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 3600, 60000);
 unsigned int bitcoin_price=0;
 String current_block = "793261";
 global_data gData;
@@ -61,14 +59,11 @@ static std::mutex s_poolApiMutex;
 
 void setup_monitor(void){
     /******** TIME ZONE SETTING *****/
+    String posixTz = getPosixTz(Settings.Timezone);
+    Serial.printf("Configuring timezone: %s (POSIX: %s)\n", Settings.Timezone.c_str(), posixTz.c_str());
+    configTzTime(posixTz.c_str(), "pool.ntp.org", "time.nist.gov", "europe.pool.ntp.org");
 
-    timeClient.begin();
-    
-    // Adjust offset depending on your zone
-    // GMT +2 in seconds (zona horaria de Europa Central)
-    timeClient.setTimeOffset(3600 * Settings.Timezone);
-
-    Serial.println("TimeClient setup done");
+    Serial.println("Timezone setup done");
 #ifdef SCREEN_WORKERS_ENABLE
     Serial.println("poolAPIUrl: " + getPoolAPIUrl());
 #endif
@@ -227,47 +222,47 @@ String getBTCprice(void){
   return String(price_buffer);
 }
 
-unsigned long mTriggerUpdate = 0;
-unsigned long initialMillis = millis();
-unsigned long initialTime = 0;
 unsigned long mPoolUpdate = 0;
 
 void getTime(unsigned long* currentHours, unsigned long* currentMinutes, unsigned long* currentSeconds){
-  
-  //Check if need an NTP call to check current time
-  if((mTriggerUpdate == 0) || (millis() - mTriggerUpdate > UPDATE_PERIOD_h * 60 * 60 * 1000)){ //60 sec. * 60 min * 1000ms
-    if(WiFi.status() == WL_CONNECTED) {
-        if(timeClient.update()) mTriggerUpdate = millis(); //NTP call to get current time
-        initialTime = timeClient.getEpochTime(); // Guarda la hora inicial (en segundos desde 1970)
-        Serial.print("TimeClient NTPupdateTime ");
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 10)) {
+    *currentHours = timeinfo.tm_hour;
+    *currentMinutes = timeinfo.tm_min;
+    *currentSeconds = timeinfo.tm_sec;
+  } else {
+    time_t now;
+    time(&now);
+    if (now > 1500000000) {
+      localtime_r(&now, &timeinfo);
+      *currentHours = timeinfo.tm_hour;
+      *currentMinutes = timeinfo.tm_min;
+      *currentSeconds = timeinfo.tm_sec;
+    } else {
+      *currentHours = 0;
+      *currentMinutes = 0;
+      *currentSeconds = 0;
     }
   }
-
-  unsigned long elapsedTime = (millis() - mTriggerUpdate) / 1000; // Tiempo transcurrido en segundos
-  unsigned long currentTime = initialTime + elapsedTime; // La hora actual
-
-  // convierte la hora actual en horas, minutos y segundos
-  *currentHours = currentTime % 86400 / 3600;
-  *currentMinutes = currentTime % 3600 / 60;
-  *currentSeconds = currentTime % 60;
 }
 
 String getDate(){
-  
-  unsigned long elapsedTime = (millis() - mTriggerUpdate) / 1000; // Tiempo transcurrido en segundos
-  unsigned long currentTime = initialTime + elapsedTime; // La hora actual
-
-  // Convierte la hora actual (epoch time) en una estructura tm
-  struct tm *tm = localtime((time_t *)&currentTime);
-
-  int year = tm->tm_year + 1900; // tm_year es el número de años desde 1900
-  int month = tm->tm_mon + 1;    // tm_mon es el mes del año desde 0 (enero) hasta 11 (diciembre)
-  int day = tm->tm_mday;         // tm_mday es el día del mes
-
-  char currentDate[20];
-  sprintf(currentDate, "%02d/%02d/%04d", tm->tm_mday, tm->tm_mon + 1, tm->tm_year + 1900);
-
-  return String(currentDate);
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 10)) {
+    char currentDate[20];
+    sprintf(currentDate, "%02d/%02d/%04d", timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+    return String(currentDate);
+  } else {
+    time_t now;
+    time(&now);
+    if (now > 1500000000) {
+      localtime_r(&now, &timeinfo);
+      char currentDate[20];
+      sprintf(currentDate, "%02d/%02d/%04d", timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+      return String(currentDate);
+    }
+  }
+  return String("00/00/0000");
 }
 
 String getTime(void){
@@ -277,8 +272,7 @@ String getTime(void){
   char LocalHour[10];
   sprintf(LocalHour, "%02d:%02d", currentHours, currentMinutes);
   
-  String mystring(LocalHour);
-  return LocalHour;
+  return String(LocalHour);
 }
 
 enum EHashRateScale

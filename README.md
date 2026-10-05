@@ -174,7 +174,7 @@ Note: the login is the same on every miner (the password is the one of the setup
   "PoolPort": 3333,
   "PoolPassword": "x",
   "BtcWallet": "walletID",
-  "Timezone": 2,
+  "Timezone": "Europe/London",
   "SaveStats": false,
   "invertColors": false,
   "Brightness": 250,
@@ -184,6 +184,8 @@ Note: the login is the same on every miner (the password is the one of the setup
   "screenOffTimeout": 0
 }
 ```
+
+> **Note on Timezone:** `"Timezone"` accepts IANA timezone names (e.g. `"Europe/London"`, `"America/New_York"`), POSIX TZ strings, or numeric UTC offsets (e.g. `"2"` or `"-5"`). Full daylight saving time (DST) rules are automatically applied for named zones.
 
 1. Insert the SD card.
 1. Hold down the "reset configurations" button as described below to reset the configurations and/or boot without settings in your nvmemory.

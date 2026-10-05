@@ -16,7 +16,7 @@
 #define DEFAULT_POOLPASS	"x"
 #define DEFAULT_WALLETID	"yourBtcAddress"
 #define DEFAULT_POOLPORT	3333
-#define DEFAULT_TIMEZONE	2
+#define DEFAULT_TIMEZONE	"Europe/London"
 #define DEFAULT_SAVESTATS	false
 #ifdef TFT_INVERSION_ON
 #define DEFAULT_INVERTCOLORS	true
@@ -71,7 +71,7 @@ struct TSettings
 	char BtcWallet[80]{ DEFAULT_WALLETID };
 	char PoolPassword[80]{ DEFAULT_POOLPASS };
 	int PoolPort{ DEFAULT_POOLPORT };
-	int Timezone{ DEFAULT_TIMEZONE };
+	String Timezone{ DEFAULT_TIMEZONE };
 	bool saveStats{ DEFAULT_SAVESTATS };
 	bool invertColors{ DEFAULT_INVERTCOLORS };
 	int Brightness{ DEFAULT_BRIGHTNESS };

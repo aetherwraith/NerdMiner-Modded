@@ -143,9 +143,9 @@ bool SDCard::loadConfigFile(TSettings* Settings)
                         Settings->PoolPort = json[JSON_SPIFFS_KEY_POOLPORT].as<int>();
                     }
                     if (json.containsKey(JSON_KEY_TIMEZONE)) {
-                        Settings->Timezone = json[JSON_KEY_TIMEZONE].as<int>();
+                        Settings->Timezone = json[JSON_KEY_TIMEZONE].as<String>();
                     } else if (json.containsKey(JSON_SPIFFS_KEY_TIMEZONE)) {
-                        Settings->Timezone = json[JSON_SPIFFS_KEY_TIMEZONE].as<int>();
+                        Settings->Timezone = json[JSON_SPIFFS_KEY_TIMEZONE].as<String>();
                     }
                     if (json.containsKey(JSON_KEY_STATS2NV)) {
                         Settings->saveStats = json[JSON_KEY_STATS2NV].as<bool>();
