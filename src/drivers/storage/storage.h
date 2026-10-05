@@ -26,6 +26,8 @@
 #define DEFAULT_BRIGHTNESS	250
 #define DEFAULT_FLIPDISPLAY	false
 #define DEFAULT_CURRENCY	"usd"
+#define DEFAULT_AUTOBRIGHTNESS	false
+#define DEFAULT_SCREENOFFTIMEOUT	0
 
 // JSON config files
 #define JSON_CONFIG_FILE	"/config.json"
@@ -43,6 +45,8 @@
 #define JSON_KEY_BRIGHTNESS	"Brightness"
 #define JSON_KEY_FLIPDISPLAY	"flipDisplay"
 #define JSON_KEY_CURRENCY	"Currency"
+#define JSON_KEY_AUTOBRIGHTNESS	"autoBrightness"
+#define JSON_KEY_SCREENOFFTIMEOUT	"screenOffTimeout"
 
 // JSON config file SPIFFS (different for backward compatibility with existing devices)
 #define JSON_SPIFFS_KEY_POOLURL		"poolString"
@@ -55,6 +59,8 @@
 #define JSON_SPIFFS_KEY_BRIGHTNESS	"Brightness"
 #define JSON_SPIFFS_KEY_FLIPDISPLAY	"flipDisplay"
 #define JSON_SPIFFS_KEY_CURRENCY	"currency"
+#define JSON_SPIFFS_KEY_AUTOBRIGHTNESS	"autoBrightness"
+#define JSON_SPIFFS_KEY_SCREENOFFTIMEOUT	"screenOffTimeout"
 
 // settings
 struct TSettings
@@ -71,6 +77,8 @@ struct TSettings
 	int Brightness{ DEFAULT_BRIGHTNESS };
 	bool flipDisplay{ DEFAULT_FLIPDISPLAY };	// rotate display 180 degrees (USB on the left)
 	String Currency{ DEFAULT_CURRENCY };	// fiat currency for the BTC price (CoinGecko vs_currency code)
+	bool autoBrightness{ DEFAULT_AUTOBRIGHTNESS }; // automatic screen brightness via LDR sensor
+	int screenOffTimeout{ DEFAULT_SCREENOFFTIMEOUT }; // auto screen off timeout in seconds (0 = disabled)
 };
 
 #endif // _STORAGE_H_

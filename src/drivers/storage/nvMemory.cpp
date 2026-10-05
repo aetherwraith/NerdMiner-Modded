@@ -39,6 +39,8 @@ bool nvMemory::saveConfig(TSettings* Settings)
         json[JSON_SPIFFS_KEY_BRIGHTNESS] = Settings->Brightness;
         json[JSON_SPIFFS_KEY_FLIPDISPLAY] = Settings->flipDisplay;
         json[JSON_SPIFFS_KEY_CURRENCY] = Settings->Currency;
+        json[JSON_SPIFFS_KEY_AUTOBRIGHTNESS] = Settings->autoBrightness;
+        json[JSON_SPIFFS_KEY_SCREENOFFTIMEOUT] = Settings->screenOffTimeout;
 
         // Open config file
         File configFile = SPIFFS.open(JSON_CONFIG_FILE, "w");
@@ -158,6 +160,28 @@ bool nvMemory::loadConfig(TSettings* Settings)
                         Settings->Currency = json[JSON_SPIFFS_KEY_CURRENCY].as<String>();
                     } else if (json.containsKey(JSON_KEY_CURRENCY)) {
                         Settings->Currency = json[JSON_KEY_CURRENCY].as<String>();
+                    }
+
+                    if (json.containsKey(JSON_SPIFFS_KEY_AUTOBRIGHTNESS)) {
+                        Settings->autoBrightness = json[JSON_SPIFFS_KEY_AUTOBRIGHTNESS].as<bool>();
+                    } else if (json.containsKey(JSON_KEY_AUTOBRIGHTNESS)) {
+                        Settings->autoBrightness = json[JSON_KEY_AUTOBRIGHTNESS].as<bool>();
+                    } else if (json.containsKey("auto_brightness")) {
+                        Settings->autoBrightness = json["auto_brightness"].as<bool>();
+                    } else {
+                        Settings->autoBrightness = DEFAULT_AUTOBRIGHTNESS;
+                    }
+
+                    if (json.containsKey(JSON_SPIFFS_KEY_SCREENOFFTIMEOUT)) {
+                        Settings->screenOffTimeout = json[JSON_SPIFFS_KEY_SCREENOFFTIMEOUT].as<int>();
+                    } else if (json.containsKey(JSON_KEY_SCREENOFFTIMEOUT)) {
+                        Settings->screenOffTimeout = json[JSON_KEY_SCREENOFFTIMEOUT].as<int>();
+                    } else if (json.containsKey("screen_off_timeout")) {
+                        Settings->screenOffTimeout = json["screen_off_timeout"].as<int>();
+                    } else if (json.containsKey("screenOff")) {
+                        Settings->screenOffTimeout = json["screenOff"].as<int>();
+                    } else {
+                        Settings->screenOffTimeout = DEFAULT_SCREENOFFTIMEOUT;
                     }
                     return true;
                 }

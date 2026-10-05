@@ -172,6 +172,22 @@ bool SDCard::loadConfigFile(TSettings* Settings)
                     } else if (json.containsKey(JSON_SPIFFS_KEY_CURRENCY)) {
                         Settings->Currency = json[JSON_SPIFFS_KEY_CURRENCY].as<String>();
                     }
+                    if (json.containsKey(JSON_KEY_AUTOBRIGHTNESS)) {
+                        Settings->autoBrightness = json[JSON_KEY_AUTOBRIGHTNESS].as<bool>();
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_AUTOBRIGHTNESS)) {
+                        Settings->autoBrightness = json[JSON_SPIFFS_KEY_AUTOBRIGHTNESS].as<bool>();
+                    } else if (json.containsKey("auto_brightness")) {
+                        Settings->autoBrightness = json["auto_brightness"].as<bool>();
+                    }
+                    if (json.containsKey(JSON_KEY_SCREENOFFTIMEOUT)) {
+                        Settings->screenOffTimeout = json[JSON_KEY_SCREENOFFTIMEOUT].as<int>();
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_SCREENOFFTIMEOUT)) {
+                        Settings->screenOffTimeout = json[JSON_SPIFFS_KEY_SCREENOFFTIMEOUT].as<int>();
+                    } else if (json.containsKey("screen_off_timeout")) {
+                        Settings->screenOffTimeout = json["screen_off_timeout"].as<int>();
+                    } else if (json.containsKey("screenOff")) {
+                        Settings->screenOffTimeout = json["screenOff"].as<int>();
+                    }
                     // Serial.printf("Carteira Lida SD:%s\n", Settings.BtcWallet);       
                     Serial.printf("Carteira Lida SDs:%s\n", Settings->BtcWallet);                       
                     return true;

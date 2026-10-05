@@ -274,6 +274,21 @@ void init_WifiManager()
     WiFiManagerParameter brightness_text_box_num("Brightness", "Screen backlight Duty Cycle (0-255)", brightnessConvValue, 3);
     wm.addParameter(&brightness_text_box_num);
   #endif
+  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+    char checkboxParams4[24] = "type=\"checkbox\"";
+    if (Settings.autoBrightness)
+    {
+      strcat(checkboxParams4, " checked");
+    }
+    WiFiManagerParameter autoBrightnessParam("autoBrightness", "Auto Brightness (LDR Sensor)", "T", 2, checkboxParams4, WFM_LABEL_AFTER);
+    wm.addParameter(&autoBrightnessParam);
+  #endif
+  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+    char screenOffConvValue[8];
+    sprintf(screenOffConvValue, "%d", Settings.screenOffTimeout);
+    WiFiManagerParameter screenOff_text_box_num("screenOff", "Auto Screen Off (seconds, 0=disabled)", screenOffConvValue, 6);
+    wm.addParameter(&screenOff_text_box_num);
+  #endif
 
     Serial.println("AllDone: ");
     if (forceConfig)    
@@ -300,8 +315,12 @@ void init_WifiManager()
                 Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
                 Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
             #endif
+            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+                Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);
+            #endif
             #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
                 Settings.Brightness = atoi(brightness_text_box_num.getValue());
+                Settings.screenOffTimeout = atoi(screenOff_text_box_num.getValue());
             #endif
             nvMem.saveConfig(&Settings);
             delay(3*SECOND_MS);
@@ -334,8 +353,12 @@ void init_WifiManager()
                 Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
                 Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
                 #endif
+                #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+                Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);
+                #endif
                 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
                 Settings.Brightness = atoi(brightness_text_box_num.getValue());
+                Settings.screenOffTimeout = atoi(screenOff_text_box_num.getValue());
                 #endif
                 nvMem.saveConfig(&Settings);
                 vTaskDelay(2000 / portTICK_PERIOD_MS);      
@@ -392,6 +415,14 @@ void init_WifiManager()
         if (shouldSaveConfig) Settings.Brightness = atoi(brightness_text_box_num.getValue());
         Serial.print("Brightness: ");
         Serial.println(Settings.Brightness);
+        #endif
+
+        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+        if (shouldSaveConfig) Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);
+        #endif
+
+        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+        if (shouldSaveConfig) Settings.screenOffTimeout = atoi(screenOff_text_box_num.getValue());
         #endif
 
         // Always-on LAN settings page -- lets the user change pool/wallet/etc.

@@ -179,7 +179,9 @@ Note: the login is the same on every miner (the password is the one of the setup
   "invertColors": false,
   "Brightness": 250,
   "flipDisplay": false,
-  "Currency": "usd"
+  "Currency": "usd",
+  "autoBrightness": false,
+  "screenOffTimeout": 0
 }
 ```
 

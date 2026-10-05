@@ -57,6 +57,33 @@ void getChipInfo(void){
   Serial.println("MHz");  
 }
 
+#ifdef LDR_PIN
+static float smoothedLDR = 1000.0f;
+static unsigned long lastLdrRead = 0;
+static uint8_t currentAppliedDuty = 250;
+
+static void updateAutoBrightness(unsigned long now)
+{
+  if (now - lastLdrRead < 200) return;
+  lastLdrRead = now;
+
+  int rawLDR = analogRead(LDR_PIN);
+  smoothedLDR = (smoothedLDR * 0.85f) + ((float)rawLDR * 0.15f);
+
+  int targetPwm = map((int)smoothedLDR, 100, 3000, 255, 15);
+  targetPwm = constrain(targetPwm, 10, 255);
+
+  if (currentAppliedDuty != (uint8_t)targetPwm)
+  {
+    currentAppliedDuty = (uint8_t)targetPwm;
+    ledcWrite(0, currentAppliedDuty);
+  }
+}
+#endif
+
+static bool isScreenOff = false;
+static unsigned long lastActivityTime = 0;
+
 void esp32_2432S028R_Init(void)
 { 
   // getChipInfo();  
@@ -81,9 +108,29 @@ void esp32_2432S028R_Init(void)
 
   // Configuring screen backlight brightness using ledcontrol channel 0.
   // Using 5000Hz in 8bit resolution, which gives 0-255 possible duty cycle setting.
+  lastActivityTime = millis();
+  isScreenOff = false;
   ledcSetup(0, 5000, 8);
   ledcAttachPin(TFT_BL, 0);
+#ifdef LDR_PIN
+  pinMode(LDR_PIN, INPUT);
+  if (Settings.autoBrightness)
+  {
+    int raw = analogRead(LDR_PIN);
+    smoothedLDR = (float)raw;
+    int targetPwm = map((int)smoothedLDR, 100, 3000, 255, 15);
+    targetPwm = constrain(targetPwm, 10, 255);
+    currentAppliedDuty = (uint8_t)targetPwm;
+    ledcWrite(0, currentAppliedDuty);
+  }
+  else
+  {
+    currentAppliedDuty = Settings.Brightness;
+    ledcWrite(0, currentAppliedDuty);
+  }
+#else
   ledcWrite(0, Settings.Brightness);
+#endif
  
   //background.createSprite(WIDTH, HEIGHT); // Background Sprite
   //background.setSwapBytes(true);
@@ -113,12 +160,18 @@ void esp32_2432S028R_Init(void)
 void esp32_2432S028R_AlternateScreenState(void)
 {
   Serial.println("Switching display state");
-  int screen_state_duty = ledcRead(0);
-  // Switching the duty cycle for the ledc channel, where the TFT_BL pin is attached.
-  if (screen_state_duty > 0) {
+  isScreenOff = !isScreenOff;
+  lastActivityTime = millis();
+  if (isScreenOff) {
     ledcWrite(0, 0);
   } else {
-    ledcWrite(0, Settings.Brightness);
+#ifdef LDR_PIN
+    uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : Settings.Brightness;
+#else
+    uint8_t duty = Settings.Brightness;
+#endif
+    if (duty == 0) duty = 250;
+    ledcWrite(0, duty);
   }
 }
 
@@ -543,8 +596,18 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
     { 
       int16_t t_x , t_y;  // To store the touch coordinates
       bool pressed = touch.getXY(t_x, t_y);
-      if (pressed) {                        
-          if (((t_x > 109)&&(t_x < 211)) && ((t_y > 185)&&(t_y < 241))) {
+      if (pressed) {
+          lastActivityTime = currentMillis;
+          if (isScreenOff || ledcRead(0) == 0) {
+            isScreenOff = false;
+#ifdef LDR_PIN
+            uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : Settings.Brightness;
+#else
+            uint8_t duty = Settings.Brightness;
+#endif
+            if (duty == 0) duty = 250;
+            ledcWrite(0, duty);
+          } else if (((t_x > 109)&&(t_x < 211)) && ((t_y > 185)&&(t_y < 241))) {
             bottomScreenBlue ^= true;
             hasChangedScreen = true;
           } else if((t_x > 235) && ((t_y > 0)&&(t_y < 16))) {
@@ -569,8 +632,44 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
       previousTouchMillis = currentMillis;
     }
 
-    if (currentScreen != currentDisplayDriver->current_cyclic_screen) hasChangedScreen ^= true;
-    currentScreen = currentDisplayDriver->current_cyclic_screen;
+  // Check auto screen off timeout
+  if (Settings.screenOffTimeout > 0 && !isScreenOff)
+  {
+    if (currentMillis - lastActivityTime >= (unsigned long)Settings.screenOffTimeout * 1000UL)
+    {
+      isScreenOff = true;
+      ledcWrite(0, 0);
+    }
+  }
+
+  // If screen is on, handle auto brightness
+  if (!isScreenOff)
+  {
+#ifdef LDR_PIN
+    if (Settings.autoBrightness)
+    {
+      updateAutoBrightness(currentMillis);
+    }
+#endif
+  }
+
+  if (currentScreen != currentDisplayDriver->current_cyclic_screen)
+  {
+    lastActivityTime = currentMillis;
+    if (isScreenOff)
+    {
+      isScreenOff = false;
+#ifdef LDR_PIN
+      uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : Settings.Brightness;
+#else
+      uint8_t duty = Settings.Brightness;
+#endif
+      if (duty == 0) duty = 250;
+      ledcWrite(0, duty);
+    }
+    hasChangedScreen ^= true;
+  }
+  currentScreen = currentDisplayDriver->current_cyclic_screen;
 
   switch (mMonitor.NerdStatus)
   {

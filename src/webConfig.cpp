@@ -74,12 +74,15 @@ static void handleRoot()
 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
   page += "<label><input type='checkbox' name='invert' " + String(Settings.invertColors ? "checked" : "") + "> Invert display colors</label>";
   page += "<label><input type='checkbox' name='flip' " + String(Settings.flipDisplay ? "checked" : "") + "> Flip display (USB on the left)</label>";
+  page += "<label><input type='checkbox' name='autobrightness' " + String(Settings.autoBrightness ? "checked" : "") + "> Auto brightness (LDR light sensor)</label>";
   page += "<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='" + String(Settings.Brightness) + "'>";
+  page += "<label>Auto screen off timeout (seconds, 0 = disabled)</label><input type='number' name='screenoff' min='0' max='86400' value='" + String(Settings.screenOffTimeout) + "'>";
 #endif
 #if defined(ES3C35P) || defined(ESP32_4IN_ST7796)
   page += "<label><input type='checkbox' name='invert' " + String(Settings.invertColors ? "checked" : "") + "> Invert display colors</label>";
   page += "<label><input type='checkbox' name='flip' " + String(Settings.flipDisplay ? "checked" : "") + "> Flip display (rotate 180 degrees)</label>";
   page += "<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='" + String(Settings.Brightness) + "'>";
+  page += "<label>Auto screen off timeout (seconds, 0 = disabled)</label><input type='number' name='screenoff' min='0' max='86400' value='" + String(Settings.screenOffTimeout) + "'>";
 #endif
   page += F("<input type='submit' value='Save &amp; Restart'>"
             "</form></body></html>");
@@ -108,14 +111,19 @@ static void handleSave()
 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
   Settings.invertColors = webCfgServer.hasArg("invert");
   Settings.flipDisplay = webCfgServer.hasArg("flip");
+  Settings.autoBrightness = webCfgServer.hasArg("autobrightness");
   if (webCfgServer.hasArg("brightness"))
     Settings.Brightness = webCfgServer.arg("brightness").toInt();
+  if (webCfgServer.hasArg("screenoff"))
+    Settings.screenOffTimeout = webCfgServer.arg("screenoff").toInt();
 #endif
 #if defined(ES3C35P) || defined(ESP32_4IN_ST7796)
   Settings.invertColors = webCfgServer.hasArg("invert");
   Settings.flipDisplay = webCfgServer.hasArg("flip");
   if (webCfgServer.hasArg("brightness"))
     Settings.Brightness = webCfgServer.arg("brightness").toInt();
+  if (webCfgServer.hasArg("screenoff"))
+    Settings.screenOffTimeout = webCfgServer.arg("screenoff").toInt();
 #endif
 
   saveSettingsToFlash();
