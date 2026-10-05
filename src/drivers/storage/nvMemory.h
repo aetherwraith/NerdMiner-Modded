@@ -4,6 +4,7 @@
 // we only have one implementation right now and nothing to choose from.
 #define NVMEM_SPIFFS
 
+#include <ArduinoJson.h>
 #include "../devices/device.h"
 #include "storage.h"
 
@@ -16,6 +17,7 @@ public:
     bool saveConfig(TSettings* Settings);
     bool loadConfig(TSettings* Settings);
     bool deleteConfig();
+    static bool parseJsonConfig(const JsonDocument& json, TSettings* Settings);
 private:
     bool init();
     bool Initialized_;

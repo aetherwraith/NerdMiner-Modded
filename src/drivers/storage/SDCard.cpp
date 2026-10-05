@@ -107,90 +107,9 @@ bool SDCard::loadConfigFile(TSettings* Settings)
                 if (!error)
                 {
                     serializeJsonPretty(json, Serial);
-                    Serial.print('\n');    
-                    if (json.containsKey(JSON_KEY_SSID)) {                
-                        Settings->WifiSSID = json[JSON_KEY_SSID].as<String>();
-                    } else if (json.containsKey("ssid")) {
-                        Settings->WifiSSID = json["ssid"].as<String>();
-                    }
-                    if (json.containsKey(JSON_KEY_PASW)) {
-                        Settings->WifiPW = json[JSON_KEY_PASW].as<String>();
-                    } else if (json.containsKey("password")) {
-                        Settings->WifiPW = json["password"].as<String>();
-                    }
-                    if (json.containsKey(JSON_KEY_POOLURL)) {
-                        Settings->PoolAddress = json[JSON_KEY_POOLURL].as<String>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_POOLURL)) {
-                        Settings->PoolAddress = json[JSON_SPIFFS_KEY_POOLURL].as<String>();
-                    }
-                    if (json.containsKey(JSON_KEY_POOLPASS)) {
-                        strncpy(Settings->PoolPassword, json[JSON_KEY_POOLPASS].as<const char*>(), sizeof(Settings->PoolPassword) - 1);
-                        Settings->PoolPassword[sizeof(Settings->PoolPassword) - 1] = '\0';
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_POOLPASS)) {
-                        strncpy(Settings->PoolPassword, json[JSON_SPIFFS_KEY_POOLPASS].as<const char*>(), sizeof(Settings->PoolPassword) - 1);
-                        Settings->PoolPassword[sizeof(Settings->PoolPassword) - 1] = '\0';
-                    }
-                    if (json.containsKey(JSON_KEY_WALLETID)) {
-                        strncpy(Settings->BtcWallet, json[JSON_KEY_WALLETID].as<const char*>(), sizeof(Settings->BtcWallet) - 1);
-                        Settings->BtcWallet[sizeof(Settings->BtcWallet) - 1] = '\0';
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_WALLETID)) {
-                        strncpy(Settings->BtcWallet, json[JSON_SPIFFS_KEY_WALLETID].as<const char*>(), sizeof(Settings->BtcWallet) - 1);
-                        Settings->BtcWallet[sizeof(Settings->BtcWallet) - 1] = '\0';
-                    }
-                    if (json.containsKey(JSON_KEY_POOLPORT)) {
-                        Settings->PoolPort = json[JSON_KEY_POOLPORT].as<int>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_POOLPORT)) {
-                        Settings->PoolPort = json[JSON_SPIFFS_KEY_POOLPORT].as<int>();
-                    }
-                    if (json.containsKey(JSON_KEY_TIMEZONE)) {
-                        Settings->Timezone = json[JSON_KEY_TIMEZONE].as<String>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_TIMEZONE)) {
-                        Settings->Timezone = json[JSON_SPIFFS_KEY_TIMEZONE].as<String>();
-                    }
-                    if (json.containsKey(JSON_KEY_STATS2NV)) {
-                        Settings->saveStats = json[JSON_KEY_STATS2NV].as<bool>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_STATS2NV)) {
-                        Settings->saveStats = json[JSON_SPIFFS_KEY_STATS2NV].as<bool>();
-                    }
-                    if (json.containsKey(JSON_KEY_INVCOLOR)) {
-                        Settings->invertColors = json[JSON_KEY_INVCOLOR].as<bool>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_INVCOLOR)) {
-                        Settings->invertColors = json[JSON_SPIFFS_KEY_INVCOLOR].as<bool>();
-                    }
-                    if (json.containsKey(JSON_KEY_BRIGHTNESS)) {
-                        Settings->Brightness = json[JSON_KEY_BRIGHTNESS].as<int>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_BRIGHTNESS)) {
-                        Settings->Brightness = json[JSON_SPIFFS_KEY_BRIGHTNESS].as<int>();
-                    }
-                    if (json.containsKey(JSON_KEY_FLIPDISPLAY)) {
-                        Settings->flipDisplay = json[JSON_KEY_FLIPDISPLAY].as<bool>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_FLIPDISPLAY)) {
-                        Settings->flipDisplay = json[JSON_SPIFFS_KEY_FLIPDISPLAY].as<bool>();
-                    }
-                    if (json.containsKey(JSON_KEY_CURRENCY)) {
-                        Settings->Currency = json[JSON_KEY_CURRENCY].as<String>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_CURRENCY)) {
-                        Settings->Currency = json[JSON_SPIFFS_KEY_CURRENCY].as<String>();
-                    }
-                    if (json.containsKey(JSON_KEY_AUTOBRIGHTNESS)) {
-                        Settings->autoBrightness = json[JSON_KEY_AUTOBRIGHTNESS].as<bool>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_AUTOBRIGHTNESS)) {
-                        Settings->autoBrightness = json[JSON_SPIFFS_KEY_AUTOBRIGHTNESS].as<bool>();
-                    } else if (json.containsKey("auto_brightness")) {
-                        Settings->autoBrightness = json["auto_brightness"].as<bool>();
-                    }
-                    if (json.containsKey(JSON_KEY_SCREENOFFTIMEOUT)) {
-                        Settings->screenOffTimeout = json[JSON_KEY_SCREENOFFTIMEOUT].as<int>();
-                    } else if (json.containsKey(JSON_SPIFFS_KEY_SCREENOFFTIMEOUT)) {
-                        Settings->screenOffTimeout = json[JSON_SPIFFS_KEY_SCREENOFFTIMEOUT].as<int>();
-                    } else if (json.containsKey("screen_off_timeout")) {
-                        Settings->screenOffTimeout = json["screen_off_timeout"].as<int>();
-                    } else if (json.containsKey("screenOff")) {
-                        Settings->screenOffTimeout = json["screenOff"].as<int>();
-                    }
-                    // Serial.printf("Carteira Lida SD:%s\n", Settings.BtcWallet);       
+                    bool res = nvMemory::parseJsonConfig(json, Settings);
                     Serial.printf("Carteira Lida SDs:%s\n", Settings->BtcWallet);                       
-                    return true;
+                    return res;
                 }
                 else
                 {
