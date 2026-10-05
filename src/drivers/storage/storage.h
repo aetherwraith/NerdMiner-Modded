@@ -18,7 +18,11 @@
 #define DEFAULT_POOLPORT	3333
 #define DEFAULT_TIMEZONE	2
 #define DEFAULT_SAVESTATS	false
+#ifdef TFT_INVERSION_ON
+#define DEFAULT_INVERTCOLORS	true
+#else
 #define DEFAULT_INVERTCOLORS	false
+#endif
 #define DEFAULT_BRIGHTNESS	250
 #define DEFAULT_FLIPDISPLAY	false
 #define DEFAULT_CURRENCY	"usd"
@@ -37,6 +41,8 @@
 #define JSON_KEY_STATS2NV	"SaveStats"
 #define JSON_KEY_INVCOLOR	"invertColors"
 #define JSON_KEY_BRIGHTNESS	"Brightness"
+#define JSON_KEY_FLIPDISPLAY	"flipDisplay"
+#define JSON_KEY_CURRENCY	"Currency"
 
 // JSON config file SPIFFS (different for backward compatibility with existing devices)
 #define JSON_SPIFFS_KEY_POOLURL		"poolString"

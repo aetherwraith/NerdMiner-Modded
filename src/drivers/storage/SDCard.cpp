@@ -99,7 +99,7 @@ bool SDCard::loadConfigFile(TSettings* Settings)
             if (configFile)
             {
                 cardBusy_ = true;
-                StaticJsonDocument<512> json;
+                StaticJsonDocument<768> json;
                 DeserializationError error = deserializeJson(json, configFile);
                 configFile.close();
                 cardBusy_ = false;
@@ -109,29 +109,68 @@ bool SDCard::loadConfigFile(TSettings* Settings)
                     serializeJsonPretty(json, Serial);
                     Serial.print('\n');    
                     if (json.containsKey(JSON_KEY_SSID)) {                
-                        Settings->WifiSSID = json[JSON_KEY_SSID] | Settings->WifiSSID;
+                        Settings->WifiSSID = json[JSON_KEY_SSID].as<String>();
+                    } else if (json.containsKey("ssid")) {
+                        Settings->WifiSSID = json["ssid"].as<String>();
                     }
                     if (json.containsKey(JSON_KEY_PASW)) {
-                        Settings->WifiPW = json[JSON_KEY_PASW] | Settings->WifiPW;
+                        Settings->WifiPW = json[JSON_KEY_PASW].as<String>();
+                    } else if (json.containsKey("password")) {
+                        Settings->WifiPW = json["password"].as<String>();
                     }
-                    Settings->PoolAddress = json[JSON_KEY_POOLURL] | Settings->PoolAddress;
-                    strcpy(Settings->PoolPassword, json[JSON_KEY_POOLPASS] | Settings->PoolPassword);
-                    strcpy(Settings->BtcWallet, json[JSON_KEY_WALLETID] | Settings->BtcWallet);
-                    if (json.containsKey(JSON_KEY_POOLPORT))
+                    if (json.containsKey(JSON_KEY_POOLURL)) {
+                        Settings->PoolAddress = json[JSON_KEY_POOLURL].as<String>();
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_POOLURL)) {
+                        Settings->PoolAddress = json[JSON_SPIFFS_KEY_POOLURL].as<String>();
+                    }
+                    if (json.containsKey(JSON_KEY_POOLPASS)) {
+                        strncpy(Settings->PoolPassword, json[JSON_KEY_POOLPASS].as<const char*>(), sizeof(Settings->PoolPassword) - 1);
+                        Settings->PoolPassword[sizeof(Settings->PoolPassword) - 1] = '\0';
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_POOLPASS)) {
+                        strncpy(Settings->PoolPassword, json[JSON_SPIFFS_KEY_POOLPASS].as<const char*>(), sizeof(Settings->PoolPassword) - 1);
+                        Settings->PoolPassword[sizeof(Settings->PoolPassword) - 1] = '\0';
+                    }
+                    if (json.containsKey(JSON_KEY_WALLETID)) {
+                        strncpy(Settings->BtcWallet, json[JSON_KEY_WALLETID].as<const char*>(), sizeof(Settings->BtcWallet) - 1);
+                        Settings->BtcWallet[sizeof(Settings->BtcWallet) - 1] = '\0';
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_WALLETID)) {
+                        strncpy(Settings->BtcWallet, json[JSON_SPIFFS_KEY_WALLETID].as<const char*>(), sizeof(Settings->BtcWallet) - 1);
+                        Settings->BtcWallet[sizeof(Settings->BtcWallet) - 1] = '\0';
+                    }
+                    if (json.containsKey(JSON_KEY_POOLPORT)) {
                         Settings->PoolPort = json[JSON_KEY_POOLPORT].as<int>();
-                    if (json.containsKey(JSON_KEY_TIMEZONE))
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_POOLPORT)) {
+                        Settings->PoolPort = json[JSON_SPIFFS_KEY_POOLPORT].as<int>();
+                    }
+                    if (json.containsKey(JSON_KEY_TIMEZONE)) {
                         Settings->Timezone = json[JSON_KEY_TIMEZONE].as<int>();
-                    if (json.containsKey(JSON_KEY_STATS2NV))
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_TIMEZONE)) {
+                        Settings->Timezone = json[JSON_SPIFFS_KEY_TIMEZONE].as<int>();
+                    }
+                    if (json.containsKey(JSON_KEY_STATS2NV)) {
                         Settings->saveStats = json[JSON_KEY_STATS2NV].as<bool>();
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_STATS2NV)) {
+                        Settings->saveStats = json[JSON_SPIFFS_KEY_STATS2NV].as<bool>();
+                    }
                     if (json.containsKey(JSON_KEY_INVCOLOR)) {
                         Settings->invertColors = json[JSON_KEY_INVCOLOR].as<bool>();
-                    } else {
-                        Settings->invertColors = false;
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_INVCOLOR)) {
+                        Settings->invertColors = json[JSON_SPIFFS_KEY_INVCOLOR].as<bool>();
                     }
                     if (json.containsKey(JSON_KEY_BRIGHTNESS)) {
                         Settings->Brightness = json[JSON_KEY_BRIGHTNESS].as<int>();
-                    } else {
-                        Settings->Brightness = 250;
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_BRIGHTNESS)) {
+                        Settings->Brightness = json[JSON_SPIFFS_KEY_BRIGHTNESS].as<int>();
+                    }
+                    if (json.containsKey(JSON_KEY_FLIPDISPLAY)) {
+                        Settings->flipDisplay = json[JSON_KEY_FLIPDISPLAY].as<bool>();
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_FLIPDISPLAY)) {
+                        Settings->flipDisplay = json[JSON_SPIFFS_KEY_FLIPDISPLAY].as<bool>();
+                    }
+                    if (json.containsKey(JSON_KEY_CURRENCY)) {
+                        Settings->Currency = json[JSON_KEY_CURRENCY].as<String>();
+                    } else if (json.containsKey(JSON_SPIFFS_KEY_CURRENCY)) {
+                        Settings->Currency = json[JSON_SPIFFS_KEY_CURRENCY].as<String>();
                     }
                     // Serial.printf("Carteira Lida SD:%s\n", Settings.BtcWallet);       
                     Serial.printf("Carteira Lida SDs:%s\n", Settings->BtcWallet);                       

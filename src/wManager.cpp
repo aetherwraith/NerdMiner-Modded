@@ -249,7 +249,8 @@ void init_WifiManager()
   wm.addParameter(&time_text_box_num);
   wm.addParameter(&features_html);
   wm.addParameter(&save_stats_to_nvs);
-  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+  const bool invertAtBoot = Settings.invertColors;
   char checkboxParams2[24] = "type=\"checkbox\"";
   if (Settings.invertColors)
   {
@@ -266,7 +267,7 @@ void init_WifiManager()
   WiFiManagerParameter flipDisplay("flipDisplay", "Flip display (USB on the left instead of the right)", "T", 2, checkboxParams3, WFM_LABEL_AFTER);
   wm.addParameter(&flipDisplay);
   #endif
-  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
     char brightnessConvValue[8]; // up to "255" + NUL; was [2], overflowed on sprintf
     sprintf(brightnessConvValue, "%d", Settings.Brightness);
     // Text box (Number) - 3 characters maximum
@@ -295,11 +296,11 @@ void init_WifiManager()
             Settings.Timezone = atoi(time_text_box_num.getValue());
             //Serial.println(save_stats_to_nvs.getValue());
             Settings.saveStats = (strncmp(save_stats_to_nvs.getValue(), "T", 1) == 0);
-            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
                 Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
                 Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
             #endif
-            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
                 Settings.Brightness = atoi(brightness_text_box_num.getValue());
             #endif
             nvMem.saveConfig(&Settings);
@@ -329,11 +330,11 @@ void init_WifiManager()
                 Settings.Timezone = atoi(time_text_box_num.getValue());
                 // Serial.println(save_stats_to_nvs.getValue());
                 Settings.saveStats = (strncmp(save_stats_to_nvs.getValue(), "T", 1) == 0);
-                #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+                #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
                 Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
                 Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
                 #endif
-                #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+                #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
                 Settings.Brightness = atoi(brightness_text_box_num.getValue());
                 #endif
                 nvMem.saveConfig(&Settings);
@@ -380,15 +381,15 @@ void init_WifiManager()
         Serial.print("TimeZone fromUTC: ");
         Serial.println(Settings.Timezone);
 
-        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-        Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
+        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+        if (shouldSaveConfig) Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
         if (shouldSaveConfig) Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
         Serial.print("Invert Colors: ");
         Serial.println(Settings.invertColors);        
         #endif
 
-        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-        Settings.Brightness = atoi(brightness_text_box_num.getValue());
+        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+        if (shouldSaveConfig) Settings.Brightness = atoi(brightness_text_box_num.getValue());
         Serial.print("Brightness: ");
         Serial.println(Settings.Brightness);
         #endif
@@ -398,49 +399,12 @@ void init_WifiManager()
         setup_webConfig();
     }
 
-    // Lets deal with the user config values
-
-    // Copy the string value
-    Settings.PoolAddress = pool_text_box.getValue();
-    //strncpy(Settings.PoolAddress, pool_text_box.getValue(), sizeof(Settings.PoolAddress));
-    Serial.print("PoolString: ");
-    Serial.println(Settings.PoolAddress);
-
-    //Convert the number value
-    Settings.PoolPort = atoi(port_text_box_num.getValue());
-    Serial.print("portNumber: ");
-    Serial.println(Settings.PoolPort);
-
-    // Copy the string value
-    strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword));
-    Serial.print("poolPassword: ");
-    Serial.println(Settings.PoolPassword);
-
-    // Copy the string value
-    strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet));
-    Serial.print("btcString: ");
-    Serial.println(Settings.BtcWallet);
-
-    //Convert the number value
-    Settings.Timezone = atoi(time_text_box_num.getValue());
-    Serial.print("TimeZone fromUTC: ");
-    Serial.println(Settings.Timezone);
-
-    #ifdef ESP32_2432S028R
-    Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
-    if (shouldSaveConfig) Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
-    Serial.print("Invert Colors: ");
-    Serial.println(Settings.invertColors);
-    #endif
-
     // Save the custom parameters to FS
     if (shouldSaveConfig)
     {
         nvMem.saveConfig(&Settings);
-        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-         if (Settings.invertColors) ESP.restart();                
-        #endif
-        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+        if (Settings.invertColors != invertAtBoot) ESP.restart();
         if (Settings.Brightness != 250) ESP.restart();
         if (Settings.flipDisplay != flipAtBoot) ESP.restart(); // rotation is applied at display init
         #endif

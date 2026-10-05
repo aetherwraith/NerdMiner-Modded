@@ -166,7 +166,7 @@ Note: the login is the same on every miner (the password is the one of the setup
 
 1. Format a SD card using Fat32.
 1. Create a file named "config.json" in your card's root, containing the the following structure. Adjust the settings to your needs:
-```
+```json
 {
   "SSID": "myWifiSSID",
   "WifiPW": "myWifiPassword",
@@ -175,7 +175,11 @@ Note: the login is the same on every miner (the password is the one of the setup
   "PoolPassword": "x",
   "BtcWallet": "walletID",
   "Timezone": 2,
-  "SaveStats": false
+  "SaveStats": false,
+  "invertColors": false,
+  "Brightness": 250,
+  "flipDisplay": false,
+  "Currency": "usd"
 }
 ```
 

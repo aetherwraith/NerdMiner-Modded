@@ -1052,10 +1052,8 @@ void esp32_2432S028R_AlternateRotation(void);
 void esp32_2432S028R_Init(void)
 {
   tft.init();
-  if (nvMem.loadConfig(&Settings))
-  {
-    invertColors = Settings.invertColors;
-  }
+  nvMem.loadConfig(&Settings);
+  invertColors = Settings.invertColors;
   tft.invertDisplay(invertColors);
   tft.setRotation(Settings.flipDisplay ? 3 : 1); // 1 = USB on the right, 3 = USB on the left (touch follows automatically)
   tft.setSwapBytes(true);
