@@ -104,6 +104,7 @@ volatile uint32_t debugHitOverheadCount = 0;
 
 volatile uint32_t shares; // increase if blockhash has 32 bits of zeroes
 volatile uint32_t valids; // increased if blockhash <= target
+volatile uint32_t rejects = 0; // increased if stratum pool rejects submission
 
 // Track best diff
 double best_diff = 0.0;
@@ -537,6 +538,7 @@ void runStratumWorker(void *name) {
                                         if (itt != s_submition_map.end())
                                         {
                                           Serial.printf("Refuse submition %d\n", id);
+                                          rejects++;
                                           s_submition_map.erase(itt);
                                         }
                                       }
@@ -1839,7 +1841,7 @@ void saveStat() {
 
 void resetStat() {
     Serial.printf("[MONITOR] Resetting NVS stats\n");
-    templates = hashes = Mhashes = totalKHashes = elapsedKHs = upTime = shares = valids = 0;
+    templates = hashes = Mhashes = totalKHashes = elapsedKHs = upTime = shares = valids = rejects = 0;
     best_diff = 0.0;
     saveStat();
 }

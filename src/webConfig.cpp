@@ -12,8 +12,9 @@
 
 extern TSettings Settings;
 extern double best_diff;
-extern uint32_t shares;
-extern uint32_t valids;
+extern volatile uint32_t shares;
+extern volatile uint32_t valids;
+extern volatile uint32_t rejects;
 extern uint64_t upTime;
 
 // Basic HTTP auth for the LAN settings page. Reuses the same password as
@@ -191,17 +192,19 @@ static void handleStatus()
   float temp = temperatureRead();
 
   String json;
-  json.reserve(512);
+  json.reserve(1024);
   json += "{\"nerdminer\":true";
   json += ",\"hostname\":\"NerdMiner\"";
   json += ",\"version\":\"" + String(CURRENT_VERSION) + "\"";
   json += ",\"deviceModel\":\"NerdMiner v2\"";
   json += ",\"khash\":" + String(khs, 2);
   json += ",\"hashRate\":" + String(khs, 2);
-  json += ",\"validShares\":" + String(valids);
-  json += ",\"invalidShares\":" + String(shares > valids ? shares - valids : 0);
-  json += ",\"sharesAccepted\":" + String(valids);
-  json += ",\"sharesRejected\":" + String(shares > valids ? shares - valids : 0);
+  json += ",\"validShares\":" + String(shares);
+  json += ",\"invalidShares\":" + String(rejects);
+  json += ",\"sharesAccepted\":" + String(shares);
+  json += ",\"sharesRejected\":" + String(rejects);
+  json += ",\"validBlocks\":" + String(valids);
+  json += ",\"blockFound\":" + String(valids > 0 ? "true" : "false");
   json += ",\"bestDiff\":\"" + String(best_diff_str) + "\"";
   json += ",\"bestSessionDiff\":\"" + String(best_diff_str) + "\"";
   json += ",\"uptime\":" + String((unsigned long)upTime);
@@ -214,6 +217,18 @@ static void handleStatus()
   json += ",\"frequency\":240";
   json += ",\"macAddr\":\"" + WiFi.macAddress() + "\"";
   json += ",\"freeHeap\":" + String(ESP.getFreeHeap());
+  json += ",\"gitRepo\":\"aetherwraith/NerdMiner-Modded\"";
+  json += ",\"changelogUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
+  json += ",\"releaseNotesUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
+  json += ",\"firmwareStatus\":{\"familyKey\":\"nerdminer\"";
+  json += ",\"currentVersion\":\"" + String(CURRENT_VERSION) + "\"";
+  json += ",\"latestVersion\":\"" + String(CURRENT_VERSION) + "\"";
+  json += ",\"hasUpdate\":false";
+  json += ",\"changelogUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
+  json += ",\"releaseNotesUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
+  json += ",\"releaseName\":\"NerdMiner Modded " + String(CURRENT_VERSION) + "\"";
+  json += ",\"releaseDate\":\"2026-10-06\"";
+  json += ",\"isNativeHardwareStatus\":true}";
   json += "}";
 
   webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");

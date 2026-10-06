@@ -95,6 +95,10 @@ String printLocalTime(void);
 
 void resetStat();
 
+extern volatile uint32_t shares;
+extern volatile uint32_t valids;
+extern volatile uint32_t rejects;
+
 typedef struct{
   uint8_t bytearray_target[32];
   uint8_t bytearray_pooltarget[32];

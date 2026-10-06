@@ -20,8 +20,8 @@ extern uint32_t totalKHashes;
 extern uint32_t elapsedKHs;
 extern uint64_t upTime;
 
-extern uint32_t shares; // increase if blockhash has 32 bits of zeroes
-extern uint32_t valids; // increased if blockhash <= targethalfshares
+extern volatile uint32_t shares; // increase if blockhash has 32 bits of zeroes
+extern volatile uint32_t valids; // increased if blockhash <= targethalfshares
 
 extern double best_diff; // track best diff
 
