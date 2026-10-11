@@ -41,6 +41,9 @@ bool nvMemory::saveConfig(TSettings* Settings)
         json[JSON_SPIFFS_KEY_CURRENCY] = Settings->Currency;
         json[JSON_SPIFFS_KEY_AUTOBRIGHTNESS] = Settings->autoBrightness;
         json[JSON_SPIFFS_KEY_SCREENOFFTIMEOUT] = Settings->screenOffTimeout;
+#ifdef NO_DISPLAY
+        json[JSON_SPIFFS_KEY_STATUSLED] = Settings->statusLed;
+#endif
 
         // Open config file
         File configFile = SPIFFS.open(JSON_CONFIG_FILE, "w");
@@ -139,6 +142,9 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     // Display & timeouts
     Settings->Brightness = getJsonInt(json, Settings->Brightness, JSON_SPIFFS_KEY_BRIGHTNESS, JSON_KEY_BRIGHTNESS);
     Settings->screenOffTimeout = getJsonInt(json, Settings->screenOffTimeout, JSON_SPIFFS_KEY_SCREENOFFTIMEOUT, JSON_KEY_SCREENOFFTIMEOUT, "screen_off_timeout", "screenOff");
+#ifdef NO_DISPLAY
+    Settings->statusLed = getJsonBool(json, Settings->statusLed, JSON_SPIFFS_KEY_STATUSLED, "statusLed", "led");
+#endif
 
     return true;
 }

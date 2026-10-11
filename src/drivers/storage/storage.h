@@ -28,6 +28,7 @@
 #define DEFAULT_CURRENCY	"usd"
 #define DEFAULT_AUTOBRIGHTNESS	false
 #define DEFAULT_SCREENOFFTIMEOUT	0
+#define DEFAULT_STATUSLED	true
 
 // JSON config files
 #define JSON_CONFIG_FILE	"/config.json"
@@ -61,6 +62,7 @@
 #define JSON_SPIFFS_KEY_CURRENCY	"currency"
 #define JSON_SPIFFS_KEY_AUTOBRIGHTNESS	"autoBrightness"
 #define JSON_SPIFFS_KEY_SCREENOFFTIMEOUT	"screenOffTimeout"
+#define JSON_SPIFFS_KEY_STATUSLED	"statusLed"
 
 // settings
 struct TSettings
@@ -79,6 +81,7 @@ struct TSettings
 	String Currency{ DEFAULT_CURRENCY };	// fiat currency for the BTC price (CoinGecko vs_currency code)
 	bool autoBrightness{ DEFAULT_AUTOBRIGHTNESS }; // automatic screen brightness via LDR sensor
 	int screenOffTimeout{ DEFAULT_SCREENOFFTIMEOUT }; // auto screen off timeout in seconds (0 = disabled)
+	bool statusLed{ DEFAULT_STATUSLED };	// boards without a screen: status LED on/off
 };
 
 #endif // _STORAGE_H_

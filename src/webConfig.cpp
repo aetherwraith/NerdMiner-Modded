@@ -3,6 +3,7 @@
 #include <WebServer.h>
 #include "webConfig.h"
 #include "wManager.h"
+#include "drivers/devices/device.h"
 #include "drivers/storage/storage.h"
 #include "currency.h"
 #include "timezone.h"
@@ -128,6 +129,9 @@ static void handleRoot()
   page += "<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='" + String(Settings.Brightness) + "'>";
   page += "<label>Auto screen off timeout (seconds, 0 = disabled)</label><input type='number' name='screenoff' min='0' max='86400' value='" + String(Settings.screenOffTimeout) + "'>";
 #endif
+#ifdef NO_DISPLAY
+  page += "<label><input type='checkbox' name='led' " + String(Settings.statusLed ? "checked" : "") + "> Status LED (blinks while mining)</label>";
+#endif
   page += F("<input type='submit' value='Save &amp; Restart'>"
             "</form></body></html>");
 
@@ -162,6 +166,9 @@ static void handleSave()
     Settings.Brightness = webCfgServer.arg("brightness").toInt();
   if (webCfgServer.hasArg("screenoff"))
     Settings.screenOffTimeout = webCfgServer.arg("screenoff").toInt();
+#endif
+#ifdef NO_DISPLAY
+  Settings.statusLed = webCfgServer.hasArg("led");
 #endif
 
   saveSettingsToFlash();
