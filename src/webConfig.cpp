@@ -13,6 +13,8 @@
 #include "version.h"
 #include "utils.h"
 #include "cities.h"
+#include "drivers/storage/nvMemory.h"
+#include <ArduinoJson.h>
 
 extern TSettings Settings;
 extern double best_diff;
@@ -206,6 +208,8 @@ static void handleRoot()
   webCfgServer.sendContent(""); // ends the chunked response
 }
 
+static bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut);
+
 static void handleSave()
 {
   if (!checkAuth())
@@ -261,7 +265,42 @@ static void handleSave()
   next.statusLed = webCfgServer.hasArg("led");
 #endif
 
-  saveSettingsToFlash(&next);
+  bool poolChanged = false;
+  bool restart = applyLiveSettings(before, next, poolChanged);
+
+  if (!restart)
+  {
+    String msg = poolChanged ? F("<p>Saved. Reconnecting to the pool with the new settings...</p>")
+                             : F("<p>Saved and applied.</p>");
+    webCfgServer.send(200, "text/html",
+                      "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                      "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                      "<meta http-equiv='refresh' content='3;url=/'></head>"
+                      "<body style='font-family:sans-serif'>" + msg +
+                      "<p><a href='/'>Back to settings</a></p></body></html>");
+    return;
+  }
+
+  // The page polls until the device is back up, then returns to the settings
+  // page so the browser isn't left sitting on /save.
+  webCfgServer.send(200, "text/html",
+                     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                     "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
+                     "<body style='font-family:sans-serif'>"
+                     "<p>Saved. Restarting device...</p>"
+                     "<p><a href='/'>Back to settings</a></p>"
+                     "<script>function p(){fetch('/',{cache:'no-store'})"
+                     ".then(function(r){if(r.ok||r.status==401)location.replace('/');else setTimeout(p,1500)})"
+                     ".catch(function(){setTimeout(p,1500)})}setTimeout(p,4000);</script>"
+                     "</body></html>");
+
+  delay(1000);
+  ESP.restart();
+}
+
+static bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut)
+{
+  saveSettingsToFlash(const_cast<TSettings*>(&next));
 
   const bool restart = next.invertColors != before.invertColors || next.flipDisplay != before.flipDisplay;
   if (!restart)
@@ -269,6 +308,7 @@ static void handleSave()
     const bool poolChanged = next.PoolAddress != before.PoolAddress || next.PoolPort != before.PoolPort ||
                              strcmp(next.BtcWallet, before.BtcWallet) != 0 ||
                              strcmp(next.PoolPassword, before.PoolPassword) != 0;
+    poolChangedOut = poolChanged;
     if (poolChanged)
       requestPoolChange(next); // stratum task reconnects
     if (!next.Currency.equalsIgnoreCase(before.Currency))
@@ -296,33 +336,144 @@ static void handleSave()
 #ifdef NO_DISPLAY
     Settings.statusLed = next.statusLed;
 #endif
+    return false; // no restart needed
+  }
+  return true; // restart needed
+}
 
-    String msg = poolChanged ? F("<p>Saved. Reconnecting to the pool with the new settings...</p>")
-                             : F("<p>Saved and applied.</p>");
-    webCfgServer.send(200, "text/html",
-                      "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                      "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-                      "<meta http-equiv='refresh' content='3;url=/'></head>"
-                      "<body style='font-family:sans-serif'>" + msg +
-                      "<p><a href='/'>Back to settings</a></p></body></html>");
-    return;
+static void handleGetConfig()
+{
+  const TSettings s = currentSettings();
+  String json;
+  json.reserve(896);
+  json += "{";
+  json += "\"pool\":\"" + htmlEscape(s.PoolAddress) + "\"";
+  json += ",\"port\":" + String(s.PoolPort);
+  json += ",\"wallet\":\"" + htmlEscape(String(s.BtcWallet)) + "\"";
+  json += ",\"poolPassword\":\"" + htmlEscape(String(s.PoolPassword)) + "\"";
+  json += ",\"currency\":\"" + htmlEscape(s.Currency) + "\"";
+  json += ",\"timezone\":\"" + htmlEscape(s.Timezone) + "\"";
+  json += ",\"saveStats\":" + String(s.saveStats ? "true" : "false");
+  json += ",\"brightness\":" + String(s.Brightness);
+  json += ",\"autoBrightness\":" + String(s.autoBrightness ? "true" : "false");
+  json += ",\"screenTimeout\":" + String(s.ScreenTimeout);
+  json += ",\"nightDim\":" + String(s.nightDim ? "true" : "false");
+  json += ",\"nightBrightness\":" + String(s.NightBrightness);
+  json += ",\"nightFade\":" + String(s.NightFade);
+  json += ",\"latitude\":" + String(s.Latitude, 4);
+  json += ",\"longitude\":" + String(s.Longitude, 4);
+  json += ",\"invertColors\":" + String(s.invertColors ? "true" : "false");
+  json += ",\"flipDisplay\":" + String(s.flipDisplay ? "true" : "false");
+#ifdef NO_DISPLAY
+  json += ",\"statusLed\":" + String(s.statusLed ? "true" : "false");
+#endif
+  // Bitaxe / AxeOS / NMMiner / Wotcha aliases for seamless integration:
+  json += ",\"stratumURL\":\"" + htmlEscape(s.PoolAddress) + "\"";
+  json += ",\"stratumPort\":" + String(s.PoolPort);
+  json += ",\"stratumUser\":\"" + htmlEscape(String(s.BtcWallet)) + "\"";
+  json += ",\"PrimaryPool\":\"" + htmlEscape(s.PoolAddress) + "\"";
+  json += ",\"PrimaryAddress\":\"" + htmlEscape(String(s.BtcWallet)) + "\"";
+  json += ",\"version\":\"" + String(CURRENT_VERSION) + "\"";
+  json += "}";
+
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  webCfgServer.send(200, "application/json", json);
+}
+
+static void handlePostConfig()
+{
+  const TSettings before = currentSettings();
+  TSettings next = before;
+
+  StaticJsonDocument<1024> doc;
+  DeserializationError err = DeserializationError::EmptyInput;
+  if (webCfgServer.hasArg("plain")) {
+    err = deserializeJson(doc, webCfgServer.arg("plain"));
   }
 
-  // The page polls until the device is back up, then returns to the settings
-  // page so the browser isn't left sitting on /save.
-  webCfgServer.send(200, "text/html",
-                     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                     "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
-                     "<body style='font-family:sans-serif'>"
-                     "<p>Saved. Restarting device...</p>"
-                     "<p><a href='/'>Back to settings</a></p>"
-                     "<script>function p(){fetch('/',{cache:'no-store'})"
-                     ".then(function(r){if(r.ok||r.status==401)location.replace('/');else setTimeout(p,1500)})"
-                     ".catch(function(){setTimeout(p,1500)})}setTimeout(p,4000);</script>"
-                     "</body></html>");
+  if (err) {
+    for (int i = 0; i < webCfgServer.args(); i++) {
+      String name = webCfgServer.argName(i);
+      if (name != "plain") {
+        doc[name] = webCfgServer.arg(i);
+      }
+    }
+  }
 
-  delay(1000);
-  ESP.restart();
+  nvMemory::parseJsonConfig(doc, &next);
+
+  if (doc.containsKey("currency")) {
+    next.Currency = currencyFor(doc["currency"].as<String>()).code;
+  }
+
+  next.Brightness = constrain(next.Brightness, 0, 255);
+  next.NightBrightness = constrain(next.NightBrightness, 1, 255);
+  next.NightFade = constrain(next.NightFade, 1, 240);
+  next.ScreenTimeout = constrain(next.ScreenTimeout, 0, 1440);
+  next.Latitude = constrain(next.Latitude, -90.0f, 90.0f);
+  next.Longitude = constrain(next.Longitude, -180.0f, 180.0f);
+
+  bool poolChanged = false;
+  bool restart = applyLiveSettings(before, next, poolChanged);
+
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (restart) {
+    webCfgServer.send(200, "application/json", "{\"success\":true,\"message\":\"Settings saved. Restarting device for display changes...\",\"rebootRequired\":true}");
+    delay(1000);
+    ESP.restart();
+  } else {
+    String resp = "{\"success\":true,\"message\":\"Settings saved and applied live.\",\"rebootRequired\":false";
+    if (poolChanged) resp += ",\"poolChanged\":true";
+    resp += "}";
+    webCfgServer.send(200, "application/json", resp);
+  }
+}
+
+static void handleConfigRoute()
+{
+  HTTPMethod m = webCfgServer.method();
+  if (m == HTTP_OPTIONS) {
+    webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+    webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+    webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    webCfgServer.send(204);
+    return;
+  }
+  if (m == HTTP_GET) {
+    handleGetConfig();
+    return;
+  }
+  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
+    handlePostConfig();
+    return;
+  }
+  webCfgServer.send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+}
+
+static void handleProbe()
+{
+  char best_diff_str[16] = {0};
+  suffix_string(best_diff, best_diff_str, sizeof(best_diff_str), 0);
+
+  double khs = getHashrateKhs();
+  uint32_t hr_hs = (uint32_t)(khs * 1000.0);
+
+  String json;
+  json.reserve(128);
+  json += "{\"hr\":" + String(hr_hs);
+  json += ",\"ut\":" + String((unsigned long)upTime);
+  json += ",\"ebd\":\"" + String(best_diff_str) + "\"";
+  json += ",\"sbd\":\"" + String(best_diff_str) + "\"";
+  json += ",\"temp\":" + String(temperatureRead(), 1);
+  json += "}";
+
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.send(200, "application/json", json);
 }
 
 static void handleStatus()
@@ -393,8 +544,13 @@ void setup_webConfig(void)
   webCfgServer.on("/", HTTP_GET, handleRoot);
   webCfgServer.on("/save", HTTP_POST, handleSave);
   webCfgServer.on("/status", HTTP_GET, handleStatus);
+  webCfgServer.on("/probe", HTTP_GET, handleProbe);
   webCfgServer.on("/api/system/info", HTTP_GET, handleStatus);
   webCfgServer.on("/api/system/restart", HTTP_POST, handleRestart);
+  webCfgServer.on("/api/system/config", handleConfigRoute);
+  webCfgServer.on("/api/config", handleConfigRoute);
+  webCfgServer.on("/api/system", handleConfigRoute);
+  webCfgServer.on("/api/setting/mining", handleConfigRoute);
   webCfgServer.onNotFound([]()
   {
     webCfgServer.sendHeader("Location", "/");

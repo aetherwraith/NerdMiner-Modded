@@ -5,6 +5,7 @@
 #include <SPIFFS.h>
 #include <FS.h>
 #include <ArduinoJson.h>
+#include <initializer_list>
 
 #include "../devices/device.h"
 #include "storage.h"
@@ -76,28 +77,35 @@ bool nvMemory::saveConfig(TSettings* Settings)
     return false;
 }
 
-static String getJsonString(const JsonDocument& doc, const char* k1, const char* k2 = nullptr, const char* k3 = nullptr)
+static String getJsonString(const JsonDocument& doc, std::initializer_list<const char*> keys)
 {
-    if (k1 && doc.containsKey(k1)) return doc[k1].as<String>();
-    if (k2 && doc.containsKey(k2)) return doc[k2].as<String>();
-    if (k3 && doc.containsKey(k3)) return doc[k3].as<String>();
+    for (const char* k : keys) {
+        if (k && doc.containsKey(k)) return doc[k].as<String>();
+    }
     return "";
 }
 
-static int getJsonInt(const JsonDocument& doc, int defaultVal, const char* k1, const char* k2 = nullptr, const char* k3 = nullptr, const char* k4 = nullptr)
+static int getJsonInt(const JsonDocument& doc, int defaultVal, std::initializer_list<const char*> keys)
 {
-    if (k1 && doc.containsKey(k1)) return doc[k1].as<int>();
-    if (k2 && doc.containsKey(k2)) return doc[k2].as<int>();
-    if (k3 && doc.containsKey(k3)) return doc[k3].as<int>();
-    if (k4 && doc.containsKey(k4)) return doc[k4].as<int>();
+    for (const char* k : keys) {
+        if (k && doc.containsKey(k)) return doc[k].as<int>();
+    }
     return defaultVal;
 }
 
-static bool getJsonBool(const JsonDocument& doc, bool defaultVal, const char* k1, const char* k2 = nullptr, const char* k3 = nullptr)
+static float getJsonFloat(const JsonDocument& doc, float defaultVal, std::initializer_list<const char*> keys)
 {
-    if (k1 && doc.containsKey(k1)) return doc[k1].as<bool>();
-    if (k2 && doc.containsKey(k2)) return doc[k2].as<bool>();
-    if (k3 && doc.containsKey(k3)) return doc[k3].as<bool>();
+    for (const char* k : keys) {
+        if (k && doc.containsKey(k)) return doc[k].as<float>();
+    }
+    return defaultVal;
+}
+
+static bool getJsonBool(const JsonDocument& doc, bool defaultVal, std::initializer_list<const char*> keys)
+{
+    for (const char* k : keys) {
+        if (k && doc.containsKey(k)) return doc[k].as<bool>();
+    }
     return defaultVal;
 }
 
@@ -105,67 +113,70 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
 {
     if (!Settings) return false;
 
-    // WiFi credentials (supported from SDCard or SPIFFS)
-    String ssid = getJsonString(json, JSON_KEY_SSID, "ssid");
+    // WiFi credentials (supported from SDCard, SPIFFS, or API)
+    String ssid = getJsonString(json, {JSON_KEY_SSID, "ssid", "wifiSSID"});
     if (ssid.length() > 0) Settings->WifiSSID = ssid;
 
-    String pw = getJsonString(json, JSON_KEY_PASW, "password");
+    String pw = getJsonString(json, {JSON_KEY_PASW, "password", "wifiPW"});
     if (pw.length() > 0) Settings->WifiPW = pw;
 
-    // Pool connection
-    String pool = getJsonString(json, JSON_SPIFFS_KEY_POOLURL, JSON_KEY_POOLURL);
-    if (pool.length() > 0) Settings->PoolAddress = pool;
+    // Pool connection (supports "stratum+tcp://host:port" or "host" + "port")
+    String pool = getJsonString(json, {JSON_SPIFFS_KEY_POOLURL, JSON_KEY_POOLURL, "pool", "stratumURL", "PrimaryPool"});
+    if (pool.length() > 0) {
+        if (pool.startsWith("stratum+tcp://")) pool = pool.substring(14);
+        else if (pool.startsWith("stratum://")) pool = pool.substring(10);
+        else if (pool.startsWith("tcp://")) pool = pool.substring(6);
+        int colonIdx = pool.lastIndexOf(':');
+        if (colonIdx > 0) {
+            int parsedPort = pool.substring(colonIdx + 1).toInt();
+            if (parsedPort > 0) Settings->PoolPort = parsedPort;
+            pool = pool.substring(0, colonIdx);
+        }
+        Settings->PoolAddress = pool;
+    }
 
-    Settings->PoolPort = getJsonInt(json, Settings->PoolPort, JSON_SPIFFS_KEY_POOLPORT, JSON_KEY_POOLPORT);
+    Settings->PoolPort = getJsonInt(json, Settings->PoolPort, {JSON_SPIFFS_KEY_POOLPORT, JSON_KEY_POOLPORT, "port", "stratumPort"});
 
     // Credentials
-    String pass = getJsonString(json, JSON_SPIFFS_KEY_POOLPASS, JSON_KEY_POOLPASS);
+    String pass = getJsonString(json, {JSON_SPIFFS_KEY_POOLPASS, JSON_KEY_POOLPASS, "poolpass", "poolPassword", "stratumPassword", "PrimaryPassword"});
     if (pass.length() > 0) {
         strncpy(Settings->PoolPassword, pass.c_str(), sizeof(Settings->PoolPassword) - 1);
         Settings->PoolPassword[sizeof(Settings->PoolPassword) - 1] = '\0';
     }
 
-    String wallet = getJsonString(json, JSON_SPIFFS_KEY_WALLETID, JSON_KEY_WALLETID);
+    String wallet = getJsonString(json, {JSON_SPIFFS_KEY_WALLETID, JSON_KEY_WALLETID, "wallet", "btcWallet", "stratumUser", "PrimaryAddress"});
     if (wallet.length() > 0) {
         strncpy(Settings->BtcWallet, wallet.c_str(), sizeof(Settings->BtcWallet) - 1);
         Settings->BtcWallet[sizeof(Settings->BtcWallet) - 1] = '\0';
     }
 
     // Timezone
-    String tz = getJsonString(json, JSON_SPIFFS_KEY_TIMEZONE, JSON_KEY_TIMEZONE);
+    String tz = getJsonString(json, {JSON_SPIFFS_KEY_TIMEZONE, JSON_KEY_TIMEZONE, "timezone", "tz"});
     if (tz.length() > 0) Settings->Timezone = tz;
 
     // Currency
-    String cur = getJsonString(json, JSON_SPIFFS_KEY_CURRENCY, JSON_KEY_CURRENCY);
+    String cur = getJsonString(json, {JSON_SPIFFS_KEY_CURRENCY, JSON_KEY_CURRENCY, "currency"});
     if (cur.length() > 0) Settings->Currency = cur;
 
     // Booleans
-    Settings->saveStats = getJsonBool(json, Settings->saveStats, JSON_SPIFFS_KEY_STATS2NV, JSON_KEY_STATS2NV);
-    Settings->invertColors = getJsonBool(json, Settings->invertColors, JSON_SPIFFS_KEY_INVCOLOR, JSON_KEY_INVCOLOR);
-    Settings->flipDisplay = getJsonBool(json, Settings->flipDisplay, JSON_SPIFFS_KEY_FLIPDISPLAY, JSON_KEY_FLIPDISPLAY);
-    Settings->autoBrightness = getJsonBool(json, Settings->autoBrightness, JSON_SPIFFS_KEY_AUTOBRIGHTNESS, JSON_KEY_AUTOBRIGHTNESS, "auto_brightness");
+    Settings->saveStats = getJsonBool(json, Settings->saveStats, {JSON_SPIFFS_KEY_STATS2NV, JSON_KEY_STATS2NV, "savestats", "saveStats"});
+    Settings->invertColors = getJsonBool(json, Settings->invertColors, {JSON_SPIFFS_KEY_INVCOLOR, JSON_KEY_INVCOLOR, "invert", "invertColors"});
+    Settings->flipDisplay = getJsonBool(json, Settings->flipDisplay, {JSON_SPIFFS_KEY_FLIPDISPLAY, JSON_KEY_FLIPDISPLAY, "flip", "flipDisplay"});
+    Settings->autoBrightness = getJsonBool(json, Settings->autoBrightness, {JSON_SPIFFS_KEY_AUTOBRIGHTNESS, JSON_KEY_AUTOBRIGHTNESS, "autobrightness", "autoBrightness", "auto_brightness"});
 
     // Display & timeouts
-    Settings->Brightness = getJsonInt(json, Settings->Brightness, JSON_SPIFFS_KEY_BRIGHTNESS, JSON_KEY_BRIGHTNESS);
-    Settings->screenOffTimeout = getJsonInt(json, Settings->screenOffTimeout, JSON_SPIFFS_KEY_SCREENOFFTIMEOUT, JSON_KEY_SCREENOFFTIMEOUT, "screen_off_timeout", "screenOff");
-    Settings->ScreenTimeout = getJsonInt(json, Settings->ScreenTimeout, JSON_SPIFFS_KEY_SCREENTIMEOUT, "screenTimeout", "ScreenTimeout");
-    Settings->nightDim = getJsonBool(json, Settings->nightDim, JSON_SPIFFS_KEY_NIGHTDIM, "nightDim");
-    Settings->NightBrightness = getJsonInt(json, Settings->NightBrightness, JSON_SPIFFS_KEY_NIGHTBRIGHTNESS, "nightBrightness", "NightBrightness");
-    Settings->NightFade = getJsonInt(json, Settings->NightFade, JSON_SPIFFS_KEY_NIGHTFADE, "nightFade", "NightFade");
+    Settings->Brightness = getJsonInt(json, Settings->Brightness, {JSON_SPIFFS_KEY_BRIGHTNESS, JSON_KEY_BRIGHTNESS, "brightness"});
+    Settings->screenOffTimeout = getJsonInt(json, Settings->screenOffTimeout, {JSON_SPIFFS_KEY_SCREENOFFTIMEOUT, JSON_KEY_SCREENOFFTIMEOUT, "screen_off_timeout", "screenOff"});
+    Settings->ScreenTimeout = getJsonInt(json, Settings->ScreenTimeout, {JSON_SPIFFS_KEY_SCREENTIMEOUT, "screenTimeout", "ScreenTimeout", "screenoff"});
+    Settings->nightDim = getJsonBool(json, Settings->nightDim, {JSON_SPIFFS_KEY_NIGHTDIM, "nightDim", "nightdim"});
+    Settings->NightBrightness = getJsonInt(json, Settings->NightBrightness, {JSON_SPIFFS_KEY_NIGHTBRIGHTNESS, "nightBrightness", "NightBrightness", "nightbright"});
+    Settings->NightFade = getJsonInt(json, Settings->NightFade, {JSON_SPIFFS_KEY_NIGHTFADE, "nightFade", "NightFade", "nightfade"});
 
-    if (json.containsKey(JSON_SPIFFS_KEY_LATITUDE)) {
-        Settings->Latitude = json[JSON_SPIFFS_KEY_LATITUDE].as<float>();
-    } else if (json.containsKey("latitude")) {
-        Settings->Latitude = json["latitude"].as<float>();
-    }
-    if (json.containsKey(JSON_SPIFFS_KEY_LONGITUDE)) {
-        Settings->Longitude = json[JSON_SPIFFS_KEY_LONGITUDE].as<float>();
-    } else if (json.containsKey("longitude")) {
-        Settings->Longitude = json["longitude"].as<float>();
-    }
+    Settings->Latitude = getJsonFloat(json, Settings->Latitude, {JSON_SPIFFS_KEY_LATITUDE, "latitude", "lat"});
+    Settings->Longitude = getJsonFloat(json, Settings->Longitude, {JSON_SPIFFS_KEY_LONGITUDE, "longitude", "lon"});
 
 #ifdef NO_DISPLAY
-    Settings->statusLed = getJsonBool(json, Settings->statusLed, JSON_SPIFFS_KEY_STATUSLED, "statusLed", "led");
+    Settings->statusLed = getJsonBool(json, Settings->statusLed, {JSON_SPIFFS_KEY_STATUSLED, "statusLed", "led"});
 #endif
 
     return true;
