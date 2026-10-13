@@ -344,8 +344,23 @@ static bool applyLiveSettings(const TSettings &before, const TSettings &next, bo
 static void handleGetConfig()
 {
   const TSettings s = currentSettings();
+  const TimeZoneInfo* tzInfo = findTimeZone(s.Timezone);
+  String tzPosix = getPosixTz(s.Timezone);
+  String tzLabel = tzInfo ? String(tzInfo->label) : s.Timezone;
+
+  unsigned long h = 0, min = 0, sec = 0;
+  getTime(&h, &min, &sec);
+  char timeBuf[12];
+  snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu:%02lu", h, min, sec);
+
+  struct tm timeinfo;
+  bool dstActive = false;
+  if (getLocalTime(&timeinfo, 10)) {
+    dstActive = timeinfo.tm_isdst > 0;
+  }
+
   String json;
-  json.reserve(896);
+  json.reserve(1024);
   json += "{";
   json += "\"pool\":\"" + htmlEscape(s.PoolAddress) + "\"";
   json += ",\"port\":" + String(s.PoolPort);
@@ -353,6 +368,11 @@ static void handleGetConfig()
   json += ",\"poolPassword\":\"" + htmlEscape(String(s.PoolPassword)) + "\"";
   json += ",\"currency\":\"" + htmlEscape(s.Currency) + "\"";
   json += ",\"timezone\":\"" + htmlEscape(s.Timezone) + "\"";
+  json += ",\"timezoneLabel\":\"" + htmlEscape(tzLabel) + "\"";
+  json += ",\"timezonePosix\":\"" + htmlEscape(tzPosix) + "\"";
+  json += ",\"localTime\":\"" + String(timeBuf) + "\"";
+  json += ",\"localDate\":\"" + getDate() + "\"";
+  json += ",\"dstActive\":" + String(dstActive ? "true" : "false");
   json += ",\"saveStats\":" + String(s.saveStats ? "true" : "false");
   json += ",\"brightness\":" + String(s.Brightness);
   json += ",\"autoBrightness\":" + String(s.autoBrightness ? "true" : "false");
@@ -380,6 +400,99 @@ static void handleGetConfig()
   webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
   webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   webCfgServer.send(200, "application/json", json);
+}
+
+static void handleTimezoneEndpoint()
+{
+  HTTPMethod m = webCfgServer.method();
+  if (m == HTTP_OPTIONS) {
+    webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+    webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+    webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    webCfgServer.send(204);
+    return;
+  }
+
+  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
+    String newTz = "";
+    if (webCfgServer.hasArg("plain")) {
+      StaticJsonDocument<256> doc;
+      if (!deserializeJson(doc, webCfgServer.arg("plain"))) {
+        if (doc.containsKey("timezone")) newTz = doc["timezone"].as<String>();
+        else if (doc.containsKey("tz")) newTz = doc["tz"].as<String>();
+        else if (doc.containsKey("posix")) newTz = doc["posix"].as<String>();
+      }
+    }
+    if (newTz.isEmpty() && webCfgServer.hasArg("timezone")) newTz = webCfgServer.arg("timezone");
+    if (newTz.isEmpty() && webCfgServer.hasArg("tz")) newTz = webCfgServer.arg("tz");
+
+    if (newTz.length() > 0) {
+      TSettings next = currentSettings();
+      next.Timezone = newTz;
+      bool poolChanged = false;
+      applyLiveSettings(currentSettings(), next, poolChanged);
+    }
+  }
+
+  const TSettings s = currentSettings();
+  const TimeZoneInfo* info = findTimeZone(s.Timezone);
+  String posix = getPosixTz(s.Timezone);
+  String label = info ? String(info->label) : s.Timezone;
+
+  unsigned long h = 0, min = 0, sec = 0;
+  getTime(&h, &min, &sec);
+  char timeBuf[12];
+  snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu:%02lu", h, min, sec);
+
+  struct tm timeinfo;
+  bool dstActive = false;
+  if (getLocalTime(&timeinfo, 10)) {
+    dstActive = timeinfo.tm_isdst > 0;
+  }
+
+  String json;
+  json.reserve(320);
+  json += "{\"timezone\":\"" + htmlEscape(s.Timezone) + "\"";
+  json += ",\"label\":\"" + htmlEscape(label) + "\"";
+  json += ",\"posix\":\"" + htmlEscape(posix) + "\"";
+  json += ",\"localTime\":\"" + String(timeBuf) + "\"";
+  json += ",\"localDate\":\"" + getDate() + "\"";
+  json += ",\"dstActive\":" + String(dstActive ? "true" : "false");
+  json += "}";
+
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  webCfgServer.send(200, "application/json", json);
+}
+
+static void handleTimezonesList()
+{
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (webCfgServer.method() == HTTP_OPTIONS) {
+    webCfgServer.send(204);
+    return;
+  }
+
+  webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webCfgServer.send(200, "application/json", "[");
+  for (int i = 0; i < kTimeZoneCount; i++) {
+    String entry;
+    entry.reserve(160);
+    if (i > 0) entry += ",";
+    entry += "{\"id\":\"";
+    entry += kTimeZones[i].id;
+    entry += "\",\"label\":\"";
+    entry += kTimeZones[i].label;
+    entry += "\",\"posix\":\"";
+    entry += kTimeZones[i].posix;
+    entry += "\"}";
+    webCfgServer.sendContent(entry);
+  }
+  webCfgServer.sendContent("]");
+  webCfgServer.sendContent("");
 }
 
 static void handlePostConfig()
@@ -551,6 +664,10 @@ void setup_webConfig(void)
   webCfgServer.on("/api/config", handleConfigRoute);
   webCfgServer.on("/api/system", handleConfigRoute);
   webCfgServer.on("/api/setting/mining", handleConfigRoute);
+  webCfgServer.on("/api/system/timezone", handleTimezoneEndpoint);
+  webCfgServer.on("/api/timezone", handleTimezoneEndpoint);
+  webCfgServer.on("/api/system/timezones", handleTimezonesList);
+  webCfgServer.on("/api/timezones", handleTimezonesList);
   webCfgServer.onNotFound([]()
   {
     webCfgServer.sendHeader("Location", "/");

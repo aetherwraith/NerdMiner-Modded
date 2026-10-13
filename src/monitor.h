@@ -136,6 +136,8 @@ pool_data getPoolData(void);
 clock_data_t getClockData_t(unsigned long mElapsed);
 double getHashrateKhs(void);
 bool getUtcTime(time_t &utc, bool sync = false);
+void getTime(unsigned long* currentHours, unsigned long* currentMinutes, unsigned long* currentSeconds);
+String getDate(void);
 
 // Settings changed on the LAN settings page without a restart. The monitor
 // task (screens, price, pool stats) applies them itself, between screen
