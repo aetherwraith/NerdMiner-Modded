@@ -28,7 +28,7 @@ bool nvMemory::saveConfig(TSettings* Settings)
         Serial.println(F("SPIFS: Saving configuration."));
 
         // Create a JSON document
-        StaticJsonDocument<768> json;
+        StaticJsonDocument<1024> json;
         json[JSON_SPIFFS_KEY_POOLURL] = Settings->PoolAddress;
         json[JSON_SPIFFS_KEY_POOLPORT] = Settings->PoolPort;
         json[JSON_SPIFFS_KEY_POOLPASS] = Settings->PoolPassword;
@@ -41,6 +41,12 @@ bool nvMemory::saveConfig(TSettings* Settings)
         json[JSON_SPIFFS_KEY_CURRENCY] = Settings->Currency;
         json[JSON_SPIFFS_KEY_AUTOBRIGHTNESS] = Settings->autoBrightness;
         json[JSON_SPIFFS_KEY_SCREENOFFTIMEOUT] = Settings->screenOffTimeout;
+        json[JSON_SPIFFS_KEY_SCREENTIMEOUT] = Settings->ScreenTimeout;
+        json[JSON_SPIFFS_KEY_NIGHTDIM] = Settings->nightDim;
+        json[JSON_SPIFFS_KEY_NIGHTBRIGHTNESS] = Settings->NightBrightness;
+        json[JSON_SPIFFS_KEY_NIGHTFADE] = Settings->NightFade;
+        json[JSON_SPIFFS_KEY_LATITUDE] = Settings->Latitude;
+        json[JSON_SPIFFS_KEY_LONGITUDE] = Settings->Longitude;
 #ifdef NO_DISPLAY
         json[JSON_SPIFFS_KEY_STATUSLED] = Settings->statusLed;
 #endif
@@ -142,6 +148,22 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     // Display & timeouts
     Settings->Brightness = getJsonInt(json, Settings->Brightness, JSON_SPIFFS_KEY_BRIGHTNESS, JSON_KEY_BRIGHTNESS);
     Settings->screenOffTimeout = getJsonInt(json, Settings->screenOffTimeout, JSON_SPIFFS_KEY_SCREENOFFTIMEOUT, JSON_KEY_SCREENOFFTIMEOUT, "screen_off_timeout", "screenOff");
+    Settings->ScreenTimeout = getJsonInt(json, Settings->ScreenTimeout, JSON_SPIFFS_KEY_SCREENTIMEOUT, "screenTimeout", "ScreenTimeout");
+    Settings->nightDim = getJsonBool(json, Settings->nightDim, JSON_SPIFFS_KEY_NIGHTDIM, "nightDim");
+    Settings->NightBrightness = getJsonInt(json, Settings->NightBrightness, JSON_SPIFFS_KEY_NIGHTBRIGHTNESS, "nightBrightness", "NightBrightness");
+    Settings->NightFade = getJsonInt(json, Settings->NightFade, JSON_SPIFFS_KEY_NIGHTFADE, "nightFade", "NightFade");
+
+    if (json.containsKey(JSON_SPIFFS_KEY_LATITUDE)) {
+        Settings->Latitude = json[JSON_SPIFFS_KEY_LATITUDE].as<float>();
+    } else if (json.containsKey("latitude")) {
+        Settings->Latitude = json["latitude"].as<float>();
+    }
+    if (json.containsKey(JSON_SPIFFS_KEY_LONGITUDE)) {
+        Settings->Longitude = json[JSON_SPIFFS_KEY_LONGITUDE].as<float>();
+    } else if (json.containsKey("longitude")) {
+        Settings->Longitude = json["longitude"].as<float>();
+    }
+
 #ifdef NO_DISPLAY
     Settings->statusLed = getJsonBool(json, Settings->statusLed, JSON_SPIFFS_KEY_STATUSLED, "statusLed", "led");
 #endif
@@ -169,7 +191,7 @@ bool nvMemory::loadConfig(TSettings* Settings)
             if (configFile)
             {
                 Serial.println("SPIFS: Loading config file");
-                StaticJsonDocument<768> json;
+                StaticJsonDocument<1024> json;
                 DeserializationError error = deserializeJson(json, configFile);
                 configFile.close();
                 serializeJsonPretty(json, Serial);

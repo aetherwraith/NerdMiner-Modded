@@ -14,6 +14,7 @@
 // Dev aid: -D CYD_UI_SCREENSHOT=1 renders every screen once at boot into an
 // offscreen 8-bit sprite and dumps it over serial (see SHOT_BEGIN/SHOT_END).
 #include "displayDriver.h"
+#include "display.h"
 
 #if (defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)) && !defined(CYD_THEME_CLASSIC)
 
@@ -1164,9 +1165,9 @@ void esp32_2432S028R_AlternateScreenState(void)
   else
   {
 #ifdef LDR_PIN
-    uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : Settings.Brightness;
+    uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : backlightLevel();
 #else
-    uint8_t duty = Settings.Brightness;
+    uint8_t duty = backlightLevel();
 #endif
     if (duty == 0) duty = 250;
     ledcWrite(0, duty);
@@ -1258,7 +1259,7 @@ static void touchTask(void *)
         lastActivityTime = millis();
         if (isScreenOff || ledcRead(0) == 0)
         {
-          pendingTouch = TA_WAKEUP; // sleeping: any touch turns the backlight back on
+          pendingTouch = TA_WAKEUP; // dark/sleeping: any touch turns the backlight back on
         }
         else if (t_y < HDR_H + 4 && t_x > 235)
           pendingTouch = TA_BACKLIGHT; // top-right: backlight on/off
@@ -1282,6 +1283,8 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
   unsigned long currentMillis = millis();
   int action = pendingTouch;
   pendingTouch = TA_NONE;
+  if (action != TA_NONE)
+    noteScreenActivity(); // screen timeout
   DisplayDriver *drv = currentDisplayDriver;
   switch (action)
   {

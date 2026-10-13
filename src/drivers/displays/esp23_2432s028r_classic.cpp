@@ -6,6 +6,7 @@
 // "ESP32-2432S028R-Classic" env, or add -D CYD_THEME_CLASSIC=1 to any CYD
 // env's build_flags. Also tagged in git as `cyd-theme-classic`.
 #include "displayDriver.h"
+#include "display.h"
 
 #if (defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)) && defined(CYD_THEME_CLASSIC)
 
@@ -166,9 +167,9 @@ void esp32_2432S028R_AlternateScreenState(void)
     ledcWrite(0, 0);
   } else {
 #ifdef LDR_PIN
-    uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : Settings.Brightness;
+    uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : backlightLevel();
 #else
-    uint8_t duty = Settings.Brightness;
+    uint8_t duty = backlightLevel();
 #endif
     if (duty == 0) duty = 250;
     ledcWrite(0, duty);
@@ -598,12 +599,13 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
       bool pressed = touch.getXY(t_x, t_y);
       if (pressed) {
           lastActivityTime = currentMillis;
-          if (isScreenOff || ledcRead(0) == 0) {
+          noteScreenActivity();
+          if (wakeScreen() || isScreenOff || ledcRead(0) == 0) {
             isScreenOff = false;
 #ifdef LDR_PIN
-            uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : Settings.Brightness;
+            uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : backlightLevel();
 #else
-            uint8_t duty = Settings.Brightness;
+            uint8_t duty = backlightLevel();
 #endif
             if (duty == 0) duty = 250;
             ledcWrite(0, duty);

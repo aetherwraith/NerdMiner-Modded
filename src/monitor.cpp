@@ -5,9 +5,11 @@
 #include <WiFiClientSecure.h>
 #include <time.h>
 #include <list>
+#include <atomic>
 #include "mining.h"
 #include "utils.h"
 #include "monitor.h"
+#include "wManager.h"
 #include "drivers/storage/storage.h"
 #include "drivers/devices/device.h"
 #include "currency.h"
@@ -56,16 +58,23 @@ int poolApiStyle = POOL_API_PUBLICPOOL;
 // public-pool default and ask the wrong pool for stats).
 static std::mutex s_poolApiMutex;
 
+// Changes from the LAN settings page that applyPendingSettings() applies on
+// this task (see monitor.h).
+static String s_appliedTimezone = DEFAULT_TIMEZONE;
+static const char *s_newCurrency = nullptr; // a kCurrencies code; g_settingsMutex
+static std::atomic<bool> s_poolChanged{false};
+
 
 void setup_monitor(void){
     /******** TIME ZONE SETTING *****/
     String posixTz = getPosixTz(Settings.Timezone);
     Serial.printf("Configuring timezone: %s (POSIX: %s)\n", Settings.Timezone.c_str(), posixTz.c_str());
     configTzTime(posixTz.c_str(), "pool.ntp.org", "time.nist.gov", "europe.pool.ntp.org");
+    s_appliedTimezone = Settings.Timezone;
 
     Serial.println("Timezone setup done");
 #ifdef SCREEN_WORKERS_ENABLE
-    Serial.println("poolAPIUrl: " + getPoolAPIUrl());
+    Serial.println("poolAPIUrl: " + poolAPIUrl);
 #endif
 }
 
@@ -244,6 +253,22 @@ void getTime(unsigned long* currentHours, unsigned long* currentMinutes, unsigne
       *currentSeconds = 0;
     }
   }
+}
+
+// UTC now; false until the clock has been set from NTP. With sync (monitor
+// task only) the NTP call is made here when it is due, as getTime() does.
+bool getUtcTime(time_t &utc, bool sync){
+  if (sync) {
+    unsigned long h, m, s;
+    getTime(&h, &m, &s);
+  }
+  time_t now;
+  time(&now);
+  if (now > 1500000000) {
+    utc = now;
+    return true;
+  }
+  return false;
 }
 
 String getDate(){
@@ -788,4 +813,58 @@ pool_data getPoolData(void){
         }
     }
     return pData;
+}
+
+void requestCurrencyChange(const char *code) {
+    std::lock_guard<std::mutex> lock(g_settingsMutex);
+    s_newCurrency = code;
+}
+
+String currencySetting(void) {
+    std::lock_guard<std::mutex> lock(g_settingsMutex);
+    return s_newCurrency ? String(s_newCurrency) : Settings.Currency;
+}
+
+void poolSettingsChanged(void) {
+    s_poolChanged = true;
+}
+
+void applyPendingSettings(void) {
+    if (Settings.Timezone != s_appliedTimezone) {
+        String posixTz = getPosixTz(Settings.Timezone);
+        setenv("TZ", posixTz.c_str(), 1);
+        tzset();
+        s_appliedTimezone = Settings.Timezone;
+        Serial.printf("Applied updated timezone: %s (POSIX: %s)\n", Settings.Timezone.c_str(), posixTz.c_str());
+    }
+
+    bool currencyChanged = false;
+    {
+        std::lock_guard<std::mutex> lock(g_settingsMutex);
+        if (s_newCurrency) {
+            Settings.Currency = s_newCurrency;
+            s_newCurrency = nullptr;
+            currencyChanged = true;
+        }
+    }
+    if (currencyChanged) {
+        bitcoin_price = 0; // the last figure is in the old currency
+        mBTCUpdate = 0;    // fetch the price again next time it's shown
+    }
+
+    if (s_poolChanged.exchange(false)) {
+        // Work the stats URL out again for the new pool and fetch at once;
+        // until then show nothing rather than the old pool's numbers.
+        {
+            std::lock_guard<std::mutex> lock(s_poolApiMutex);
+            poolAPIUrl = "";
+            poolApiStyle = POOL_API_PUBLICPOOL;
+        }
+        heliosRegion = "";
+        heliosRegionInHost = false;
+        heliosRegionSure = false;
+        heliosMisses = 0;
+        pData = pool_data();
+        mPoolUpdate = 0;
+    }
 }

@@ -29,6 +29,10 @@
 #define DEFAULT_AUTOBRIGHTNESS	false
 #define DEFAULT_SCREENOFFTIMEOUT	0
 #define DEFAULT_STATUSLED	true
+#define DEFAULT_SCREENTIMEOUT	0	// minutes, 0 = never
+#define DEFAULT_NIGHTDIM	false
+#define DEFAULT_NIGHTBRIGHTNESS	40	// backlight duty 1-255
+#define DEFAULT_NIGHTFADE	60	// minutes, half before and half after sunset / sunrise
 
 // JSON config files
 #define JSON_CONFIG_FILE	"/config.json"
@@ -63,6 +67,12 @@
 #define JSON_SPIFFS_KEY_AUTOBRIGHTNESS	"autoBrightness"
 #define JSON_SPIFFS_KEY_SCREENOFFTIMEOUT	"screenOffTimeout"
 #define JSON_SPIFFS_KEY_STATUSLED	"statusLed"
+#define JSON_SPIFFS_KEY_SCREENTIMEOUT	"screenTimeout"
+#define JSON_SPIFFS_KEY_NIGHTDIM	"nightDim"
+#define JSON_SPIFFS_KEY_NIGHTBRIGHTNESS	"nightBrightness"
+#define JSON_SPIFFS_KEY_NIGHTFADE	"nightFade"
+#define JSON_SPIFFS_KEY_LATITUDE	"latitude"
+#define JSON_SPIFFS_KEY_LONGITUDE	"longitude"
 
 // settings
 struct TSettings
@@ -82,6 +92,14 @@ struct TSettings
 	bool autoBrightness{ DEFAULT_AUTOBRIGHTNESS }; // automatic screen brightness via LDR sensor
 	int screenOffTimeout{ DEFAULT_SCREENOFFTIMEOUT }; // auto screen off timeout in seconds (0 = disabled)
 	bool statusLed{ DEFAULT_STATUSLED };	// boards without a screen: status LED on/off
+	int ScreenTimeout{ DEFAULT_SCREENTIMEOUT };	// minutes without a touch until the backlight goes off, 0 = never
+	// Night dimming: the backlight fades from Brightness to NightBrightness across
+	// NightFade minutes centred on sunset, and back at sunrise, at this location.
+	bool nightDim{ DEFAULT_NIGHTDIM };
+	int NightBrightness{ DEFAULT_NIGHTBRIGHTNESS };
+	int NightFade{ DEFAULT_NIGHTFADE };
+	float Latitude{ 0 };	// decimal degrees, north positive; 0,0 = not set
+	float Longitude{ 0 };	// decimal degrees, east positive
 };
 
 #endif // _STORAGE_H_
