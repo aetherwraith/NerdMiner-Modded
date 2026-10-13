@@ -261,6 +261,7 @@ struct JobResult
 
 static std::mutex s_job_mutex;
 std::mutex g_hwShaMutex;  // see mining.h for why this exists
+volatile bool g_otaUpdating = false;
 #if defined(PIPELINED_S3_MINING)
 std::atomic<int> g_hwShaWanted{0}; // see mining.h
 #endif
@@ -745,6 +746,9 @@ void minerWorkerSw(void * task_id)
   #endif
   while (1)
   {
+    while (g_otaUpdating) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
     {
       std::lock_guard<std::mutex> lock(s_job_mutex);
       if (result)
@@ -1083,6 +1087,9 @@ void minerWorkerHw(void * task_id)
 
   while (1)
   {
+    while (g_otaUpdating) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
     {
       std::lock_guard<std::mutex> lock(s_job_mutex);
       if (result)
@@ -1634,6 +1641,9 @@ void minerWorkerHw(void * task_id)
 
   while (1)
   {
+    while (g_otaUpdating) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
     {
       std::lock_guard<std::mutex> lock(s_job_mutex);
       if (result)

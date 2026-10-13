@@ -17,6 +17,7 @@
 // while doing so; any code that can trigger a TLS handshake with hardware
 // SHA active (e.g. the pool-stats HTTPS fetch) must hold it too.
 extern std::mutex g_hwShaMutex;
+extern volatile bool g_otaUpdating;
 
 // ESP32-S3 overlapped HW loop only (PIPELINED_S3_MINING). On the S3 every
 // mbedTLS hash (the coinbase and merkle hashes of a new job, TLS handshakes)

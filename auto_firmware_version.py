@@ -12,6 +12,10 @@ def get_firmware_specifier_build_flag():
     print ("Firmware Revision: " + build_version)
     return (build_flag)
 
+env_name = env.subst("$PIOENV")
 env.Append(
-    BUILD_FLAGS=[get_firmware_specifier_build_flag()]
+    BUILD_FLAGS=[
+        get_firmware_specifier_build_flag(),
+        f"-D PIOENV_NAME=\\\"{env_name}\\\""
+    ]
 )

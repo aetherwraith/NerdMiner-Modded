@@ -17,6 +17,7 @@
 #include "ShaTests/nerdSHA_HWTest.h"
 #include "timeconst.h"
 #include "serialCli.h"
+#include <esp_ota_ops.h>
 
 #ifdef TOUCH_ENABLE
 #include "TouchHandler.h"
@@ -149,6 +150,9 @@ void setup()
 
   /******** INIT WIFI ************/
   init_WifiManager();
+
+  /******** CONFIRM OTA BOOT VALIDITY ************/
+  esp_ota_mark_app_valid_cancel_rollback();
 
   /******** CREATE TASK TO PRINT SCREEN *****/
   //tft.pushImage(0, 0, MinerWidth, MinerHeight, MinerScreen);

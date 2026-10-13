@@ -15,6 +15,7 @@
 #include "cities.h"
 #include "drivers/storage/nvMemory.h"
 #include <ArduinoJson.h>
+#include "ota.h"
 
 extern TSettings Settings;
 extern double best_diff;
@@ -198,6 +199,7 @@ static void handleRoot()
   page += F("<p><small>Settings apply straight away, no restart.</small></p>");
 #endif
   page += F("</form>");
+  page += F("<hr style='margin-top:1.5em;border:0;border-top:1px solid #ddd'><div style='text-align:center;margin:1em 0'><a href='/update' style='color:#f59e0b;font-weight:bold;text-decoration:none'>⚡ Firmware Updates (OTA) &rarr;</a></div>");
 #ifdef HAS_BACKLIGHT_CONTROL
   page += F("<script>var f=document.forms[0],c=f.city,a=f.lat,o=f.lon;"
             "c.onchange=function(){if(c.value){var p=c.value.split(',');a.value=p[0];o.value=p[1]}};"
@@ -668,6 +670,7 @@ void setup_webConfig(void)
   webCfgServer.on("/api/timezone", handleTimezoneEndpoint);
   webCfgServer.on("/api/system/timezones", handleTimezonesList);
   webCfgServer.on("/api/timezones", handleTimezonesList);
+  setup_ota(webCfgServer);
   webCfgServer.onNotFound([]()
   {
     webCfgServer.sendHeader("Location", "/");
@@ -682,6 +685,8 @@ void setup_webConfig(void)
 
 void webConfigProcess(void)
 {
-  if (webCfgStarted)
+  if (webCfgStarted) {
     webCfgServer.handleClient();
+    otaProcess();
+  }
 }

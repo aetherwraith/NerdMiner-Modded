@@ -97,4 +97,4 @@ Enable quick, user-friendly initial provisioning for new devices without requiri
 | **v1.6.0** | Released | Upstream v1.4.0 sync: live settings without reboot, night dimming, idle screen timeout, chunked web streaming |
 | **v1.7.0** | Released | Feature 2: REST Configuration API (`/api/system/config`, `/probe`, `/api/system`) with JSON GET/POST/PATCH and Wotcha support |
 | **v1.8.0** | Released | Feature 3: USB Serial CLI (`115200` baud), `config.local.h` compile-time overrides, automatic first-boot credential provisioning & webflasher config support |
-| **v1.9.0** | Planned | Feature 1: Web OTA (`/update`) & GitHub Releases automated OTA with dual-partition safety |
+| **v1.9.0** | Released | Feature 1: Web OTA (`/update`), GitHub Releases automated OTA with dual-partition safety, and REST update API |

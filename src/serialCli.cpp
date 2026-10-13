@@ -15,6 +15,7 @@
 #include "currency.h"
 #include "timeconst.h"
 #include "utils.h"
+#include "ota.h"
 
 extern TSettings Settings;
 extern monitor_data mMonitor;
@@ -90,7 +91,9 @@ static void printHelp(void)
   Serial.println(F("  set flip <0|1>              - Flip display 180 deg (reboot required)"));
   Serial.println(F("  config json <json_payload>  - Apply entire configuration from JSON payload"));
   Serial.println();
-  Serial.println(F("System Control:"));
+  Serial.println(F("  ota status                  - Show OTA partitions and update status"));
+  Serial.println(F("  ota check                   - Check GitHub Releases for new version"));
+  Serial.println(F("  ota update [url|version]    - Download and flash OTA update in background"));
   Serial.println(F("  save                        - Persist current settings to SPIFFS (/config.json)"));
   Serial.println(F("  reset                       - Factory reset (erase config & WiFi credentials)"));
   Serial.println(F("  restart | reboot            - Restart the device"));
@@ -310,6 +313,64 @@ static void executeCommand(const String &rawLine)
     delay(500);
     ESP.restart();
   }
+  else if (cmd == "ota") {
+    String subcmd = (args.size() >= 2) ? args[1] : "status";
+    subcmd.toLowerCase();
+
+    if (subcmd == "status") {
+      OtaStatus st = getOtaStatus();
+      Serial.println(F("\n================ OTA Firmware Status ================"));
+      Serial.printf("  Board Model:       %s\n", st.boardModel.c_str());
+      Serial.printf("  Installed Version: %s\n", st.currentVersion.c_str());
+      Serial.printf("  Active Partition:  %s\n", st.runningPartition.c_str());
+      Serial.printf("  Target Partition:  %s\n", st.nextPartition.c_str());
+      Serial.printf("  Dual-OTA Support:  %s\n", st.hasDualOta ? "Yes (Enabled)" : "No (USB Flash Required)");
+      const char *stateStr = (st.state == OTA_STATE_IDLE) ? "Idle" :
+                             (st.state == OTA_STATE_CHECKING) ? "Checking" :
+                             (st.state == OTA_STATE_DOWNLOADING) ? "Downloading" :
+                             (st.state == OTA_STATE_FLASHING) ? "Flashing" :
+                             (st.state == OTA_STATE_SUCCESS) ? "Success" : "Error";
+      Serial.printf("  Update State:      %s (%d%%)\n", stateStr, st.progressPercent);
+      if (st.errorMessage.length() > 0) {
+        Serial.printf("  Error:             %s\n", st.errorMessage.c_str());
+      }
+      Serial.println(F("====================================================="));
+    }
+    else if (subcmd == "check") {
+      Serial.println(F("[OTA] Checking GitHub Releases for updates..."));
+      if (checkGitHubUpdate()) {
+        OtaStatus st = getOtaStatus();
+        Serial.printf("[OTA] Latest version: %s\n", st.latestVersion.c_str());
+        Serial.printf("[OTA] Has update:     %s\n", st.hasUpdate ? "YES" : "No (Already up to date)");
+        if (st.downloadUrl.length() > 0) {
+          Serial.printf("[OTA] Download URL:   %s\n", st.downloadUrl.c_str());
+        }
+      } else {
+        Serial.println(F("[OTA] Update check failed or no releases found."));
+      }
+    }
+    else if (subcmd == "update") {
+      String target = (args.size() >= 3) ? args[2] : "latest";
+      if (target.startsWith("http://") || target.startsWith("https://")) {
+        Serial.printf("[OTA] Starting OTA from URL: %s\n", target.c_str());
+        if (startUrlOta(target)) {
+          Serial.println(F("[OTA] Background download started. Type 'ota status' to monitor progress."));
+        } else {
+          Serial.println(F("[ERROR] Failed to start URL OTA update."));
+        }
+      } else {
+        Serial.println(F("[OTA] Starting OTA from GitHub Releases (latest)..."));
+        if (startGitHubOta(target)) {
+          Serial.println(F("[OTA] Background download started. Type 'ota status' to monitor progress."));
+        } else {
+          Serial.println(F("[ERROR] Failed to start GitHub OTA update."));
+        }
+      }
+    }
+    else {
+      Serial.println(F("[ERROR] Usage: ota status | ota check | ota update [url|version]"));
+    }
+  }
   else if (cmd == "set") {
     if (args.size() < 3) {
       Serial.println(F("[ERROR] Usage: set <key> <value>. Type 'help' for examples."));
@@ -518,6 +579,6 @@ static void serialCliTask(void *param)
 void setup_serialCli(void)
 {
   if (s_cliTaskHandle == NULL) {
-    xTaskCreatePinnedToCore(serialCliTask, "SerialCLI", 6144, NULL, 2, &s_cliTaskHandle, 0);
+    xTaskCreatePinnedToCore(serialCliTask, "SerialCLI", 10240, NULL, 2, &s_cliTaskHandle, 0);
   }
 }
