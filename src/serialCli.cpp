@@ -169,6 +169,7 @@ static void printConfig(void)
   doc["pool"] = s.PoolAddress;
   doc["port"] = s.PoolPort;
   doc["wallet"] = s.BtcWallet;
+  doc["hostname"] = s.Hostname;
   doc["poolPassword"] = s.PoolPassword;
   doc["currency"] = s.Currency;
   doc["timezone"] = s.Timezone;
@@ -206,17 +207,6 @@ static void handleConfigJson(const String &jsonStr)
   const TSettings before = currentSettings();
   TSettings next = before;
   nvMemory::parseJsonConfig(doc, &next);
-
-  if (doc.containsKey("currency")) {
-    next.Currency = currencyFor(doc["currency"].as<String>()).code;
-  }
-
-  next.Brightness = constrain(next.Brightness, 0, 255);
-  next.NightBrightness = constrain(next.NightBrightness, 1, 255);
-  next.NightFade = constrain(next.NightFade, 1, 240);
-  next.ScreenTimeout = constrain(next.ScreenTimeout, 0, 1440);
-  next.Latitude = constrain(next.Latitude, -90.0f, 90.0f);
-  next.Longitude = constrain(next.Longitude, -180.0f, 180.0f);
 
   bool wifiChanged = (next.WifiSSID != before.WifiSSID || next.WifiPW != before.WifiPW);
   if (wifiChanged && next.WifiSSID.length() > 0) {

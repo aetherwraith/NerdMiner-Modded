@@ -90,10 +90,11 @@ void updateGlobalData(void){
     if((mGlobalUpdate == 0) || (millis() - mGlobalUpdate > UPDATE_Global_min * 60 * 1000)){
     
         if (WiFi.status() != WL_CONNECTED) return;
+        mGlobalUpdate = millis();
             
         //Make first API call to get global hash and current difficulty
         HTTPClient http;
-        http.setTimeout(10000);
+        http.setTimeout(5000);
         try {
         http.begin(getGlobalHash);
         int httpCode;
@@ -114,8 +115,6 @@ void updateGlobalData(void){
               gData.difficulty = temp.substring(0,temp.length()-2) + "." + temp.substring(temp.length()-2,temp.length()) + "T";
             }
             doc.clear();
-
-            mGlobalUpdate = millis();
         }
         http.end();
 
@@ -129,7 +128,6 @@ void updateGlobalData(void){
             
             StaticJsonDocument<1024> doc;
             deserializeJson(doc, payload);
-            String temp = "";
             if (doc.containsKey("halfHourFee")) gData.halfHourFee = doc["halfHourFee"].as<int>();
 #ifdef SCREEN_FEES_ENABLE
             if (doc.containsKey("fastestFee"))  gData.fastestFee = doc["fastestFee"].as<int>();
@@ -138,8 +136,6 @@ void updateGlobalData(void){
             if (doc.containsKey("minimumFee"))  gData.minimumFee = doc["minimumFee"].as<int>();
 #endif
             doc.clear();
-
-            mGlobalUpdate = millis();
         }
         
         http.end();
@@ -157,9 +153,10 @@ String getBlockHeight(void){
     if((mHeightUpdate == 0) || (millis() - mHeightUpdate > UPDATE_Height_min * 60 * 1000)){
     
         if (WiFi.status() != WL_CONNECTED) return current_block;
+        mHeightUpdate = millis();
             
         HTTPClient http;
-        http.setTimeout(10000);
+        http.setTimeout(5000);
         try {
         http.begin(getHeightAPI);
         int httpCode;
@@ -168,10 +165,7 @@ String getBlockHeight(void){
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
             payload.trim();
-
             current_block = payload;
-
-            mHeightUpdate = millis();
         }        
         http.end();
         } catch(...) {
@@ -195,10 +189,10 @@ String getBTCprice(void){
             snprintf(price_buffer, sizeof(price_buffer), "%s%u", cur.prefix, bitcoin_price);
             return String(price_buffer);
         }
+        mBTCUpdate = millis();
 
         HTTPClient http;
-        http.setTimeout(10000);
-        bool priceUpdated = false;
+        http.setTimeout(5000);
 
         try {
         http.begin(String(getBTCAPI) + cur.code);
@@ -216,8 +210,6 @@ String getBTCprice(void){
             }
 
             doc.clear();
-
-            mBTCUpdate = millis();
         }
         
         http.end();

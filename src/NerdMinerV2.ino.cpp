@@ -141,10 +141,6 @@ void setup()
   mMonitor.NerdStatus = NM_waitingConfig;
   doLedStuff(0);
 
-#ifdef SDMMC_1BIT_FIX
-  SDCrd.initSDcard();
-#endif
-
   /******** INIT SERIAL CLI ************/
   setup_serialCli();
 

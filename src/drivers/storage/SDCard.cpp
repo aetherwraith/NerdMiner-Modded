@@ -34,18 +34,17 @@ SDCard::SDCard(int ID):cardInitialized_(false),cardBusy_(false)
     }
     iSD_ = &SD;
 #endif // interface type
-#ifndef SDMMC_1BIT_FIX
-    initSDcard();
-#endif
 }
 
 SDCard::~SDCard()
 {
-    iSD_->end();
+    if (cardInitialized_) {
+        iSD_->end();
+    }
 #ifdef BUILD_SDSPI
     if(newInstance_) 
     {
-        ispi_->end();
+        if (cardInitialized_) ispi_->end();
         delete ispi_;
     }
 #endif // BUILD_SDSPI
@@ -62,10 +61,12 @@ bool SDCard::cardBusy()
 /// @brief End the card to free heap space.
 void SDCard::terminate()
 {
+    if (!cardInitialized_) return;
     iSD_->end();
 #ifdef BUILD_SDSPI
     ispi_->end(); 
-#endif   
+#endif
+    cardInitialized_ = false;
 }
 
 /// @brief Transfer settings from config file on a SD card to the device.
@@ -89,6 +90,9 @@ bool SDCard::loadConfigFile(TSettings* Settings)
 {
     // Load existing configuration file
     // Read configuration from FS json
+    if (!cardInitialized_) {
+        initSDcard();
+    }
 
     if (cardAvailable())
     {

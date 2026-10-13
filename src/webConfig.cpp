@@ -520,17 +520,6 @@ static void handlePostConfig()
 
   nvMemory::parseJsonConfig(doc, &next);
 
-  if (doc.containsKey("currency")) {
-    next.Currency = currencyFor(doc["currency"].as<String>()).code;
-  }
-
-  next.Brightness = constrain(next.Brightness, 0, 255);
-  next.NightBrightness = constrain(next.NightBrightness, 1, 255);
-  next.NightFade = constrain(next.NightFade, 1, 240);
-  next.ScreenTimeout = constrain(next.ScreenTimeout, 0, 1440);
-  next.Latitude = constrain(next.Latitude, -90.0f, 90.0f);
-  next.Longitude = constrain(next.Longitude, -180.0f, 180.0f);
-
   bool poolChanged = false;
   bool restart = applyLiveSettings(before, next, poolChanged);
 

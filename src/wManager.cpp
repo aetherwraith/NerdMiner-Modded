@@ -133,22 +133,9 @@ void saveSettingsToFlash(TSettings *settings)
 
 void init_WifiManager()
 {
-#ifdef MONITOR_SPEED
-    Serial.begin(MONITOR_SPEED);
-#else
-    Serial.begin(115200);
-#endif //MONITOR_SPEED
-    //Serial.setTxTimeoutMs(10);
-    
     // Check for custom AP name or webflasher config from flash offset 0x3F0000
     String customAPName = readWebflasherConfig(&Settings);
     const char* apName = customAPName.length() > 0 ? customAPName.c_str() : DEFAULT_SSID;
-
-    //Init pin 15 to eneble 5V external power (LilyGo bug)
-#ifdef PIN_ENABLE5V
-    pinMode(PIN_ENABLE5V, OUTPUT);
-    digitalWrite(PIN_ENABLE5V, HIGH);
-#endif
 
     // Change to true when testing to force configuration every time we run
     bool forceConfig = false;
@@ -194,12 +181,6 @@ void init_WifiManager()
     // Free the memory from SDCard class 
     SDCrd.terminate();
     
-    // Reset settings (only for development)
-    //wm.resetSettings();
-
-    //Set dark theme
-    //wm.setClass("invert"); // dark theme
-
     // Set config save notify callback
     wm.setSaveConfigCallback(saveConfigCallback);
     wm.setSaveParamsCallback(saveConfigCallback);
@@ -208,165 +189,126 @@ void init_WifiManager()
     wm.setAPCallback(configModeCallback);    
 
     //Advanced settings
-    wm.setConfigPortalBlocking(false); //Hacemos que el portal no bloquee el firmware
+    wm.setConfigPortalBlocking(false);
     wm.setConnectTimeout(40); // how long to try to connect for before continuing
     wm.setConfigPortalTimeout(180); // auto close configportal after n seconds
-    // wm.setCaptivePortalEnable(false); // disable captive portal redirection
-    // wm.setAPClientCheck(true); // avoid timeout if client connected to softap
-    //wm.setTimeout(120);
-    //wm.setConfigPortalTimeout(120); //seconds
 
     // Custom elements
-
-    // Text box (String) - 80 characters maximum
     WiFiManagerParameter pool_text_box("Poolurl", "Pool url", Settings.PoolAddress.c_str(), 80);
 
-    // Need to convert numerical input to string to display the default value.
     char convertedValue[6];
     sprintf(convertedValue, "%d", Settings.PoolPort);
-
-    // Text box (Number) - 7 characters maximum
     WiFiManagerParameter port_text_box_num("Poolport", "Pool port", convertedValue, 7);
 
-    // Text box (String) - 80 characters maximum
-    //WiFiManagerParameter password_text_box("Poolpassword", "Pool password (Optional)", Settings.PoolPassword, 80);
-
-    // Text box (String) - 80 characters maximum
     WiFiManagerParameter addr_text_box("btcAddress", "Your BTC address", Settings.BtcWallet, 80);
+    WiFiManagerParameter time_text_box("TimeZone", "TimeZone (e.g. Europe/London or UTC offset)", Settings.Timezone.c_str(), 40);
+    WiFiManagerParameter features_html("<hr><br><label style=\"font-weight: bold;margin-bottom: 25px;display: inline-block;\">Features</label>");
 
-  // Text box (String) - 40 characters maximum
-  WiFiManagerParameter time_text_box("TimeZone", "TimeZone (e.g. Europe/London or UTC offset)", Settings.Timezone.c_str(), 40);
+    char checkboxParams[24] = "type=\"checkbox\"";
+    if (Settings.saveStats)
+    {
+        strcat(checkboxParams, " checked");
+    }
+    WiFiManagerParameter save_stats_to_nvs("SaveStatsToNVS", "Save mining statistics to flash memory.", "T", 2, checkboxParams, WFM_LABEL_AFTER);
+    WiFiManagerParameter password_text_box("Poolpassword", "Pool password (Optional)", Settings.PoolPassword, 80);
 
-  WiFiManagerParameter features_html("<hr><br><label style=\"font-weight: bold;margin-bottom: 25px;display: inline-block;\">Features</label>");
+    // Add all defined parameters
+    wm.addParameter(&pool_text_box);
+    wm.addParameter(&port_text_box_num);
+    wm.addParameter(&password_text_box);
+    wm.addParameter(&addr_text_box);
+    wm.addParameter(&time_text_box);
+    wm.addParameter(&features_html);
+    wm.addParameter(&save_stats_to_nvs);
+    #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+    const bool invertAtBoot = Settings.invertColors;
+    char checkboxParams2[24] = "type=\"checkbox\"";
+    if (Settings.invertColors)
+    {
+        strcat(checkboxParams2, " checked");
+    }
+    WiFiManagerParameter invertColors("inverColors", "Invert Display Colors (if the colors looks weird)", "T", 2, checkboxParams2, WFM_LABEL_AFTER);
+    wm.addParameter(&invertColors);
+    const bool flipAtBoot = Settings.flipDisplay;
+    char checkboxParams3[24] = "type=\"checkbox\"";
+    if (Settings.flipDisplay)
+    {
+        strcat(checkboxParams3, " checked");
+    }
+    WiFiManagerParameter flipDisplay("flipDisplay", "Flip display (USB on the left instead of the right)", "T", 2, checkboxParams3, WFM_LABEL_AFTER);
+    wm.addParameter(&flipDisplay);
 
-  char checkboxParams[24] = "type=\"checkbox\"";
-  if (Settings.saveStats)
-  {
-    strcat(checkboxParams, " checked");
-  }
-  WiFiManagerParameter save_stats_to_nvs("SaveStatsToNVS", "Save mining statistics to flash memory.", "T", 2, checkboxParams, WFM_LABEL_AFTER);
-  // Text box (String) - 80 characters maximum
-  WiFiManagerParameter password_text_box("Poolpassword - Optional", "Pool password", Settings.PoolPassword, 80);
-
-  // Add all defined parameters
-  wm.addParameter(&pool_text_box);
-  wm.addParameter(&port_text_box_num);
-  wm.addParameter(&password_text_box);
-  wm.addParameter(&addr_text_box);
-  wm.addParameter(&time_text_box);
-  wm.addParameter(&features_html);
-  wm.addParameter(&save_stats_to_nvs);
-  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-  const bool invertAtBoot = Settings.invertColors;
-  char checkboxParams2[24] = "type=\"checkbox\"";
-  if (Settings.invertColors)
-  {
-    strcat(checkboxParams2, " checked");
-  }
-  WiFiManagerParameter invertColors("inverColors", "Invert Display Colors (if the colors looks weird)", "T", 2, checkboxParams2, WFM_LABEL_AFTER);
-  wm.addParameter(&invertColors);
-  const bool flipAtBoot = Settings.flipDisplay;
-  char checkboxParams3[24] = "type=\"checkbox\"";
-  if (Settings.flipDisplay)
-  {
-    strcat(checkboxParams3, " checked");
-  }
-  WiFiManagerParameter flipDisplay("flipDisplay", "Flip display (USB on the left instead of the right)", "T", 2, checkboxParams3, WFM_LABEL_AFTER);
-  wm.addParameter(&flipDisplay);
-  #endif
-  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
     char brightnessConvValue[8]; // up to "255" + NUL; was [2], overflowed on sprintf
     sprintf(brightnessConvValue, "%d", Settings.Brightness);
-    // Text box (Number) - 3 characters maximum
     WiFiManagerParameter brightness_text_box_num("Brightness", "Screen backlight Duty Cycle (0-255)", brightnessConvValue, 3);
     wm.addParameter(&brightness_text_box_num);
-  #endif
-  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+    #endif
+    #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
     char checkboxParams4[24] = "type=\"checkbox\"";
     if (Settings.autoBrightness)
     {
-      strcat(checkboxParams4, " checked");
+        strcat(checkboxParams4, " checked");
     }
     WiFiManagerParameter autoBrightnessParam("autoBrightness", "Auto Brightness (LDR Sensor)", "T", 2, checkboxParams4, WFM_LABEL_AFTER);
     wm.addParameter(&autoBrightnessParam);
-  #endif
-  #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+    #endif
+    #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
     char screenOffConvValue[8];
     sprintf(screenOffConvValue, "%d", Settings.screenOffTimeout);
     WiFiManagerParameter screenOff_text_box_num("screenOff", "Auto Screen Off (seconds, 0=disabled)", screenOffConvValue, 6);
     wm.addParameter(&screenOff_text_box_num);
-  #endif
+    #endif
+
+    auto extractPortalParams = [&](bool applyPortalCheckboxes) {
+        Settings.PoolAddress = pool_text_box.getValue();
+        Settings.PoolPort = atoi(port_text_box_num.getValue());
+        strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword) - 1);
+        Settings.PoolPassword[sizeof(Settings.PoolPassword) - 1] = '\0';
+        strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet) - 1);
+        Settings.BtcWallet[sizeof(Settings.BtcWallet) - 1] = '\0';
+        Settings.Timezone = time_text_box.getValue();
+        if (applyPortalCheckboxes) {
+            Settings.saveStats = (strncmp(save_stats_to_nvs.getValue(), "T", 1) == 0);
+            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+            Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
+            Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
+            Settings.Brightness = atoi(brightness_text_box_num.getValue());
+            Settings.screenOffTimeout = atoi(screenOff_text_box_num.getValue());
+            #endif
+            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+            Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);
+            #endif
+        }
+    };
 
     Serial.println("AllDone: ");
     if (forceConfig)    
     {
-        // Run if we need a configuration
-        //No configuramos timeout al modulo
-        wm.setConfigPortalBlocking(true); //Hacemos que el portal SI bloquee el firmware
+        wm.setConfigPortalBlocking(true);
         drawSetupScreen();
         mMonitor.NerdStatus = NM_Connecting;
         wm.startConfigPortal(apName, DEFAULT_WIFIPW);
 
         if (shouldSaveConfig)
         {
-            //Could be break forced after edditing, so save new config
             Serial.println("failed to connect and hit timeout");
-            Settings.PoolAddress = pool_text_box.getValue();
-            Settings.PoolPort = atoi(port_text_box_num.getValue());
-            strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword));
-            strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet));
-            Settings.Timezone = time_text_box.getValue();
-            //Serial.println(save_stats_to_nvs.getValue());
-            Settings.saveStats = (strncmp(save_stats_to_nvs.getValue(), "T", 1) == 0);
-            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-                Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
-                Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
-            #endif
-            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-                Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);
-            #endif
-            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-                Settings.Brightness = atoi(brightness_text_box_num.getValue());
-                Settings.screenOffTimeout = atoi(screenOff_text_box_num.getValue());
-            #endif
+            extractPortalParams(true);
             nvMem.saveConfig(&Settings);
             delay(3*SECOND_MS);
-            //reset and try again, or maybe put it to deep sleep
             ESP.restart();            
-        };
+        }
     }
     else
     {
-        //Tratamos de conectar con la configuración inicial ya almacenada
         mMonitor.NerdStatus = NM_Connecting;
-        // disable captive portal redirection
         wm.setCaptivePortalEnable(true); 
         wm.setConfigPortalBlocking(true);
         wm.setEnableConfigPortal(true);
-        // if (!wm.autoConnect(Settings.WifiSSID.c_str(), Settings.WifiPW.c_str()))
         if (!wm.autoConnect(apName, DEFAULT_WIFIPW))
         {
             Serial.println("Failed to connect to configured WIFI, and hit timeout");
             if (shouldSaveConfig) {
-                // Save new config            
-                Settings.PoolAddress = pool_text_box.getValue();
-                Settings.PoolPort = atoi(port_text_box_num.getValue());
-                strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword));
-                strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet));
-                Settings.Timezone = time_text_box.getValue();
-                // Serial.println(save_stats_to_nvs.getValue());
-                Settings.saveStats = (strncmp(save_stats_to_nvs.getValue(), "T", 1) == 0);
-                #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-                Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
-                Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
-                #endif
-                #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-                Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);
-                #endif
-                #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-                Settings.Brightness = atoi(brightness_text_box_num.getValue());
-                Settings.screenOffTimeout = atoi(screenOff_text_box_num.getValue());
-                #endif
+                extractPortalParams(true);
                 nvMem.saveConfig(&Settings);
                 vTaskDelay(2000 / portTICK_PERIOD_MS);      
             }        
@@ -374,9 +316,8 @@ void init_WifiManager()
         } 
     }
     
-    //Conectado a la red Wifi
+    // Connected to WiFi network
     if (WiFi.status() == WL_CONNECTED) {
-        //tft.pushImage(0, 0, MinerWidth, MinerHeight, MinerScreen);
         Serial.println("");
         Serial.println("WiFi connected");
         Serial.print("IP address: ");
@@ -387,57 +328,26 @@ void init_WifiManager()
             Settings.WifiPW = WiFi.psk();
         }
 
+        // Only apply checkbox values when the portal form was submitted: an
+        // unused checkbox still holds its "T", which would turn the saved
+        // setting on in memory.
+        extractPortalParams(shouldSaveConfig);
 
-        // Lets deal with the user config values
-
-        // Copy the string value
-        Settings.PoolAddress = pool_text_box.getValue();
-        //strncpy(Settings.PoolAddress, pool_text_box.getValue(), sizeof(Settings.PoolAddress));
         Serial.print("PoolString: ");
         Serial.println(Settings.PoolAddress);
-
-        //Convert the number value
-        Settings.PoolPort = atoi(port_text_box_num.getValue());
         Serial.print("portNumber: ");
         Serial.println(Settings.PoolPort);
-
-        // Copy the string value
-        strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword));
         Serial.print("poolPassword: ");
         Serial.println(Settings.PoolPassword);
-
-        // Copy the string value
-        strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet));
         Serial.print("btcString: ");
         Serial.println(Settings.BtcWallet);
-
-        // Copy the string value
-        Settings.Timezone = time_text_box.getValue();
         Serial.print("TimeZone: ");
         Serial.println(Settings.Timezone);
-
         #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-        // Only when the portal form was submitted: an unused checkbox still
-        // holds its "T", which would turn the saved setting on in memory (the
-        // LAN settings page then showed and compared against the wrong value).
-        if (shouldSaveConfig) Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
-        if (shouldSaveConfig) Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
         Serial.print("Invert Colors: ");
         Serial.println(Settings.invertColors);
-        #endif
-
-        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-        if (shouldSaveConfig) Settings.Brightness = atoi(brightness_text_box_num.getValue());
         Serial.print("Brightness: ");
         Serial.println(Settings.Brightness);
-        #endif
-
-        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-        if (shouldSaveConfig) Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);
-        #endif
-
-        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-        if (shouldSaveConfig) Settings.screenOffTimeout = atoi(screenOff_text_box_num.getValue());
         #endif
 
         // Always-on LAN settings page -- lets the user change pool/wallet/etc.
