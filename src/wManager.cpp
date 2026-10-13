@@ -186,6 +186,10 @@ void init_WifiManager()
             forceConfig = true;
         }
     }
+
+    if (Settings.Hostname[0] != '\0') {
+        WiFi.setHostname(Settings.Hostname);
+    }
     
     // Free the memory from SDCard class 
     SDCrd.terminate();

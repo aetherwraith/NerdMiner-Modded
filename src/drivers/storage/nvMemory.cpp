@@ -48,6 +48,7 @@ bool nvMemory::saveConfig(TSettings* Settings)
         json[JSON_SPIFFS_KEY_NIGHTFADE] = Settings->NightFade;
         json[JSON_SPIFFS_KEY_LATITUDE] = Settings->Latitude;
         json[JSON_SPIFFS_KEY_LONGITUDE] = Settings->Longitude;
+        json[JSON_SPIFFS_KEY_HOSTNAME] = Settings->Hostname;
 #ifdef NO_DISPLAY
         json[JSON_SPIFFS_KEY_STATUSLED] = Settings->statusLed;
 #endif
@@ -153,6 +154,19 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     if (wallet.length() > 0) {
         strncpy(Settings->BtcWallet, wallet.c_str(), sizeof(Settings->BtcWallet) - 1);
         Settings->BtcWallet[sizeof(Settings->BtcWallet) - 1] = '\0';
+    }
+
+    // Hostname (explicit or fallback to worker suffix from wallet)
+    String host = getJsonString(json, {JSON_SPIFFS_KEY_HOSTNAME, "hostname", "Hostname", "hostName"});
+    if (host.length() > 0) {
+        strncpy(Settings->Hostname, host.c_str(), sizeof(Settings->Hostname) - 1);
+        Settings->Hostname[sizeof(Settings->Hostname) - 1] = '\0';
+    } else {
+        const char* dot = strrchr(Settings->BtcWallet, '.');
+        if (dot && strlen(dot + 1) > 0 && strlen(dot + 1) < sizeof(Settings->Hostname)) {
+            strncpy(Settings->Hostname, dot + 1, sizeof(Settings->Hostname) - 1);
+            Settings->Hostname[sizeof(Settings->Hostname) - 1] = '\0';
+        }
     }
 
     // Timezone

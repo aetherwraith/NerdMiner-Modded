@@ -367,6 +367,7 @@ static void handleGetConfig()
   json += "\"pool\":\"" + htmlEscape(s.PoolAddress) + "\"";
   json += ",\"port\":" + String(s.PoolPort);
   json += ",\"wallet\":\"" + htmlEscape(String(s.BtcWallet)) + "\"";
+  json += ",\"hostname\":\"" + htmlEscape(String(s.Hostname)) + "\"";
   json += ",\"poolPassword\":\"" + htmlEscape(String(s.PoolPassword)) + "\"";
   json += ",\"currency\":\"" + htmlEscape(s.Currency) + "\"";
   json += ",\"timezone\":\"" + htmlEscape(s.Timezone) + "\"";
@@ -602,7 +603,7 @@ static void handleStatus()
   String json;
   json.reserve(1024);
   json += "{\"nerdminer\":true";
-  json += ",\"hostname\":\"NerdMiner\"";
+  json += ",\"hostname\":\"" + htmlEscape(String(Settings.Hostname)) + "\"";
   json += ",\"version\":\"" + String(CURRENT_VERSION) + "\"";
   json += ",\"deviceModel\":\"NerdMiner v2\"";
   json += ",\"khash\":" + String(khs, 2);

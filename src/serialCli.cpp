@@ -80,6 +80,7 @@ static void printHelp(void)
   Serial.println(F("  set pool <host> [port]      - Set stratum mining pool host & port (applied live)"));
   Serial.println(F("  set port <port>             - Set stratum mining pool port (applied live)"));
   Serial.println(F("  set wallet <address>        - Set BTC payout address / worker (applied live)"));
+  Serial.println(F("  set hostname <name>         - Set device network/DHCP hostname (applied live)"));
   Serial.println(F("  set pass <password>         - Set stratum pool password (default 'x')"));
   Serial.println(F("  set tz <timezone>           - Set timezone (e.g. Europe/London or POSIX string)"));
   Serial.println(F("  set currency <currency>     - Set fiat price currency (e.g. usd, eur, gbp)"));
@@ -121,6 +122,7 @@ static void printStatus(void)
 
   Serial.println(F("\n================ NerdMiner Status ================"));
   Serial.printf("  Firmware:      %s (Chip: %s rev %d)\n", CURRENT_VERSION, ESP.getChipModel(), ESP.getChipRevision());
+  Serial.printf("  Hostname:      %s\n", Settings.Hostname);
   Serial.printf("  State:         %s\n", statusStr);
   Serial.printf("  WiFi Status:   %s\n", WiFi.isConnected() ? "Connected" : "Disconnected / AP Mode");
   if (WiFi.isConnected()) {
@@ -152,8 +154,8 @@ static void printProbe(void)
   const char* statusStr = (mMonitor.NerdStatus == NM_hashing) ? "Mining" :
                           (mMonitor.NerdStatus == NM_Connecting) ? "Connecting" : "WaitConfig";
 
-  Serial.printf("{\"version\":\"%s\",\"chip\":\"%s\",\"ip\":\"%s\",\"hashrate\":%.2f,\"status\":\"%s\",\"heap\":%u,\"bestDiff\":\"%s\",\"temp\":%.1f}\n",
-                CURRENT_VERSION, ESP.getChipModel(), ip.c_str(), khs, statusStr, ESP.getFreeHeap(), best_diff_str, temperatureRead());
+  Serial.printf("{\"version\":\"%s\",\"chip\":\"%s\",\"host\":\"%s\",\"ip\":\"%s\",\"hashrate\":%.2f,\"status\":\"%s\",\"heap\":%u,\"bestDiff\":\"%s\",\"temp\":%.1f}\n",
+                CURRENT_VERSION, ESP.getChipModel(), Settings.Hostname, ip.c_str(), khs, statusStr, ESP.getFreeHeap(), best_diff_str, temperatureRead());
 }
 
 static void printConfig(void)
@@ -428,6 +430,16 @@ static void executeCommand(const String &rawLine)
       bool poolChanged = false;
       applyLiveSettings(before, next, poolChanged);
       Serial.printf("[OK] Wallet payout address set to %s (applied live)\n", next.BtcWallet);
+    }
+    else if (key == "hostname" || key == "host") {
+      const TSettings before = currentSettings();
+      TSettings next = before;
+      strncpy(next.Hostname, args[2].c_str(), sizeof(next.Hostname) - 1);
+      next.Hostname[sizeof(next.Hostname) - 1] = '\0';
+      bool poolChanged = false;
+      applyLiveSettings(before, next, poolChanged);
+      WiFi.setHostname(next.Hostname);
+      Serial.printf("[OK] Hostname set to %s (applied live)\n", next.Hostname);
     }
     else if (key == "pass" || key == "poolpass" || key == "password") {
       const TSettings before = currentSettings();

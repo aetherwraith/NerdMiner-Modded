@@ -134,6 +134,7 @@
 #define JSON_SPIFFS_KEY_NIGHTFADE	"nightFade"
 #define JSON_SPIFFS_KEY_LATITUDE	"latitude"
 #define JSON_SPIFFS_KEY_LONGITUDE	"longitude"
+#define JSON_SPIFFS_KEY_HOSTNAME	"hostname"
 
 // settings
 struct TSettings
@@ -142,6 +143,7 @@ struct TSettings
 	String WifiPW{ DEFAULT_WIFIPW };
 	String PoolAddress{ DEFAULT_POOLURL };
 	char BtcWallet[80]{ DEFAULT_WALLETID };
+	char Hostname[32]{ "NerdMiner" };
 	char PoolPassword[80]{ DEFAULT_POOLPASS };
 	int PoolPort{ DEFAULT_POOLPORT };
 	String Timezone{ DEFAULT_TIMEZONE };
