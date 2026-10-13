@@ -10,5 +10,8 @@ logs
 boards/ESP32_wroom_guide.md
 
 firmware/
-
 __pycache__/
+
+# Local config overrides
+*local.h
+src/config.local.h

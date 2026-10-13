@@ -51,6 +51,11 @@ bool nvMemory::saveConfig(TSettings* Settings)
 #ifdef NO_DISPLAY
         json[JSON_SPIFFS_KEY_STATUSLED] = Settings->statusLed;
 #endif
+        if (Settings->WifiSSID.length() > 0 && Settings->WifiSSID != "NerdMinerAP" && Settings->WifiSSID != "HanSoloAP")
+        {
+            json[JSON_KEY_SSID] = Settings->WifiSSID;
+            json[JSON_KEY_PASW] = Settings->WifiPW;
+        }
 
         // Open config file
         File configFile = SPIFFS.open(JSON_CONFIG_FILE, "w");

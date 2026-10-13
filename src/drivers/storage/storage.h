@@ -5,34 +5,95 @@
 
 // config files
 
+// Optional local configuration override file (git-ignored)
+#if __has_include("config.local.h")
+#include "config.local.h"
+#endif
+
 // default settings
+#ifndef DEFAULT_SSID
 #ifndef HAN
 #define DEFAULT_SSID		"NerdMinerAP"
 #else
 #define DEFAULT_SSID		"HanSoloAP"
 #endif
+#endif
+
+#ifndef DEFAULT_WIFIPW
 #define DEFAULT_WIFIPW		"MineYourCoins"
+#endif
+
+#ifndef DEFAULT_POOLURL
 #define DEFAULT_POOLURL		"public-pool.io"
+#endif
+
+#ifndef DEFAULT_POOLPASS
 #define DEFAULT_POOLPASS	"x"
+#endif
+
+#ifndef DEFAULT_WALLETID
 #define DEFAULT_WALLETID	"yourBtcAddress"
+#endif
+
+#ifndef DEFAULT_POOLPORT
 #define DEFAULT_POOLPORT	3333
+#endif
+
+#ifndef DEFAULT_TIMEZONE
 #define DEFAULT_TIMEZONE	"Europe/London"
+#endif
+
+#ifndef DEFAULT_SAVESTATS
 #define DEFAULT_SAVESTATS	false
+#endif
+
+#ifndef DEFAULT_INVERTCOLORS
 #ifdef TFT_INVERSION_ON
 #define DEFAULT_INVERTCOLORS	true
 #else
 #define DEFAULT_INVERTCOLORS	false
 #endif
+#endif
+
+#ifndef DEFAULT_BRIGHTNESS
 #define DEFAULT_BRIGHTNESS	250
+#endif
+
+#ifndef DEFAULT_FLIPDISPLAY
 #define DEFAULT_FLIPDISPLAY	false
+#endif
+
+#ifndef DEFAULT_CURRENCY
 #define DEFAULT_CURRENCY	"usd"
+#endif
+
+#ifndef DEFAULT_AUTOBRIGHTNESS
 #define DEFAULT_AUTOBRIGHTNESS	false
+#endif
+
+#ifndef DEFAULT_SCREENOFFTIMEOUT
 #define DEFAULT_SCREENOFFTIMEOUT	0
+#endif
+
+#ifndef DEFAULT_STATUSLED
 #define DEFAULT_STATUSLED	true
+#endif
+
+#ifndef DEFAULT_SCREENTIMEOUT
 #define DEFAULT_SCREENTIMEOUT	0	// minutes, 0 = never
+#endif
+
+#ifndef DEFAULT_NIGHTDIM
 #define DEFAULT_NIGHTDIM	false
+#endif
+
+#ifndef DEFAULT_NIGHTBRIGHTNESS
 #define DEFAULT_NIGHTBRIGHTNESS	40	// backlight duty 1-255
+#endif
+
+#ifndef DEFAULT_NIGHTFADE
 #define DEFAULT_NIGHTFADE	60	// minutes, half before and half after sunset / sunrise
+#endif
 
 // JSON config files
 #define JSON_CONFIG_FILE	"/config.json"

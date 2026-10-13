@@ -36,38 +36,35 @@ nvMemory nvMem;
 
 extern SDCard SDCrd;
 
-String readCustomAPName() {
-    Serial.println("DEBUG: Attempting to read custom AP name from flash at 0x3F0000...");
+String readWebflasherConfig(TSettings* settings) {
+    Serial.println(F("DEBUG: Attempting to read flasher config from flash at 0x3F0000..."));
     
-    // Leer directamente desde flash
-    const size_t DATA_SIZE = 128;
+    const size_t DATA_SIZE = 1024;
     uint8_t buffer[DATA_SIZE];
-    memset(buffer, 0, DATA_SIZE); // Clear buffer
+    memset(buffer, 0, DATA_SIZE);
     
-    // Leer desde 0x3F0000
     esp_err_t result = esp_flash_read(NULL, buffer, 0x3F0000, DATA_SIZE);
     if (result != ESP_OK) {
         Serial.printf("DEBUG: Flash read error: %s\n", esp_err_to_name(result));
         return "";
     }
     
-    Serial.println("DEBUG: Successfully read from flash");
+    buffer[DATA_SIZE - 1] = '\0';
     String data = String((char*)buffer);
     
-    // Debug: show raw data read
-    Serial.printf("DEBUG: Raw flash data: '%s'\n", data.c_str());
-    
     if (data.startsWith("WEBFLASHER_CONFIG:")) {
-        Serial.println("DEBUG: Found WEBFLASHER_CONFIG marker");
-        String jsonPart = data.substring(18); // Después del marcador "WEBFLASHER_CONFIG:"
+        Serial.println(F("DEBUG: Found WEBFLASHER_CONFIG marker"));
+        String jsonPart = data.substring(18);
         
-        Serial.printf("DEBUG: JSON part: '%s'\n", jsonPart.c_str());
-        
-        DynamicJsonDocument doc(256);
+        StaticJsonDocument<1024> doc;
         DeserializationError error = deserializeJson(doc, jsonPart);
         
         if (error == DeserializationError::Ok) {
-            Serial.println("DEBUG: JSON parsed successfully");
+            Serial.println(F("DEBUG: Webflasher JSON parsed successfully"));
+            
+            if (settings) {
+                nvMemory::parseJsonConfig(doc, settings);
+            }
             
             if (doc.containsKey("apname")) {
                 String customAP = doc["apname"].as<String>();
@@ -76,21 +73,20 @@ String readCustomAPName() {
                 if (customAP.length() > 0 && customAP.length() < 32) {
                     Serial.printf("✅ Custom AP name from webflasher: %s\n", customAP.c_str());
                     return customAP;
-                } else {
-                    Serial.printf("DEBUG: AP name invalid length: %d\n", customAP.length());
                 }
-            } else {
-                Serial.println("DEBUG: 'apname' key not found in JSON");
             }
         } else {
             Serial.printf("DEBUG: JSON parse error: %s\n", error.c_str());
         }
     } else {
-        Serial.println("DEBUG: WEBFLASHER_CONFIG marker not found - no custom config");
+        Serial.println(F("DEBUG: WEBFLASHER_CONFIG marker not found - no custom flasher config"));
     }
     
-    Serial.println("DEBUG: Using default AP name");
     return "";
+}
+
+String readCustomAPName() {
+    return readWebflasherConfig(nullptr);
 }
 
 void saveConfigCallback()
@@ -144,8 +140,8 @@ void init_WifiManager()
 #endif //MONITOR_SPEED
     //Serial.setTxTimeoutMs(10);
     
-    // Check for custom AP name from flasher config, otherwise use default
-    String customAPName = readCustomAPName();
+    // Check for custom AP name or webflasher config from flash offset 0x3F0000
+    String customAPName = readWebflasherConfig(&Settings);
     const char* apName = customAPName.length() > 0 ? customAPName.c_str() : DEFAULT_SSID;
 
     //Init pin 15 to eneble 5V external power (LilyGo bug)
@@ -170,18 +166,26 @@ void init_WifiManager()
 
     if (!nvMem.loadConfig(&Settings))
     {
-        //No config file on internal flash.
+        // No config file on internal flash.
         if (SDCrd.loadConfigFile(&Settings))
         {
-            //Config file on SD card.
+            // Config file on SD card.
             SDCrd.SD2nvMemory(&nvMem, &Settings); // reboot on success.          
+        }
+        else if (Settings.WifiSSID.length() > 0 && Settings.WifiSSID != "NerdMinerAP" && Settings.WifiSSID != "HanSoloAP")
+        {
+            // Pre-configured WiFi credentials detected (from config.local.h, build flags, or webflasher)
+            Serial.printf("First boot detected with pre-configured WiFi: %s. Saving to SPIFFS...\n", Settings.WifiSSID.c_str());
+            nvMem.saveConfig(&Settings);
+            WiFi.begin(Settings.WifiSSID.c_str(), Settings.WifiPW.c_str());
+            forceConfig = false;
         }
         else
         {
-            //No config file on SD card. Starting wifi config server.
+            // No config file on SD card or flash. Starting wifi config server.
             forceConfig = true;
         }
-    };
+    }
     
     // Free the memory from SDCard class 
     SDCrd.terminate();
@@ -373,6 +377,11 @@ void init_WifiManager()
         Serial.println("WiFi connected");
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
+
+        if (WiFi.SSID().length() > 0) {
+            Settings.WifiSSID = WiFi.SSID();
+            Settings.WifiPW = WiFi.psk();
+        }
 
 
         // Lets deal with the user config values

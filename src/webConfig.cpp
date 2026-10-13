@@ -56,7 +56,7 @@ static String htmlEscape(const String &in)
 
 // The settings as the page should show them: what is in use, or what was
 // saved and is still waiting for the stratum or monitor task to apply it.
-static TSettings currentSettings()
+TSettings currentSettings()
 {
   TSettings s;
   {
@@ -208,7 +208,7 @@ static void handleRoot()
   webCfgServer.sendContent(""); // ends the chunked response
 }
 
-static bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut);
+bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut);
 
 static void handleSave()
 {
@@ -298,7 +298,7 @@ static void handleSave()
   ESP.restart();
 }
 
-static bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut)
+bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut)
 {
   saveSettingsToFlash(const_cast<TSettings*>(&next));
 

@@ -16,6 +16,7 @@
 #include "drivers/storage/SDCard.h"
 #include "ShaTests/nerdSHA_HWTest.h"
 #include "timeconst.h"
+#include "serialCli.h"
 
 #ifdef TOUCH_ENABLE
 #include "TouchHandler.h"
@@ -142,6 +143,9 @@ void setup()
 #ifdef SDMMC_1BIT_FIX
   SDCrd.initSDcard();
 #endif
+
+  /******** INIT SERIAL CLI ************/
+  setup_serialCli();
 
   /******** INIT WIFI ************/
   init_WifiManager();

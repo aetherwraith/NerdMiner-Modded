@@ -1,0 +1,36 @@
+/**
+ * NerdMiner-Modded Local Configuration Overrides Example
+ *
+ * To bake your personal WiFi credentials, Bitcoin wallet, and mining pool directly
+ * into firmware binaries on compilation (no SD card or captive portal setup needed):
+ *
+ * 1. Copy this file to "src/config.local.h":
+ *    cp src/config.local.h.example src/config.local.h
+ *
+ * 2. Uncomment and adjust the settings below.
+ *
+ * 3. Build and flash the firmware:
+ *    pio run -e ESP32-2432S028R -t upload
+ *
+ * "src/config.local.h" is ignored by git, keeping your secrets safe from commits.
+ */
+
+#pragma once
+
+// WiFi Configuration
+// #define DEFAULT_SSID             "YourWiFiSSID"
+// #define DEFAULT_WIFIPW           "YourWiFiPassword"
+
+// Stratum Mining Pool Configuration
+// #define DEFAULT_POOLURL          "public-pool.io"
+// #define DEFAULT_POOLPORT         21496
+// #define DEFAULT_POOLPASS         "x"
+// #define DEFAULT_WALLETID         "bc1qyourbitcoinaddresshere"
+
+// Localization & Display Settings
+// #define DEFAULT_TIMEZONE         "Europe/London"
+// #define DEFAULT_CURRENCY         "usd"
+// #define DEFAULT_BRIGHTNESS       250
+// #define DEFAULT_AUTOBRIGHTNESS   false
+// #define DEFAULT_FLIPDISPLAY      false
+// #define DEFAULT_INVERTCOLORS     false
