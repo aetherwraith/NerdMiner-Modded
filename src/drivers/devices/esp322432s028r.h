@@ -8,8 +8,8 @@
 // the LAN settings page, see drivers/displays/rgbLed.cpp
 #define HAS_RGB_LED
 #define LED_PIN      4   // Red pin
-#define LED_PIN_G    16  // Green pin
-#define LED_PIN_B    17  // Blue pin
+#define LED_PIN_G    17  // Green pin
+#define LED_PIN_B    16  // Blue pin
 #define LDR_PIN      34  // Onboard LDR (Light Dependent Resistor)
 
 // Pin defines for the SD card interface

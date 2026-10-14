@@ -123,6 +123,7 @@ static void handleRoot()
   page += "<label>Pool Port</label><input type='number' name='port' value='" + String(Settings.PoolPort) + "'>";
   page += "<label>Pool Password (optional)</label><input type='text' name='poolpass' value='" + htmlEscape(String(Settings.PoolPassword)) + "'>";
   page += "<label>BTC Address</label><input type='text' name='wallet' value='" + htmlEscape(String(Settings.BtcWallet)) + "'>";
+  page += "<label>Hostname</label><input type='text' name='hostname' maxlength='31' value='" + htmlEscape(String(Settings.Hostname)) + "'>";
   page += "<label>Backup pool URL (optional)</label><input type='text' name='bpool' value='" + htmlEscape(Settings.BackupPoolAddress) + "'>";
   page += "<label>Backup pool port</label><input type='number' name='bport' value='" + String(Settings.BackupPoolPort) + "'>";
   page += "<label>Backup pool password (optional)</label><input type='text' name='bpoolpass' value='" + htmlEscape(String(Settings.BackupPoolPassword)) + "'>";
@@ -278,7 +279,14 @@ static void handleSave()
   if (webCfgServer.hasArg("poolpass"))
     strncpy(next.PoolPassword, webCfgServer.arg("poolpass").c_str(), sizeof(next.PoolPassword) - 1);
   if (webCfgServer.hasArg("wallet"))
-    strncpy(next.BtcWallet, webCfgServer.arg("wallet").c_str(), sizeof(next.BtcWallet) - 1);
+    strlcpy(next.BtcWallet, webCfgServer.arg("wallet").c_str(), sizeof(next.BtcWallet));
+  if (webCfgServer.hasArg("hostname"))
+  {
+    String h = webCfgServer.arg("hostname");
+    h.trim();
+    if (h.length() > 0)
+      strlcpy(next.Hostname, h.c_str(), sizeof(next.Hostname));
+  }
   if (webCfgServer.hasArg("bpool"))
   {
     next.BackupPoolAddress = webCfgServer.arg("bpool");
@@ -374,7 +382,15 @@ bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poo
 {
   saveSettingsToFlash(const_cast<TSettings*>(&next));
 
-  const bool restart = next.invertColors != before.invertColors || next.flipDisplay != before.flipDisplay;
+  const bool wifiChanged = (next.WifiSSID != before.WifiSSID || next.WifiPW != before.WifiPW) && next.WifiSSID.length() > 0;
+  if (wifiChanged)
+  {
+    Settings.WifiSSID = next.WifiSSID;
+    Settings.WifiPW = next.WifiPW;
+    WiFi.begin(next.WifiSSID.c_str(), next.WifiPW.c_str());
+  }
+
+  const bool restart = next.invertColors != before.invertColors || next.flipDisplay != before.flipDisplay || wifiChanged;
   if (!restart)
   {
     const bool poolChanged = next.PoolAddress != before.PoolAddress || next.PoolPort != before.PoolPort ||
@@ -386,6 +402,14 @@ bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poo
     poolChangedOut = poolChanged || backupChanged;
     if (poolChanged || backupChanged)
       requestPoolChange(next); // stratum task reconnects if the pool in use changed
+    if (strcmp(next.Hostname, before.Hostname) != 0)
+    {
+      {
+        std::lock_guard<std::mutex> lock(g_settingsMutex);
+        strlcpy(Settings.Hostname, next.Hostname, sizeof(Settings.Hostname));
+      }
+      WiFi.setHostname(Settings.Hostname);
+    }
     Settings.WebPassword = next.WebPassword;
     if (!next.Currency.equalsIgnoreCase(before.Currency))
       requestCurrencyChange(currencyFor(next.Currency).code); // monitor task
@@ -427,7 +451,7 @@ bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poo
 static void sendCorsJson(int code, const String &json)
 {
   webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, OPTIONS");
   webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   webCfgServer.send(code, "application/json", json);
 }
@@ -437,7 +461,7 @@ static bool handleCorsOptions()
   if (webCfgServer.method() != HTTP_OPTIONS)
     return false;
   webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, OPTIONS");
   webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   webCfgServer.send(204);
   return true;
@@ -459,23 +483,55 @@ static void getTimezoneFields(const String &tz, String &labelOut, String &posixO
   dstOut = getLocalTime(&timeinfo, 10) && (timeinfo.tm_isdst > 0);
 }
 
+static String findCityName(float lat, float lon)
+{
+  for (int i = 0; i < kCityCount; i++)
+  {
+    if (fabsf(lat - kCities[i].latitude) < 0.005f && fabsf(lon - kCities[i].longitude) < 0.005f)
+      return String(kCities[i].name);
+  }
+  return "";
+}
+
+#ifdef HAS_RGB_LED
+static const char* ledModeName(uint8_t mode)
+{
+  switch (mode)
+  {
+    case LED_MODE_OFF: return "off";
+    case LED_MODE_STEADY: return "steady";
+    default: return "status";
+  }
+}
+
+static String ledColorHex(uint32_t color)
+{
+  char buf[8];
+  snprintf(buf, sizeof(buf), "#%06lx", (unsigned long)(color & 0xFFFFFF));
+  return String(buf);
+}
+#endif
+
 static void handleGetConfig()
 {
   const TSettings s = currentSettings();
   String tzLabel, tzPosix, localTime;
   bool dstActive = false;
   getTimezoneFields(s.Timezone, tzLabel, tzPosix, localTime, dstActive);
+  String cityName = findCityName(s.Latitude, s.Longitude);
 
   String json;
-  json.reserve(1024);
+  json.reserve(1400);
   json += "{";
-  json += "\"pool\":\"" + htmlEscape(s.PoolAddress) + "\"";
+  json += "\"wifiSSID\":\"" + htmlEscape(s.WifiSSID) + "\"";
+  json += ",\"pool\":\"" + htmlEscape(s.PoolAddress) + "\"";
   json += ",\"port\":" + String(s.PoolPort);
   json += ",\"wallet\":\"" + htmlEscape(String(s.BtcWallet)) + "\"";
   json += ",\"hostname\":\"" + htmlEscape(String(s.Hostname)) + "\"";
   json += ",\"poolPassword\":\"" + htmlEscape(String(s.PoolPassword)) + "\"";
   json += ",\"backupPool\":\"" + htmlEscape(s.BackupPoolAddress) + "\"";
   json += ",\"backupPort\":" + String(s.BackupPoolPort);
+  json += ",\"backupPoolPassword\":\"" + htmlEscape(String(s.BackupPoolPassword)) + "\"";
   json += ",\"currency\":\"" + htmlEscape(s.Currency) + "\"";
   json += ",\"timezone\":\"" + htmlEscape(s.Timezone) + "\"";
   json += ",\"timezoneLabel\":\"" + htmlEscape(tzLabel) + "\"";
@@ -490,8 +546,12 @@ static void handleGetConfig()
   json += ",\"nightDim\":" + String(s.nightDim ? "true" : "false");
   json += ",\"nightBrightness\":" + String(s.NightBrightness);
   json += ",\"nightFade\":" + String(s.NightFade);
+  json += ",\"city\":\"" + htmlEscape(cityName) + "\"";
   json += ",\"latitude\":" + String(s.Latitude, 4);
   json += ",\"longitude\":" + String(s.Longitude, 4);
+#ifdef HAS_BACKLIGHT_CONTROL
+  json += ",\"nightDimStatus\":\"" + htmlEscape(nightDimStatus()) + "\"";
+#endif
   json += ",\"invertColors\":" + String(s.invertColors ? "true" : "false");
   json += ",\"flipDisplay\":" + String(s.flipDisplay ? "true" : "false");
 #ifdef NO_DISPLAY
@@ -499,7 +559,9 @@ static void handleGetConfig()
 #endif
 #ifdef HAS_RGB_LED
   json += ",\"ledMode\":" + String(s.ledMode);
+  json += ",\"ledModeName\":\"" + String(ledModeName(s.ledMode)) + "\"";
   json += ",\"ledColor\":" + String(s.ledColor);
+  json += ",\"ledColorHex\":\"" + ledColorHex(s.ledColor) + "\"";
   json += ",\"ledBrightness\":" + String(s.ledBrightness);
   json += ",\"ledScreenOff\":" + String(s.ledScreenOff ? "true" : "false");
 #endif
@@ -507,6 +569,9 @@ static void handleGetConfig()
   json += ",\"stratumURL\":\"" + htmlEscape(s.PoolAddress) + "\"";
   json += ",\"stratumPort\":" + String(s.PoolPort);
   json += ",\"stratumUser\":\"" + htmlEscape(String(s.BtcWallet)) + "\"";
+  json += ",\"fallbackStratumURL\":\"" + htmlEscape(s.BackupPoolAddress) + "\"";
+  json += ",\"fallbackStratumPort\":" + String(s.BackupPoolPort);
+  json += ",\"fallbackStratumPassword\":\"" + htmlEscape(String(s.BackupPoolPassword)) + "\"";
   json += ",\"PrimaryPool\":\"" + htmlEscape(s.PoolAddress) + "\"";
   json += ",\"PrimaryAddress\":\"" + htmlEscape(String(s.BtcWallet)) + "\"";
   json += ",\"version\":\"" + String(CURRENT_VERSION) + "\"";
@@ -583,7 +648,31 @@ static void handleTimezonesList()
   webCfgServer.sendContent("");
 }
 
-static void handlePostConfig()
+static void handleCitiesList()
+{
+  if (handleCorsOptions()) return;
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+
+  webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webCfgServer.send(200, "application/json", "[");
+  for (int i = 0; i < kCityCount; i++) {
+    String entry;
+    entry.reserve(96);
+    if (i > 0) entry += ",";
+    entry += "{\"name\":\"";
+    entry += kCities[i].name;
+    entry += "\",\"latitude\":";
+    entry += String(kCities[i].latitude, 2);
+    entry += ",\"longitude\":";
+    entry += String(kCities[i].longitude, 2);
+    entry += "}";
+    webCfgServer.sendContent(entry);
+  }
+  webCfgServer.sendContent("]");
+  webCfgServer.sendContent("");
+}
+
+static bool applyRequestConfig(bool &poolChangedOut, bool &restartOut)
 {
   const TSettings before = currentSettings();
   TSettings next = before;
@@ -604,12 +693,18 @@ static void handlePostConfig()
   }
 
   nvMemory::parseJsonConfig(doc, &next);
+  restartOut = applyLiveSettings(before, next, poolChangedOut);
+  return true;
+}
 
+static void handlePostConfig()
+{
   bool poolChanged = false;
-  bool restart = applyLiveSettings(before, next, poolChanged);
+  bool restart = false;
+  applyRequestConfig(poolChanged, restart);
 
   if (restart) {
-    sendCorsJson(200, "{\"success\":true,\"message\":\"Settings saved. Restarting device for display changes...\",\"rebootRequired\":true}");
+    sendCorsJson(200, "{\"success\":true,\"message\":\"Settings saved. Restarting device for changes...\",\"rebootRequired\":true}");
     delay(1000);
     ESP.restart();
   } else {
@@ -633,6 +728,106 @@ static void handleConfigRoute()
     return;
   }
   sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
+}
+
+static void handleLedEndpoint()
+{
+  if (handleCorsOptions()) return;
+  HTTPMethod m = webCfgServer.method();
+  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
+    bool poolChanged = false, restart = false;
+    applyRequestConfig(poolChanged, restart);
+  } else if (m != HTTP_GET) {
+    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
+    return;
+  }
+
+  const TSettings s = currentSettings();
+  String json;
+  json.reserve(256);
+  json += "{";
+#ifdef HAS_RGB_LED
+  json += "\"ledMode\":" + String(s.ledMode);
+  json += ",\"ledModeName\":\"" + String(ledModeName(s.ledMode)) + "\"";
+  json += ",\"ledColor\":" + String(s.ledColor);
+  json += ",\"ledColorHex\":\"" + ledColorHex(s.ledColor) + "\"";
+  json += ",\"ledBrightness\":" + String(s.ledBrightness);
+  json += ",\"ledScreenOff\":" + String(s.ledScreenOff ? "true" : "false");
+#elif defined(NO_DISPLAY)
+  json += "\"statusLed\":" + String(s.statusLed ? "true" : "false");
+#else
+  json += "\"supported\":false";
+#endif
+  json += "}";
+  sendCorsJson(200, json);
+}
+
+static void handleDisplayEndpoint()
+{
+  if (handleCorsOptions()) return;
+  HTTPMethod m = webCfgServer.method();
+  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
+    bool poolChanged = false, restart = false;
+    applyRequestConfig(poolChanged, restart);
+    if (restart) {
+      sendCorsJson(200, "{\"success\":true,\"message\":\"Display settings saved. Restarting device...\",\"rebootRequired\":true}");
+      delay(1000);
+      ESP.restart();
+      return;
+    }
+  } else if (m != HTTP_GET) {
+    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
+    return;
+  }
+
+  const TSettings s = currentSettings();
+  String json;
+  json.reserve(400);
+  json += "{\"brightness\":" + String(s.Brightness);
+  json += ",\"autoBrightness\":" + String(s.autoBrightness ? "true" : "false");
+  json += ",\"screenTimeout\":" + String(s.ScreenTimeout);
+  json += ",\"nightDim\":" + String(s.nightDim ? "true" : "false");
+  json += ",\"nightBrightness\":" + String(s.NightBrightness);
+  json += ",\"nightFade\":" + String(s.NightFade);
+  json += ",\"city\":\"" + htmlEscape(findCityName(s.Latitude, s.Longitude)) + "\"";
+  json += ",\"latitude\":" + String(s.Latitude, 4);
+  json += ",\"longitude\":" + String(s.Longitude, 4);
+#ifdef HAS_BACKLIGHT_CONTROL
+  json += ",\"nightDimStatus\":\"" + htmlEscape(nightDimStatus()) + "\"";
+#endif
+  json += ",\"invertColors\":" + String(s.invertColors ? "true" : "false");
+  json += ",\"flipDisplay\":" + String(s.flipDisplay ? "true" : "false");
+  json += "}";
+  sendCorsJson(200, json);
+}
+
+static void handlePoolEndpoint()
+{
+  if (handleCorsOptions()) return;
+  HTTPMethod m = webCfgServer.method();
+  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
+    bool poolChanged = false, restart = false;
+    applyRequestConfig(poolChanged, restart);
+  } else if (m != HTTP_GET) {
+    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
+    return;
+  }
+
+  const TSettings s = currentSettings();
+  String json;
+  json.reserve(512);
+  json += "{\"pool\":\"" + htmlEscape(s.PoolAddress) + "\"";
+  json += ",\"port\":" + String(s.PoolPort);
+  json += ",\"wallet\":\"" + htmlEscape(String(s.BtcWallet)) + "\"";
+  json += ",\"poolPassword\":\"" + htmlEscape(String(s.PoolPassword)) + "\"";
+  json += ",\"backupPool\":\"" + htmlEscape(s.BackupPoolAddress) + "\"";
+  json += ",\"backupPort\":" + String(s.BackupPoolPort);
+  json += ",\"backupPoolPassword\":\"" + htmlEscape(String(s.BackupPoolPassword)) + "\"";
+  json += ",\"activePool\":\"" + htmlEscape(activePoolAddress()) + "\"";
+  json += ",\"activePort\":" + String(activePoolPort());
+  json += ",\"onBackupPool\":" + String(onBackupPool() ? "true" : "false");
+  json += "}";
+  sendCorsJson(200, json);
 }
 
 static void handleProbe()
@@ -777,6 +972,14 @@ void setup_webConfig(void)
   webCfgServer.on("/api/timezone", handleTimezoneEndpoint);
   webCfgServer.on("/api/system/timezones", handleTimezonesList);
   webCfgServer.on("/api/timezones", handleTimezonesList);
+  webCfgServer.on("/api/system/cities", handleCitiesList);
+  webCfgServer.on("/api/cities", handleCitiesList);
+  webCfgServer.on("/api/system/led", handleLedEndpoint);
+  webCfgServer.on("/api/led", handleLedEndpoint);
+  webCfgServer.on("/api/system/display", handleDisplayEndpoint);
+  webCfgServer.on("/api/display", handleDisplayEndpoint);
+  webCfgServer.on("/api/system/pool", handlePoolEndpoint);
+  webCfgServer.on("/api/pool", handlePoolEndpoint);
   setup_ota(webCfgServer);
   webCfgServer.onNotFound([]()
   {

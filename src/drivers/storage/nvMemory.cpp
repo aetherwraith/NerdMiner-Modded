@@ -10,6 +10,7 @@
 #include "../devices/device.h"
 #include "storage.h"
 #include "../../currency.h"
+#include "../../cities.h"
 
 nvMemory::nvMemory() : Initialized_(false){};
 
@@ -167,31 +168,46 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     }
 
     // Backup Pool
-    if (json.containsKey(JSON_SPIFFS_KEY_BACKUPPOOLURL) || json.containsKey("backupPool") || json.containsKey("bpool")) {
-        String bpool = getJsonString(json, {JSON_SPIFFS_KEY_BACKUPPOOLURL, "backupPool", "bpool"});
-        bpool.trim();
-        Settings->BackupPoolAddress = bpool;
+    for (const char* k : {JSON_SPIFFS_KEY_BACKUPPOOLURL, "backupPool", "bpool", "fallbackStratumURL", "SecondaryPool"}) {
+        if (json.containsKey(k)) {
+            String bpool = json[k].as<String>();
+            bpool.trim();
+            if (bpool.startsWith("stratum+tcp://")) bpool = bpool.substring(14);
+            else if (bpool.startsWith("stratum://")) bpool = bpool.substring(10);
+            else if (bpool.startsWith("tcp://")) bpool = bpool.substring(6);
+            int colonIdx = bpool.lastIndexOf(':');
+            if (colonIdx > 0) {
+                int parsedPort = bpool.substring(colonIdx + 1).toInt();
+                if (parsedPort > 0) Settings->BackupPoolPort = parsedPort;
+                bpool = bpool.substring(0, colonIdx);
+            }
+            Settings->BackupPoolAddress = bpool;
+            break;
+        }
     }
-    Settings->BackupPoolPort = constrain(getJsonInt(json, Settings->BackupPoolPort, {JSON_SPIFFS_KEY_BACKUPPOOLPORT, "backupPort", "bport"}), 0, 65535);
-    if (json.containsKey(JSON_SPIFFS_KEY_BACKUPPOOLPASS) || json.containsKey("backupPoolPassword") || json.containsKey("bpoolpass")) {
-        String bpass = getJsonString(json, {JSON_SPIFFS_KEY_BACKUPPOOLPASS, "backupPoolPassword", "bpoolpass"});
-        strlcpy(Settings->BackupPoolPassword, bpass.c_str(), sizeof(Settings->BackupPoolPassword));
+    Settings->BackupPoolPort = constrain(getJsonInt(json, Settings->BackupPoolPort, {JSON_SPIFFS_KEY_BACKUPPOOLPORT, "backupPort", "bport", "fallbackStratumPort", "SecondaryPort"}), 0, 65535);
+    for (const char* k : {JSON_SPIFFS_KEY_BACKUPPOOLPASS, "backupPoolPassword", "bpoolpass", "fallbackStratumPassword", "SecondaryPassword"}) {
+        if (json.containsKey(k)) {
+            String bpass = json[k].as<String>();
+            strlcpy(Settings->BackupPoolPassword, bpass.c_str(), sizeof(Settings->BackupPoolPassword));
+            break;
+        }
     }
 
     // Web UI password
-    String webPass = getJsonString(json, {JSON_SPIFFS_KEY_WEBPASSWORD, "webpass"});
+    String webPass = getJsonString(json, {JSON_SPIFFS_KEY_WEBPASSWORD, "webpass", "webPassword"});
     if (webPass.length() > 0) {
         Settings->WebPassword = webPass;
     } else if (Settings->WebPassword.isEmpty()) {
         Settings->WebPassword = DEFAULT_WEBPASSWORD;
     }
 
-    // Hostname (explicit or fallback to worker suffix from wallet)
+    // Hostname (explicit or fallback to worker suffix from wallet if not yet set)
     String host = getJsonString(json, {JSON_SPIFFS_KEY_HOSTNAME, "hostname", "Hostname", "hostName"});
     if (host.length() > 0) {
         strncpy(Settings->Hostname, host.c_str(), sizeof(Settings->Hostname) - 1);
         Settings->Hostname[sizeof(Settings->Hostname) - 1] = '\0';
-    } else {
+    } else if (Settings->Hostname[0] == '\0') {
         const char* dot = strrchr(Settings->BtcWallet, '.');
         if (dot && strlen(dot + 1) > 0 && strlen(dot + 1) < sizeof(Settings->Hostname)) {
             strncpy(Settings->Hostname, dot + 1, sizeof(Settings->Hostname) - 1);
@@ -224,6 +240,23 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     Settings->NightBrightness = constrain(getJsonInt(json, Settings->NightBrightness, {JSON_SPIFFS_KEY_NIGHTBRIGHTNESS, "nightBrightness", "NightBrightness", "nightbright"}), 1, 255);
     Settings->NightFade = constrain(getJsonInt(json, Settings->NightFade, {JSON_SPIFFS_KEY_NIGHTFADE, "nightFade", "NightFade", "nightfade"}), 1, 240);
 
+    // City (accepts "lat,lon" or a city name from kCities)
+    String city = getJsonString(json, {"city", "City"});
+    if (city.length() > 0) {
+        int comma = city.indexOf(',');
+        if (comma > 0) {
+            Settings->Latitude = constrain(city.substring(0, comma).toFloat(), -90.0f, 90.0f);
+            Settings->Longitude = constrain(city.substring(comma + 1).toFloat(), -180.0f, 180.0f);
+        } else {
+            for (int i = 0; i < kCityCount; i++) {
+                if (city.equalsIgnoreCase(kCities[i].name)) {
+                    Settings->Latitude = kCities[i].latitude;
+                    Settings->Longitude = kCities[i].longitude;
+                    break;
+                }
+            }
+        }
+    }
     Settings->Latitude = constrain(getJsonFloat(json, Settings->Latitude, {JSON_SPIFFS_KEY_LATITUDE, "latitude", "lat"}), -90.0f, 90.0f);
     Settings->Longitude = constrain(getJsonFloat(json, Settings->Longitude, {JSON_SPIFFS_KEY_LONGITUDE, "longitude", "lon"}), -180.0f, 180.0f);
 
@@ -231,20 +264,54 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     Settings->statusLed = getJsonBool(json, Settings->statusLed, {JSON_SPIFFS_KEY_STATUSLED, "statusLed", "led"});
 #endif
 #ifdef HAS_RGB_LED
-    Settings->ledMode = constrain(getJsonInt(json, Settings->ledMode, {JSON_SPIFFS_KEY_LEDMODE, "ledmode"}), LED_MODE_OFF, LED_MODE_STEADY);
-    if (json.containsKey(JSON_SPIFFS_KEY_LEDCOLOR)) {
-        if (json[JSON_SPIFFS_KEY_LEDCOLOR].is<const char*>()) {
-            const char* c = json[JSON_SPIFFS_KEY_LEDCOLOR].as<const char*>();
-            if (c && c[0] == '#' && strlen(c) == 7) Settings->ledColor = strtoul(c + 1, NULL, 16) & 0xFFFFFF;
-        } else {
-            Settings->ledColor = json[JSON_SPIFFS_KEY_LEDCOLOR].as<uint32_t>() & 0xFFFFFF;
+    for (const char* k : {JSON_SPIFFS_KEY_LEDMODE, "ledmode", "mode"}) {
+        if (json.containsKey(k)) {
+            if (json[k].is<const char*>()) {
+                String m = json[k].as<String>();
+                m.toLowerCase();
+                if (m == "off") Settings->ledMode = LED_MODE_OFF;
+                else if (m == "status" || m == "blink") Settings->ledMode = LED_MODE_STATUS;
+                else if (m == "steady" || m == "on" || m == "solid") Settings->ledMode = LED_MODE_STEADY;
+                else Settings->ledMode = constrain(m.toInt(), LED_MODE_OFF, LED_MODE_STEADY);
+            } else {
+                Settings->ledMode = constrain(json[k].as<int>(), LED_MODE_OFF, LED_MODE_STEADY);
+            }
+            break;
         }
-    } else if (json.containsKey("ledcolor")) {
-        String c = json["ledcolor"].as<String>();
-        if (c.length() == 7 && c[0] == '#') Settings->ledColor = strtoul(c.c_str() + 1, NULL, 16) & 0xFFFFFF;
     }
-    Settings->ledBrightness = constrain(getJsonInt(json, Settings->ledBrightness, {JSON_SPIFFS_KEY_LEDBRIGHTNESS, "ledbright"}), 1, 255);
-    Settings->ledScreenOff = getJsonBool(json, Settings->ledScreenOff, {JSON_SPIFFS_KEY_LEDSCREENOFF, "ledscreen"});
+    for (const char* k : {JSON_SPIFFS_KEY_LEDCOLOR, "ledColorHex", "ledcolor", "color"}) {
+        if (json.containsKey(k)) {
+            if (json[k].is<const char*>()) {
+                String c = json[k].as<String>();
+                c.trim();
+                c.toLowerCase();
+                if (c.startsWith("#") && c.length() == 7) {
+                    Settings->ledColor = strtoul(c.c_str() + 1, NULL, 16) & 0xFFFFFF;
+                } else if (c.startsWith("0x")) {
+                    Settings->ledColor = strtoul(c.c_str() + 2, NULL, 16) & 0xFFFFFF;
+                } else if (c == "red") Settings->ledColor = 0xFF0000;
+                else if (c == "green") Settings->ledColor = 0x00FF00;
+                else if (c == "blue") Settings->ledColor = 0x0000FF;
+                else if (c == "yellow") Settings->ledColor = 0xFFFF00;
+                else if (c == "cyan") Settings->ledColor = 0x00FFFF;
+                else if (c == "magenta" || c == "pink") Settings->ledColor = 0xFF00FF;
+                else if (c == "purple") Settings->ledColor = 0x8000FF;
+                else if (c == "orange") Settings->ledColor = 0xFF8000;
+                else if (c == "white") Settings->ledColor = 0xFFFFFF;
+                else if (c == "off" || c == "black") Settings->ledColor = 0x000000;
+                else if (c.length() == 6) {
+                    Settings->ledColor = strtoul(c.c_str(), NULL, 16) & 0xFFFFFF;
+                } else {
+                    Settings->ledColor = (uint32_t)c.toInt() & 0xFFFFFF;
+                }
+            } else {
+                Settings->ledColor = json[k].as<uint32_t>() & 0xFFFFFF;
+            }
+            break;
+        }
+    }
+    Settings->ledBrightness = constrain(getJsonInt(json, Settings->ledBrightness, {JSON_SPIFFS_KEY_LEDBRIGHTNESS, "ledbright", "led_brightness"}), 1, 255);
+    Settings->ledScreenOff = getJsonBool(json, Settings->ledScreenOff, {JSON_SPIFFS_KEY_LEDSCREENOFF, "ledscreen", "led_screen_off"});
 #endif
 
     return true;

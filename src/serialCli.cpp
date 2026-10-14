@@ -80,14 +80,27 @@ static void printHelp(void)
   Serial.println(F("  set pool <host> [port]      - Set stratum mining pool host & port (applied live)"));
   Serial.println(F("  set port <port>             - Set stratum mining pool port (applied live)"));
   Serial.println(F("  set wallet <address>        - Set BTC payout address / worker (applied live)"));
-  Serial.println(F("  set hostname <name>         - Set device network/DHCP hostname (applied live)"));
   Serial.println(F("  set pass <password>         - Set stratum pool password (default 'x')"));
+  Serial.println(F("  set bpool <host> [port]     - Set backup pool host & port (applied live)"));
+  Serial.println(F("  set bport <port>            - Set backup pool port (applied live)"));
+  Serial.println(F("  set bpass <password>        - Set backup pool password (applied live)"));
+  Serial.println(F("  set hostname <name>         - Set device network/DHCP hostname (applied live)"));
   Serial.println(F("  set tz <timezone>           - Set timezone (e.g. Europe/London or POSIX string)"));
   Serial.println(F("  set currency <currency>     - Set fiat price currency (e.g. usd, eur, gbp)"));
+  Serial.println(F("  set savestats <0|1>         - Enable (1) or disable (0) saving stats to flash"));
   Serial.println(F("  set brightness <0-255>      - Set screen backlight brightness (0-255)"));
   Serial.println(F("  set autobrightness <0|1>    - Enable (1) or disable (0) LDR auto-brightness"));
   Serial.println(F("  set timeout <minutes>       - Backlight idle timeout (0 = never off)"));
   Serial.println(F("  set nightdim <0|1>          - Enable (1) or disable (0) sunset/sunrise night dim"));
+  Serial.println(F("  set nightbright <1-255>     - Set night dim target brightness (1-255)"));
+  Serial.println(F("  set nightfade <1-240>       - Set night dim fade duration in minutes (1-240)"));
+  Serial.println(F("  set city <name>             - Set location by city name for sunset/sunrise"));
+  Serial.println(F("  set lat <deg> / lon <deg>   - Set latitude / longitude in decimal degrees"));
+  Serial.println(F("  set ledmode <off|status|on> - Set rear RGB LED mode (0=off, 1=status, 2=steady)"));
+  Serial.println(F("  set ledcolor <#rrggbb|name> - Set rear RGB LED color (e.g. #ff0000 or red)"));
+  Serial.println(F("  set ledbright <1-255>       - Set rear RGB LED brightness (1-255)"));
+  Serial.println(F("  set ledscreen <0|1>         - Turn LED off when screen is off (0|1)"));
+  Serial.println(F("  set webpass <password>      - Set Web UI admin password"));
   Serial.println(F("  set invert <0|1>            - Invert display colors (reboot required)"));
   Serial.println(F("  set flip <0|1>              - Flip display 180 deg (reboot required)"));
   Serial.println(F("  config json <json_payload>  - Apply entire configuration from JSON payload"));
@@ -172,6 +185,7 @@ static void printConfig(void)
   String tzLabel = tzInfo ? String(tzInfo->label) : s.Timezone;
 
   DynamicJsonDocument doc(1024);
+  doc["wifiSSID"] = s.WifiSSID;
   doc["pool"] = s.PoolAddress;
   doc["port"] = s.PoolPort;
   doc["wallet"] = s.BtcWallet;
@@ -179,6 +193,7 @@ static void printConfig(void)
   doc["poolPassword"] = s.PoolPassword;
   doc["backupPool"] = s.BackupPoolAddress;
   doc["backupPort"] = s.BackupPoolPort;
+  doc["backupPoolPassword"] = s.BackupPoolPassword;
   doc["currency"] = s.Currency;
   doc["timezone"] = s.Timezone;
   doc["timezoneLabel"] = tzLabel;
@@ -200,6 +215,9 @@ static void printConfig(void)
 #ifdef HAS_RGB_LED
   doc["ledMode"] = s.ledMode;
   doc["ledColor"] = s.ledColor;
+  char hexBuf[8];
+  snprintf(hexBuf, sizeof(hexBuf), "#%06lx", (unsigned long)(s.ledColor & 0xFFFFFF));
+  doc["ledColorHex"] = hexBuf;
   doc["ledBrightness"] = s.ledBrightness;
   doc["ledScreenOff"] = s.ledScreenOff;
 #endif
@@ -222,15 +240,8 @@ static void handleConfigJson(const String &jsonStr)
   TSettings next = before;
   nvMemory::parseJsonConfig(doc, &next);
 
-  bool wifiChanged = (next.WifiSSID != before.WifiSSID || next.WifiPW != before.WifiPW);
-  if (wifiChanged && next.WifiSSID.length() > 0) {
-    WiFi.begin(next.WifiSSID.c_str(), next.WifiPW.c_str());
-  }
-
   bool poolChanged = false;
   bool restart = applyLiveSettings(before, next, poolChanged);
-
-  if (wifiChanged) restart = true;
 
   if (restart) {
     Serial.println(F("{\"success\":true,\"message\":\"Settings applied. Restarting device for changes...\",\"rebootRequired\":true}"));
@@ -511,6 +522,73 @@ static void executeCommand(const String &rawLine)
       bool poolChanged = false;
       applyLiveSettings(before, next, poolChanged);
       Serial.printf("[OK] Night dimming %s\n", nd ? "enabled" : "disabled");
+    }
+    else if (key == "bpool" || key == "backuppool") {
+      String host = args[2];
+      const TSettings before = currentSettings();
+      TSettings next = before;
+      StaticJsonDocument<256> doc;
+      doc["backupPool"] = host;
+      if (args.size() >= 4 && args[3].toInt() > 0) doc["backupPort"] = args[3].toInt();
+      nvMemory::parseJsonConfig(doc, &next);
+      bool poolChanged = false;
+      applyLiveSettings(before, next, poolChanged);
+      Serial.printf("[OK] Backup pool set to %s:%d (applied live)\n", next.BackupPoolAddress.c_str(), next.BackupPoolPort);
+    }
+    else if (key == "bport" || key == "backupport") {
+      const TSettings before = currentSettings();
+      TSettings next = before;
+      next.BackupPoolPort = constrain(args[2].toInt(), 0, 65535);
+      bool poolChanged = false;
+      applyLiveSettings(before, next, poolChanged);
+      Serial.printf("[OK] Backup pool port set to %d (applied live)\n", next.BackupPoolPort);
+    }
+    else if (key == "bpass" || key == "bpoolpass" || key == "backuppoolpassword") {
+      const TSettings before = currentSettings();
+      TSettings next = before;
+      strlcpy(next.BackupPoolPassword, args[2].c_str(), sizeof(next.BackupPoolPassword));
+      bool poolChanged = false;
+      applyLiveSettings(before, next, poolChanged);
+      Serial.printf("[OK] Backup pool password set to '%s' (applied live)\n", next.BackupPoolPassword);
+    }
+    else if (key == "savestats" || key == "stats") {
+      bool ss = (args[2] == "1" || args[2].equalsIgnoreCase("true") || args[2].equalsIgnoreCase("on"));
+      const TSettings before = currentSettings();
+      TSettings next = before;
+      next.saveStats = ss;
+      bool poolChanged = false;
+      applyLiveSettings(before, next, poolChanged);
+      Serial.printf("[OK] Save stats %s\n", ss ? "enabled" : "disabled");
+    }
+    else if (key == "nightbright" || key == "nightbrightness") {
+      int nb = constrain(args[2].toInt(), 1, 255);
+      const TSettings before = currentSettings();
+      TSettings next = before;
+      next.NightBrightness = nb;
+      bool poolChanged = false;
+      applyLiveSettings(before, next, poolChanged);
+      Serial.printf("[OK] Night brightness set to %d\n", nb);
+    }
+    else if (key == "nightfade") {
+      int nf = constrain(args[2].toInt(), 1, 240);
+      const TSettings before = currentSettings();
+      TSettings next = before;
+      next.NightFade = nf;
+      bool poolChanged = false;
+      applyLiveSettings(before, next, poolChanged);
+      Serial.printf("[OK] Night fade set to %d min\n", nf);
+    }
+    else if (key == "city" || key == "lat" || key == "latitude" || key == "lon" || key == "longitude" ||
+             key == "ledmode" || key == "ledcolor" || key == "ledbright" || key == "ledbrightness" ||
+             key == "ledscreen" || key == "ledscreenoff" || key == "webpass" || key == "webpassword" || key == "led") {
+      const TSettings before = currentSettings();
+      TSettings next = before;
+      StaticJsonDocument<256> doc;
+      doc[key] = args[2];
+      nvMemory::parseJsonConfig(doc, &next);
+      bool poolChanged = false;
+      applyLiveSettings(before, next, poolChanged);
+      Serial.printf("[OK] Setting '%s' updated to '%s' (applied live)\n", key.c_str(), args[2].c_str());
     }
     else if (key == "invert") {
       bool inv = (args[2] == "1" || args[2].equalsIgnoreCase("true") || args[2].equalsIgnoreCase("on"));

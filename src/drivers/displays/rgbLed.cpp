@@ -38,9 +38,9 @@ static void show(uint32_t rgb)
   if (packed == s_shown)
     return; // only touch the peripheral when something changes
   s_shown = packed;
-  ledcWrite(kFirstChannel + 0, 255 - r); // 255 = pin held high = off
-  ledcWrite(kFirstChannel + 1, 255 - g);
-  ledcWrite(kFirstChannel + 2, 255 - bl);
+  ledcWrite(kFirstChannel + 0, r ? (255 - r) : 256); // 256 = 100% high = completely off
+  ledcWrite(kFirstChannel + 1, g ? (255 - g) : 256);
+  ledcWrite(kFirstChannel + 2, bl ? (255 - bl) : 256);
 }
 
 void rgbLedInit(void)
@@ -48,8 +48,9 @@ void rgbLedInit(void)
   for (int i = 0; i < 3; i++)
   {
     ledcSetup(kFirstChannel + i, 5000, 8);
-    ledcWrite(kFirstChannel + i, 255); // off before the pin is attached
+    ledcWrite(kFirstChannel + i, 256); // 100% high = off before the pin is attached
     ledcAttachPin(kPins[i], kFirstChannel + i);
+    ledcWrite(kFirstChannel + i, 256);
   }
   s_shown = 0;
 }
