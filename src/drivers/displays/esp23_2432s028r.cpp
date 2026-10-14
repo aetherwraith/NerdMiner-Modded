@@ -31,6 +31,7 @@
 #include "drivers/storage/nvMemory.h"
 #include "drivers/storage/storage.h"
 #include "currency.h"
+#include "rgbLed.h"
 
 #define WIDTH 130
 #define HEIGHT 170
@@ -346,8 +347,8 @@ static int wifiBars()
 
 static float lastKh = 0;
 
-// The firmware never sets NM_hashing itself (status stays NM_Connecting once
-// WiFi is up), so derive what the header shows from what is actually happening.
+// The header follows what is actually happening: hashing whenever the hash
+// counter moves, even while the pool connection is being made again.
 static int uiStatus()
 {
   if (mMonitor.NerdStatus == NM_waitingConfig)
@@ -1134,12 +1135,7 @@ void esp32_2432S028R_Init(void)
     return;
   }
 
-  pinMode(LED_PIN, OUTPUT);
-  pinMode(LED_PIN_B, OUTPUT);
-  pinMode(LED_PIN_G, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
-  digitalWrite(LED_PIN_B, HIGH);
-  digitalWrite(LED_PIN_G, HIGH);
+  rgbLedInit();
   pData.bestDifficulty = "0";
   pData.workersHash = "0";
   pData.workersCount = 0;
@@ -1227,8 +1223,6 @@ void esp32_2432S028R_AnimateCurrentScreen(unsigned long frame)
   }
 }
 
-unsigned long previousMillis = 0;
-
 // Touch is sampled by its own small task at ~50Hz (the monitor loop is too
 // slow and can block on network calls, which made taps get missed). It only
 // records the gesture; all drawing stays on the monitor task.
@@ -1280,6 +1274,7 @@ static void touchTask(void *)
 
 void esp32_2432S028R_DoLedStuff(unsigned long frame)
 {
+  (void)frame;
   unsigned long currentMillis = millis();
   int action = pendingTouch;
   pendingTouch = TA_NONE;
@@ -1365,30 +1360,7 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
   if (uiLive)
     saveUiPrefs();
 
-  switch (mMonitor.NerdStatus)
-  {
-  case NM_waitingConfig:
-    digitalWrite(LED_PIN, LOW); // steady
-    break;
-
-  case NM_Connecting:
-    if (currentMillis - previousMillis >= 500)
-    {
-      previousMillis = currentMillis;
-      digitalWrite(LED_PIN, HIGH);
-      digitalWrite(LED_PIN_B, !digitalRead(LED_PIN));
-    }
-    break;
-
-  case NM_hashing:
-    if (currentMillis - previousMillis >= 500)
-    {
-      previousMillis = currentMillis;
-      digitalWrite(LED_PIN_B, HIGH);
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-    }
-    break;
-  }
+  rgbLedTick();
 }
 
 // ----------------------------------------------------- dev: screenshot dump --

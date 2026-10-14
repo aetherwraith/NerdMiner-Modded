@@ -29,12 +29,16 @@ bool nvMemory::saveConfig(TSettings* Settings)
         // Save Config in JSON format
         Serial.println(F("SPIFS: Saving configuration."));
 
-        // Create a JSON document
-        StaticJsonDocument<1024> json;
+        // Create a JSON document (on the heap: it has outgrown a small stack)
+        DynamicJsonDocument json(2048);
         json[JSON_SPIFFS_KEY_POOLURL] = Settings->PoolAddress;
         json[JSON_SPIFFS_KEY_POOLPORT] = Settings->PoolPort;
         json[JSON_SPIFFS_KEY_POOLPASS] = Settings->PoolPassword;
         json[JSON_SPIFFS_KEY_WALLETID] = Settings->BtcWallet;
+        json[JSON_SPIFFS_KEY_BACKUPPOOLURL] = Settings->BackupPoolAddress;
+        json[JSON_SPIFFS_KEY_BACKUPPOOLPORT] = Settings->BackupPoolPort;
+        json[JSON_SPIFFS_KEY_BACKUPPOOLPASS] = Settings->BackupPoolPassword;
+        json[JSON_SPIFFS_KEY_WEBPASSWORD] = Settings->WebPassword;
         json[JSON_SPIFFS_KEY_TIMEZONE] = Settings->Timezone;
         json[JSON_SPIFFS_KEY_STATS2NV] = Settings->saveStats;
         json[JSON_SPIFFS_KEY_INVCOLOR] = Settings->invertColors;
@@ -52,6 +56,12 @@ bool nvMemory::saveConfig(TSettings* Settings)
         json[JSON_SPIFFS_KEY_HOSTNAME] = Settings->Hostname;
 #ifdef NO_DISPLAY
         json[JSON_SPIFFS_KEY_STATUSLED] = Settings->statusLed;
+#endif
+#ifdef HAS_RGB_LED
+        json[JSON_SPIFFS_KEY_LEDMODE] = Settings->ledMode;
+        json[JSON_SPIFFS_KEY_LEDCOLOR] = Settings->ledColor;
+        json[JSON_SPIFFS_KEY_LEDBRIGHTNESS] = Settings->ledBrightness;
+        json[JSON_SPIFFS_KEY_LEDSCREENOFF] = Settings->ledScreenOff;
 #endif
         if (Settings->WifiSSID.length() > 0 && Settings->WifiSSID != "NerdMinerAP" && Settings->WifiSSID != "HanSoloAP")
         {
@@ -157,6 +167,26 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
         Settings->BtcWallet[sizeof(Settings->BtcWallet) - 1] = '\0';
     }
 
+    // Backup Pool
+    if (json.containsKey(JSON_SPIFFS_KEY_BACKUPPOOLURL) || json.containsKey("backupPool") || json.containsKey("bpool")) {
+        String bpool = getJsonString(json, {JSON_SPIFFS_KEY_BACKUPPOOLURL, "backupPool", "bpool"});
+        bpool.trim();
+        Settings->BackupPoolAddress = bpool;
+    }
+    Settings->BackupPoolPort = constrain(getJsonInt(json, Settings->BackupPoolPort, {JSON_SPIFFS_KEY_BACKUPPOOLPORT, "backupPort", "bport"}), 0, 65535);
+    if (json.containsKey(JSON_SPIFFS_KEY_BACKUPPOOLPASS) || json.containsKey("backupPoolPassword") || json.containsKey("bpoolpass")) {
+        String bpass = getJsonString(json, {JSON_SPIFFS_KEY_BACKUPPOOLPASS, "backupPoolPassword", "bpoolpass"});
+        strlcpy(Settings->BackupPoolPassword, bpass.c_str(), sizeof(Settings->BackupPoolPassword));
+    }
+
+    // Web UI password
+    String webPass = getJsonString(json, {JSON_SPIFFS_KEY_WEBPASSWORD, "webpass"});
+    if (webPass.length() > 0) {
+        Settings->WebPassword = webPass;
+    } else if (Settings->WebPassword.isEmpty()) {
+        Settings->WebPassword = DEFAULT_WEBPASSWORD;
+    }
+
     // Hostname (explicit or fallback to worker suffix from wallet)
     String host = getJsonString(json, {JSON_SPIFFS_KEY_HOSTNAME, "hostname", "Hostname", "hostName"});
     if (host.length() > 0) {
@@ -198,6 +228,22 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
 #ifdef NO_DISPLAY
     Settings->statusLed = getJsonBool(json, Settings->statusLed, {JSON_SPIFFS_KEY_STATUSLED, "statusLed", "led"});
 #endif
+#ifdef HAS_RGB_LED
+    Settings->ledMode = constrain(getJsonInt(json, Settings->ledMode, {JSON_SPIFFS_KEY_LEDMODE, "ledmode"}), LED_MODE_OFF, LED_MODE_STEADY);
+    if (json.containsKey(JSON_SPIFFS_KEY_LEDCOLOR)) {
+        if (json[JSON_SPIFFS_KEY_LEDCOLOR].is<const char*>()) {
+            const char* c = json[JSON_SPIFFS_KEY_LEDCOLOR].as<const char*>();
+            if (c && c[0] == '#' && strlen(c) == 7) Settings->ledColor = strtoul(c + 1, NULL, 16) & 0xFFFFFF;
+        } else {
+            Settings->ledColor = json[JSON_SPIFFS_KEY_LEDCOLOR].as<uint32_t>() & 0xFFFFFF;
+        }
+    } else if (json.containsKey("ledcolor")) {
+        String c = json["ledcolor"].as<String>();
+        if (c.length() == 7 && c[0] == '#') Settings->ledColor = strtoul(c.c_str() + 1, NULL, 16) & 0xFFFFFF;
+    }
+    Settings->ledBrightness = constrain(getJsonInt(json, Settings->ledBrightness, {JSON_SPIFFS_KEY_LEDBRIGHTNESS, "ledbright"}), 1, 255);
+    Settings->ledScreenOff = getJsonBool(json, Settings->ledScreenOff, {JSON_SPIFFS_KEY_LEDSCREENOFF, "ledscreen"});
+#endif
 
     return true;
 }
@@ -222,7 +268,7 @@ bool nvMemory::loadConfig(TSettings* Settings)
             if (configFile)
             {
                 Serial.println("SPIFS: Loading config file");
-                StaticJsonDocument<1024> json;
+                DynamicJsonDocument json(2048);
                 DeserializationError error = deserializeJson(json, configFile);
                 configFile.close();
                 serializeJsonPretty(json, Serial);
