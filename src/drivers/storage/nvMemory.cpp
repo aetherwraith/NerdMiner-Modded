@@ -46,7 +46,6 @@ bool nvMemory::saveConfig(TSettings* Settings)
         json[JSON_SPIFFS_KEY_FLIPDISPLAY] = Settings->flipDisplay;
         json[JSON_SPIFFS_KEY_CURRENCY] = Settings->Currency;
         json[JSON_SPIFFS_KEY_AUTOBRIGHTNESS] = Settings->autoBrightness;
-        json[JSON_SPIFFS_KEY_SCREENOFFTIMEOUT] = Settings->screenOffTimeout;
         json[JSON_SPIFFS_KEY_SCREENTIMEOUT] = Settings->ScreenTimeout;
         json[JSON_SPIFFS_KEY_NIGHTDIM] = Settings->nightDim;
         json[JSON_SPIFFS_KEY_NIGHTBRIGHTNESS] = Settings->NightBrightness;
@@ -216,7 +215,10 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
 
     // Display & timeouts
     Settings->Brightness = constrain(getJsonInt(json, Settings->Brightness, {JSON_SPIFFS_KEY_BRIGHTNESS, JSON_KEY_BRIGHTNESS, "brightness"}), 0, 255);
-    Settings->screenOffTimeout = max(0, getJsonInt(json, Settings->screenOffTimeout, {JSON_SPIFFS_KEY_SCREENOFFTIMEOUT, JSON_KEY_SCREENOFFTIMEOUT, "screen_off_timeout", "screenOff"}));
+    int legacySec = getJsonInt(json, -1, {"screenOffTimeout", "screen_off_timeout", "screenOff"});
+    if (legacySec >= 0) {
+        Settings->ScreenTimeout = constrain((legacySec + 59) / 60, 0, 1440);
+    }
     Settings->ScreenTimeout = constrain(getJsonInt(json, Settings->ScreenTimeout, {JSON_SPIFFS_KEY_SCREENTIMEOUT, "screenTimeout", "ScreenTimeout", "screenoff"}), 0, 1440);
     Settings->nightDim = getJsonBool(json, Settings->nightDim, {JSON_SPIFFS_KEY_NIGHTDIM, "nightDim", "nightdim"});
     Settings->NightBrightness = constrain(getJsonInt(json, Settings->NightBrightness, {JSON_SPIFFS_KEY_NIGHTBRIGHTNESS, "nightBrightness", "NightBrightness", "nightbright"}), 1, 255);

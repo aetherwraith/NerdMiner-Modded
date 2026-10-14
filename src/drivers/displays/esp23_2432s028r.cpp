@@ -1075,9 +1075,6 @@ static void updateAutoBrightness(unsigned long now)
 }
 #endif
 
-static bool isScreenOff = false;
-static unsigned long lastActivityTime = 0;
-
 void esp32_2432S028R_Init(void)
 {
   tft.init();
@@ -1100,9 +1097,6 @@ void esp32_2432S028R_Init(void)
   TFT_eTouchBase::Calibation calibation = {233, 3785, 3731, 120, 2};
   touch.setCalibration(calibation);
   xTaskCreatePinnedToCore(touchTask, "cydTouch", 3072, NULL, 1, NULL, 0);
-
-  lastActivityTime = millis();
-  isScreenOff = false;
 
   // Backlight: LEDC channel 0, 5kHz, 8 bit (0-255 duty)
   ledcSetup(0, 5000, 8);
@@ -1152,9 +1146,7 @@ void esp32_2432S028R_Init(void)
 void esp32_2432S028R_AlternateScreenState(void)
 {
   Serial.println("Switching display state");
-  isScreenOff = !isScreenOff;
-  lastActivityTime = millis();
-  if (isScreenOff)
+  if (ledcRead(0) > 0)
   {
     ledcWrite(0, 0);
   }
@@ -1232,8 +1224,7 @@ enum TouchAction
   TA_NEXT,
   TA_PREV,
   TA_BACKLIGHT,
-  TA_ACCENT,
-  TA_WAKEUP
+  TA_ACCENT
 };
 static volatile int pendingTouch = TA_NONE;
 
@@ -1250,13 +1241,8 @@ static void touchTask(void *)
       if (++downCount == 2 && !wasDown) // two consecutive samples: real press, act once per touch
       {
         wasDown = true;
-        lastActivityTime = millis();
-        if (isScreenOff || ledcRead(0) == 0)
-        {
-          pendingTouch = TA_WAKEUP; // dark/sleeping: any touch turns the backlight back on
-        }
-        else if (t_y < HDR_H + 4 && t_x > 235)
-          pendingTouch = TA_BACKLIGHT; // top-right: backlight on/off
+        if (ledcRead(0) == 0 || (t_y < HDR_H + 4 && t_x > 235))
+          pendingTouch = TA_BACKLIGHT; // dark: any touch wakes; lit: top-right turns off
         else if (t_y < HDR_H + 4 && t_x < 110)
           pendingTouch = TA_ACCENT; // wordmark: next accent colour
         else
@@ -1275,7 +1261,6 @@ static void touchTask(void *)
 void esp32_2432S028R_DoLedStuff(unsigned long frame)
 {
   (void)frame;
-  unsigned long currentMillis = millis();
   int action = pendingTouch;
   pendingTouch = TA_NONE;
   if (action != TA_NONE)
@@ -1283,76 +1268,34 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
   DisplayDriver *drv = currentDisplayDriver;
   switch (action)
   {
-  case TA_WAKEUP:
-    isScreenOff = false;
-    lastActivityTime = currentMillis;
-    {
-#ifdef LDR_PIN
-      uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : Settings.Brightness;
-#else
-      uint8_t duty = Settings.Brightness;
-#endif
-      if (duty == 0) duty = 250;
-      ledcWrite(0, duty);
-    }
-    break;
   case TA_BACKLIGHT:
     esp32_2432S028R_AlternateScreenState();
     break;
   case TA_ACCENT:
-    lastActivityTime = currentMillis;
     setAccent(accentIdx + 1);
     break;
   case TA_NEXT:
-    lastActivityTime = currentMillis;
     drv->current_cyclic_screen = (drv->current_cyclic_screen + 1) % drv->num_cyclic_screens;
     break;
   case TA_PREV:
-    lastActivityTime = currentMillis;
     drv->current_cyclic_screen = drv->current_cyclic_screen - 1;
     if (drv->current_cyclic_screen < 0)
       drv->current_cyclic_screen = drv->num_cyclic_screens - 1;
     break;
   }
 
-  // Check auto screen off timeout
-  if (Settings.screenOffTimeout > 0 && !isScreenOff)
-  {
-    if (currentMillis - lastActivityTime >= (unsigned long)Settings.screenOffTimeout * 1000UL)
-    {
-      Serial.println("[CYD] Screen off timeout reached");
-      isScreenOff = true;
-      ledcWrite(0, 0);
-    }
-  }
-
-  // If screen is on, handle auto brightness
-  if (!isScreenOff)
-  {
 #ifdef LDR_PIN
-    if (Settings.autoBrightness)
-    {
-      updateAutoBrightness(currentMillis);
-    }
-#endif
+  // If screen is lit and auto-brightness is enabled, sample LDR
+  if (ledcRead(0) > 0 && Settings.autoBrightness)
+  {
+    updateAutoBrightness(millis());
   }
+#endif
 
   // Screen changed by touch or the boot button: draw the new page right away
   // from the last values it showed; the next data tick refreshes them.
   if (uiLive && currentDisplayDriver->current_cyclic_screen != uiScreen)
   {
-    lastActivityTime = currentMillis;
-    if (isScreenOff)
-    {
-      isScreenOff = false;
-#ifdef LDR_PIN
-      uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : Settings.Brightness;
-#else
-      uint8_t duty = Settings.Brightness;
-#endif
-      if (duty == 0) duty = 250;
-      ledcWrite(0, duty);
-    }
     int s = currentDisplayDriver->current_cyclic_screen;
     ensureChrome(s);
     repaintCached(s);

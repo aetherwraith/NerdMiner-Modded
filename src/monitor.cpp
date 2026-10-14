@@ -4,7 +4,6 @@
 #include "HTTPClient.h"
 #include <WiFiClientSecure.h>
 #include <time.h>
-#include <list>
 #include <atomic>
 #include "mining.h"
 #include "utils.h"
@@ -303,31 +302,21 @@ static EHashRateScale s_hashrate_scale = HashRateScale_99KH;
 static uint32_t s_skip_first = 3;
 static double s_top_hashrate = 0.0;
 
-static std::list<double> s_hashrate_avg_list;
-static double s_hashrate_summ = 0.0;
-static uint8_t s_hashrate_recalc = 0;
+double getHashrateKhs(void)
+{
+  const float khs = getMinerStatus().hashrateKHs;
+  if (khs > 0.0f)
+    return (double)khs;
+  if (upTime > 0)
+    return (double)totalKHashes / (double)upTime;
+  return 0.0;
+}
 
 String getCurrentHashRate(unsigned long mElapsed)
 {
-  double hashrate = (double)elapsedKHs * 1000.0 / (double)mElapsed;
-
-  s_hashrate_summ += hashrate;
-  s_hashrate_avg_list.push_back(hashrate);
-  if (s_hashrate_avg_list.size() > 10)
-  {
-    s_hashrate_summ -= s_hashrate_avg_list.front();
-    s_hashrate_avg_list.pop_front();
-  }
-
-  ++s_hashrate_recalc;
-  if (s_hashrate_recalc == 0)
-  {
-    s_hashrate_summ = 0.0;
-    for (auto itt = s_hashrate_avg_list.begin(); itt != s_hashrate_avg_list.end(); ++itt)
-      s_hashrate_summ += *itt;
-  }
-
-  double avg_hashrate = s_hashrate_summ / (double)s_hashrate_avg_list.size();
+  double avg_hashrate = getHashrateKhs();
+  if (avg_hashrate <= 0.0 && mElapsed > 0)
+    avg_hashrate = (double)elapsedKHs * 1000.0 / (double)mElapsed;
   if (avg_hashrate < 0.0)
     avg_hashrate = 0.0;
 
@@ -359,18 +348,6 @@ String getCurrentHashRate(unsigned long mElapsed)
         return String(avg_hashrate, 1);
       return String((int)avg_hashrate );
   }
-}
-
-double getHashrateKhs(void)
-{
-  if (!s_hashrate_avg_list.empty())
-  {
-    double avg = s_hashrate_summ / (double)s_hashrate_avg_list.size();
-    return avg > 0.0 ? avg : 0.0;
-  }
-  if (upTime > 0)
-    return (double)totalKHashes / (double)upTime;
-  return 0.0;
 }
 
 mining_data getMiningData(unsigned long mElapsed)

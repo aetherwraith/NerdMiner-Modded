@@ -193,7 +193,6 @@ static bool mainPoolAnswers(void)
 
 // For /api/status: counted by the stratum task...
 static volatile uint32_t s_sharesAccepted = 0;
-static volatile uint32_t s_sharesRejected = 0;
 static volatile double s_poolDifficulty = DEFAULT_DIFFICULTY;
 // ...and the kH counter, sampled once a second by the monitor loop.
 #define STATUS_RATE_SAMPLES 11 // 10 s window
@@ -227,7 +226,7 @@ MinerStatus getMinerStatus(void)
       s.avgHashrateKHs = (s_rateKh[head] - s_bootKh) * 1000.0f / bootMs;
   }
   s.accepted = s_sharesAccepted;
-  s.rejected = s_sharesRejected;
+  s.rejected = rejects;
   s.subscribed = isMinerSuscribed;
   s.poolDifficulty = s_poolDifficulty;
   return s;
@@ -742,10 +741,7 @@ void runStratumWorker(void *name) {
                                           if (parse_extract_result(line))
                                             s_sharesAccepted++;
                                           else
-                                          {
-                                            rejects++;
-                                            s_sharesRejected++; // "result":false without an error
-                                          }
+                                            rejects++; // "result":false without an error
 
                                           if (itt->second->diff > best_diff)
                                             best_diff = itt->second->diff;
@@ -767,7 +763,6 @@ void runStratumWorker(void *name) {
                                         {
                                           Serial.printf("Refuse submition %d\n", id);
                                           rejects++;
-                                          s_sharesRejected++;
                                           s_submition_map.erase(itt);
                                         }
                                       }
@@ -2081,7 +2076,7 @@ void saveStat() {
 
 void resetStat() {
     Serial.printf("[MONITOR] Resetting NVS stats\n");
-    templates = hashes = Mhashes = totalKHashes = elapsedKHs = upTime = shares = valids = rejects = 0;
+    templates = hashes = Mhashes = totalKHashes = elapsedKHs = upTime = shares = valids = rejects = s_sharesAccepted = 0;
     best_diff = 0.0;
     saveStat();
 }

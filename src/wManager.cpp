@@ -254,8 +254,8 @@ void init_WifiManager()
     #endif
     #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
     char screenOffConvValue[8];
-    sprintf(screenOffConvValue, "%d", Settings.screenOffTimeout);
-    WiFiManagerParameter screenOff_text_box_num("screenOff", "Auto Screen Off (seconds, 0=disabled)", screenOffConvValue, 6);
+    sprintf(screenOffConvValue, "%d", Settings.ScreenTimeout);
+    WiFiManagerParameter screenOff_text_box_num("screenOff", "Auto Screen Off (minutes, 0=disabled)", screenOffConvValue, 6);
     wm.addParameter(&screenOff_text_box_num);
     #endif
 
@@ -273,7 +273,7 @@ void init_WifiManager()
             Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
             Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
             Settings.Brightness = atoi(brightness_text_box_num.getValue());
-            Settings.screenOffTimeout = atoi(screenOff_text_box_num.getValue());
+            Settings.ScreenTimeout = constrain(atoi(screenOff_text_box_num.getValue()), 0, 1440);
             #endif
             #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
             Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);

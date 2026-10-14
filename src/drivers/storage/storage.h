@@ -71,10 +71,6 @@
 #define DEFAULT_AUTOBRIGHTNESS	false
 #endif
 
-#ifndef DEFAULT_SCREENOFFTIMEOUT
-#define DEFAULT_SCREENOFFTIMEOUT	0
-#endif
-
 #ifndef DEFAULT_STATUSLED
 #define DEFAULT_STATUSLED	true
 #endif
@@ -121,7 +117,6 @@
 #define JSON_KEY_FLIPDISPLAY	"flipDisplay"
 #define JSON_KEY_CURRENCY	"Currency"
 #define JSON_KEY_AUTOBRIGHTNESS	"autoBrightness"
-#define JSON_KEY_SCREENOFFTIMEOUT	"screenOffTimeout"
 
 // JSON config file SPIFFS (different for backward compatibility with existing devices)
 #define JSON_SPIFFS_KEY_POOLURL		"poolString"
@@ -135,7 +130,6 @@
 #define JSON_SPIFFS_KEY_FLIPDISPLAY	"flipDisplay"
 #define JSON_SPIFFS_KEY_CURRENCY	"currency"
 #define JSON_SPIFFS_KEY_AUTOBRIGHTNESS	"autoBrightness"
-#define JSON_SPIFFS_KEY_SCREENOFFTIMEOUT	"screenOffTimeout"
 #define JSON_SPIFFS_KEY_STATUSLED	"statusLed"
 #define JSON_SPIFFS_KEY_SCREENTIMEOUT	"screenTimeout"
 #define JSON_SPIFFS_KEY_NIGHTDIM	"nightDim"
@@ -174,7 +168,6 @@ struct TSettings
 	bool flipDisplay{ DEFAULT_FLIPDISPLAY };	// rotate display 180 degrees (USB on the left)
 	String Currency{ DEFAULT_CURRENCY };	// fiat currency for the BTC price (CoinGecko vs_currency code)
 	bool autoBrightness{ DEFAULT_AUTOBRIGHTNESS }; // automatic screen brightness via LDR sensor
-	int screenOffTimeout{ DEFAULT_SCREENOFFTIMEOUT }; // auto screen off timeout in seconds (0 = disabled)
 	bool statusLed{ DEFAULT_STATUSLED };	// boards without a screen: status LED on/off
 	int ScreenTimeout{ DEFAULT_SCREENTIMEOUT };	// minutes without a touch until the backlight goes off, 0 = never
 	// Night dimming: the backlight fades from Brightness to NightBrightness across

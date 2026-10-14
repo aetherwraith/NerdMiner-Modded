@@ -131,11 +131,17 @@ static void printStatus(void)
     Serial.printf("  AP SSID:       %s (IP: %s)\n", Settings.WifiSSID.c_str(), WiFi.softAPIP().toString().c_str());
   }
   Serial.printf("  MAC Address:   %s\n", WiFi.macAddress().c_str());
-  Serial.printf("  Hashrate:      %.2f KH/s\n", khs);
-  Serial.printf("  Shares:        %u total, %u accepted, %u rejected (%.2f%% rejects)\n",
-                shares, valids, rejects, shares > 0 ? ((float)rejects / (float)shares * 100.0f) : 0.0f);
-  Serial.printf("  Best Diff:     %s\n", best_diff_str);
-  Serial.printf("  Stratum Pool:  %s:%d (User: %s)\n", Settings.PoolAddress.c_str(), Settings.PoolPort, Settings.BtcWallet);
+  const MinerStatus m = getMinerStatus();
+  Serial.printf("  Hashrate:      %.2f KH/s (avg: %.2f KH/s)\n", khs, m.avgHashrateKHs);
+  Serial.printf("  Shares:        %u 32-bit, %u accepted, %u rejected, %u blocks\n",
+                shares, m.accepted, m.rejected, valids);
+  Serial.printf("  Best Diff:     %s (Pool Diff: %.5g)\n", best_diff_str, m.poolDifficulty);
+  Serial.printf("  Active Pool:   %s:%d (%s, User: %s)\n",
+                activePoolAddress().c_str(), activePoolPort(),
+                onBackupPool() ? "BACKUP" : "PRIMARY", Settings.BtcWallet);
+  if (!Settings.BackupPoolAddress.isEmpty()) {
+    Serial.printf("  Backup Pool:   %s:%d\n", Settings.BackupPoolAddress.c_str(), Settings.BackupPoolPort);
+  }
   Serial.printf("  Uptime:        %lud %02luh %02lum %02lus\n", days, hours, mins, s);
   Serial.printf("  Free Heap:     %u bytes (min: %u bytes)\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
   Serial.printf("  Internal Temp: %.1f °C\n", temperatureRead());
@@ -171,6 +177,8 @@ static void printConfig(void)
   doc["wallet"] = s.BtcWallet;
   doc["hostname"] = s.Hostname;
   doc["poolPassword"] = s.PoolPassword;
+  doc["backupPool"] = s.BackupPoolAddress;
+  doc["backupPort"] = s.BackupPoolPort;
   doc["currency"] = s.Currency;
   doc["timezone"] = s.Timezone;
   doc["timezoneLabel"] = tzLabel;
@@ -188,6 +196,12 @@ static void printConfig(void)
   doc["flipDisplay"] = s.flipDisplay;
 #ifdef NO_DISPLAY
   doc["statusLed"] = s.statusLed;
+#endif
+#ifdef HAS_RGB_LED
+  doc["ledMode"] = s.ledMode;
+  doc["ledColor"] = s.ledColor;
+  doc["ledBrightness"] = s.ledBrightness;
+  doc["ledScreenOff"] = s.ledScreenOff;
 #endif
   doc["version"] = CURRENT_VERSION;
 

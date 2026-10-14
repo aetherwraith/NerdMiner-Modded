@@ -137,12 +137,13 @@ void backlightTick()
   // Brightness (also when changed on the LAN settings page) and night
   // dimming. A screen that has been switched off stays off; one that is
   // only dark because the level was 0 follows the new level.
+  // When LDR auto-brightness is active, the display driver manages duty cycle.
   const int level = targetBacklightLevel(true);
   if (level != s_backlightLevel)
   {
     const bool lit = ledcRead(0) > 0 || s_backlightLevel == 0;
     s_backlightLevel = level;
-    if (lit)
+    if (lit && !Settings.autoBrightness)
       ledcWrite(0, level);
   }
 

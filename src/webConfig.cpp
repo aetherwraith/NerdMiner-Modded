@@ -12,11 +12,9 @@
 #include "drivers/storage/storage.h"
 #include "currency.h"
 #include "timezone.h"
-#include "version.h"
 #include "utils.h"
 #include "cities.h"
 #include "drivers/storage/nvMemory.h"
-#include <ArduinoJson.h>
 #include "ota.h"
 
 extern TSettings Settings;
@@ -426,23 +424,47 @@ bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poo
   return true; // restart needed
 }
 
-static void handleGetConfig()
+static void sendCorsJson(int code, const String &json)
 {
-  const TSettings s = currentSettings();
-  const TimeZoneInfo* tzInfo = findTimeZone(s.Timezone);
-  String tzPosix = getPosixTz(s.Timezone);
-  String tzLabel = tzInfo ? String(tzInfo->label) : s.Timezone;
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  webCfgServer.send(code, "application/json", json);
+}
+
+static bool handleCorsOptions()
+{
+  if (webCfgServer.method() != HTTP_OPTIONS)
+    return false;
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  webCfgServer.send(204);
+  return true;
+}
+
+static void getTimezoneFields(const String &tz, String &labelOut, String &posixOut, String &localTimeOut, bool &dstOut)
+{
+  const TimeZoneInfo* info = findTimeZone(tz);
+  posixOut = getPosixTz(tz);
+  labelOut = info ? String(info->label) : tz;
 
   unsigned long h = 0, min = 0, sec = 0;
   getTime(&h, &min, &sec);
   char timeBuf[12];
   snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu:%02lu", h, min, sec);
+  localTimeOut = String(timeBuf);
 
   struct tm timeinfo;
+  dstOut = getLocalTime(&timeinfo, 10) && (timeinfo.tm_isdst > 0);
+}
+
+static void handleGetConfig()
+{
+  const TSettings s = currentSettings();
+  String tzLabel, tzPosix, localTime;
   bool dstActive = false;
-  if (getLocalTime(&timeinfo, 10)) {
-    dstActive = timeinfo.tm_isdst > 0;
-  }
+  getTimezoneFields(s.Timezone, tzLabel, tzPosix, localTime, dstActive);
 
   String json;
   json.reserve(1024);
@@ -458,7 +480,7 @@ static void handleGetConfig()
   json += ",\"timezone\":\"" + htmlEscape(s.Timezone) + "\"";
   json += ",\"timezoneLabel\":\"" + htmlEscape(tzLabel) + "\"";
   json += ",\"timezonePosix\":\"" + htmlEscape(tzPosix) + "\"";
-  json += ",\"localTime\":\"" + String(timeBuf) + "\"";
+  json += ",\"localTime\":\"" + localTime + "\"";
   json += ",\"localDate\":\"" + getDate() + "\"";
   json += ",\"dstActive\":" + String(dstActive ? "true" : "false");
   json += ",\"saveStats\":" + String(s.saveStats ? "true" : "false");
@@ -490,23 +512,14 @@ static void handleGetConfig()
   json += ",\"version\":\"" + String(CURRENT_VERSION) + "\"";
   json += "}";
 
-  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  webCfgServer.send(200, "application/json", json);
+  sendCorsJson(200, json);
 }
 
 static void handleTimezoneEndpoint()
 {
-  HTTPMethod m = webCfgServer.method();
-  if (m == HTTP_OPTIONS) {
-    webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-    webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-    webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    webCfgServer.send(204);
-    return;
-  }
+  if (handleCorsOptions()) return;
 
+  HTTPMethod m = webCfgServer.method();
   if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
     String newTz = "";
     if (webCfgServer.hasArg("plain")) {
@@ -529,46 +542,27 @@ static void handleTimezoneEndpoint()
   }
 
   const TSettings s = currentSettings();
-  const TimeZoneInfo* info = findTimeZone(s.Timezone);
-  String posix = getPosixTz(s.Timezone);
-  String label = info ? String(info->label) : s.Timezone;
-
-  unsigned long h = 0, min = 0, sec = 0;
-  getTime(&h, &min, &sec);
-  char timeBuf[12];
-  snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu:%02lu", h, min, sec);
-
-  struct tm timeinfo;
+  String label, posix, localTime;
   bool dstActive = false;
-  if (getLocalTime(&timeinfo, 10)) {
-    dstActive = timeinfo.tm_isdst > 0;
-  }
+  getTimezoneFields(s.Timezone, label, posix, localTime, dstActive);
 
   String json;
   json.reserve(320);
   json += "{\"timezone\":\"" + htmlEscape(s.Timezone) + "\"";
   json += ",\"label\":\"" + htmlEscape(label) + "\"";
   json += ",\"posix\":\"" + htmlEscape(posix) + "\"";
-  json += ",\"localTime\":\"" + String(timeBuf) + "\"";
+  json += ",\"localTime\":\"" + localTime + "\"";
   json += ",\"localDate\":\"" + getDate() + "\"";
   json += ",\"dstActive\":" + String(dstActive ? "true" : "false");
   json += "}";
 
-  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  webCfgServer.send(200, "application/json", json);
+  sendCorsJson(200, json);
 }
 
 static void handleTimezonesList()
 {
+  if (handleCorsOptions()) return;
   webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (webCfgServer.method() == HTTP_OPTIONS) {
-    webCfgServer.send(204);
-    return;
-  }
 
   webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
   webCfgServer.send(200, "application/json", "[");
@@ -614,32 +608,22 @@ static void handlePostConfig()
   bool poolChanged = false;
   bool restart = applyLiveSettings(before, next, poolChanged);
 
-  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-
   if (restart) {
-    webCfgServer.send(200, "application/json", "{\"success\":true,\"message\":\"Settings saved. Restarting device for display changes...\",\"rebootRequired\":true}");
+    sendCorsJson(200, "{\"success\":true,\"message\":\"Settings saved. Restarting device for display changes...\",\"rebootRequired\":true}");
     delay(1000);
     ESP.restart();
   } else {
     String resp = "{\"success\":true,\"message\":\"Settings saved and applied live.\",\"rebootRequired\":false";
     if (poolChanged) resp += ",\"poolChanged\":true";
     resp += "}";
-    webCfgServer.send(200, "application/json", resp);
+    sendCorsJson(200, resp);
   }
 }
 
 static void handleConfigRoute()
 {
+  if (handleCorsOptions()) return;
   HTTPMethod m = webCfgServer.method();
-  if (m == HTTP_OPTIONS) {
-    webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-    webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-    webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    webCfgServer.send(204);
-    return;
-  }
   if (m == HTTP_GET) {
     handleGetConfig();
     return;
@@ -648,7 +632,7 @@ static void handleConfigRoute()
     handlePostConfig();
     return;
   }
-  webCfgServer.send(405, "application/json", "{\"error\":\"Method Not Allowed\"}");
+  sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
 }
 
 static void handleProbe()
@@ -668,8 +652,7 @@ static void handleProbe()
   json += ",\"temp\":" + String(temperatureRead(), 1);
   json += "}";
 
-  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.send(200, "application/json", json);
+  sendCorsJson(200, json);
 }
 
 static void handleStatus()
@@ -722,14 +705,12 @@ static void handleStatus()
   json += ",\"isNativeHardwareStatus\":true}";
   json += "}";
 
-  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.send(200, "application/json", json);
+  sendCorsJson(200, json);
 }
 
 static void handleRestart()
 {
-  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.send(200, "application/json", "{\"success\":true,\"message\":\"Restarting...\"}");
+  sendCorsJson(200, "{\"success\":true,\"message\":\"Restarting...\"}");
   delay(500);
   ESP.restart();
 }

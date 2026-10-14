@@ -83,9 +83,6 @@ static void updateAutoBrightness(unsigned long now)
 }
 #endif
 
-static bool isScreenOff = false;
-static unsigned long lastActivityTime = 0;
-
 void esp32_2432S028R_Init(void)
 { 
   // getChipInfo();  
@@ -110,8 +107,6 @@ void esp32_2432S028R_Init(void)
 
   // Configuring screen backlight brightness using ledcontrol channel 0.
   // Using 5000Hz in 8bit resolution, which gives 0-255 possible duty cycle setting.
-  lastActivityTime = millis();
-  isScreenOff = false;
   ledcSetup(0, 5000, 8);
   ledcAttachPin(TFT_BL, 0);
 #ifdef LDR_PIN
@@ -157,9 +152,7 @@ void esp32_2432S028R_Init(void)
 void esp32_2432S028R_AlternateScreenState(void)
 {
   Serial.println("Switching display state");
-  isScreenOff = !isScreenOff;
-  lastActivityTime = millis();
-  if (isScreenOff) {
+  if (ledcRead(0) > 0) {
     ledcWrite(0, 0);
   } else {
 #ifdef LDR_PIN
@@ -585,6 +578,7 @@ char currentScreen = 0;
 
 void esp32_2432S028R_DoLedStuff(unsigned long frame)
 {
+  (void)frame;
   unsigned long currentMillis = millis();    
   // / Check the touch coordinates 110x185 210x240
   if (currentMillis - previousTouchMillis >= 500)
@@ -592,17 +586,8 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
       int16_t t_x , t_y;  // To store the touch coordinates
       bool pressed = touch.getXY(t_x, t_y);
       if (pressed) {
-          lastActivityTime = currentMillis;
-          noteScreenActivity();
-          if (wakeScreen() || isScreenOff || ledcRead(0) == 0) {
-            isScreenOff = false;
-#ifdef LDR_PIN
-            uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : backlightLevel();
-#else
-            uint8_t duty = backlightLevel();
-#endif
-            if (duty == 0) duty = 250;
-            ledcWrite(0, duty);
+          if (wakeScreen()) {
+            // woke from dark
           } else if (((t_x > 109)&&(t_x < 211)) && ((t_y > 185)&&(t_y < 241))) {
             bottomScreenBlue ^= true;
             hasChangedScreen = true;
@@ -614,13 +599,10 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
           else
             if (t_x > 160) {
               // next screen
-             // Serial.printf("Next screen touch( x:%d y:%d )\n", t_x, t_y);              
               currentDisplayDriver->current_cyclic_screen = (currentDisplayDriver->current_cyclic_screen + 1) % currentDisplayDriver->num_cyclic_screens;
             } else if (t_x < 160)
             {
               // Previus screen
-             // Serial.printf("Previus screen touch( x:%d y:%d )\n", t_x, t_y);              
-              /* Serial.println(currentDisplayDriver->current_cyclic_screen); */
               currentDisplayDriver->current_cyclic_screen = currentDisplayDriver->current_cyclic_screen - 1;      
               if (currentDisplayDriver->current_cyclic_screen<0) currentDisplayDriver->current_cyclic_screen = currentDisplayDriver->num_cyclic_screens - 1;              
             }
@@ -628,41 +610,15 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
       previousTouchMillis = currentMillis;
     }
 
-  // Check auto screen off timeout
-  if (Settings.screenOffTimeout > 0 && !isScreenOff)
-  {
-    if (currentMillis - lastActivityTime >= (unsigned long)Settings.screenOffTimeout * 1000UL)
-    {
-      isScreenOff = true;
-      ledcWrite(0, 0);
-    }
-  }
-
-  // If screen is on, handle auto brightness
-  if (!isScreenOff)
-  {
 #ifdef LDR_PIN
-    if (Settings.autoBrightness)
-    {
-      updateAutoBrightness(currentMillis);
-    }
-#endif
+  if (ledcRead(0) > 0 && Settings.autoBrightness)
+  {
+    updateAutoBrightness(currentMillis);
   }
+#endif
 
   if (currentScreen != currentDisplayDriver->current_cyclic_screen)
   {
-    lastActivityTime = currentMillis;
-    if (isScreenOff)
-    {
-      isScreenOff = false;
-#ifdef LDR_PIN
-      uint8_t duty = Settings.autoBrightness ? currentAppliedDuty : Settings.Brightness;
-#else
-      uint8_t duty = Settings.Brightness;
-#endif
-      if (duty == 0) duty = 250;
-      ledcWrite(0, duty);
-    }
     hasChangedScreen ^= true;
   }
   currentScreen = currentDisplayDriver->current_cyclic_screen;
