@@ -100,6 +100,12 @@ static void printHelp(void)
   Serial.println(F("  set ledcolor <#rrggbb|name> - Set rear RGB LED color (e.g. #ff0000 or red)"));
   Serial.println(F("  set ledbright <1-255>       - Set rear RGB LED brightness (1-255)"));
   Serial.println(F("  set ledscreen <0|1>         - Turn LED off when screen is off (0|1)"));
+  Serial.println(F("  set mqtt <0|1>              - Enable (1) or disable (0) MQTT publishing"));
+  Serial.println(F("  set mqtthost <host>         - Set MQTT broker address (IP or hostname)"));
+  Serial.println(F("  set mqttport <port>         - Set MQTT broker port (default 1883)"));
+  Serial.println(F("  set mqttuser <user>         - Set MQTT broker username"));
+  Serial.println(F("  set mqttpass <pass>         - Set MQTT broker password"));
+  Serial.println(F("  set mqtttopic <topic>       - Set MQTT topic prefix"));
   Serial.println(F("  set webpass <password>      - Set Web UI admin password"));
   Serial.println(F("  set invert <0|1>            - Invert display colors (reboot required)"));
   Serial.println(F("  set flip <0|1>              - Flip display 180 deg (reboot required)"));
@@ -221,6 +227,11 @@ static void printConfig(void)
   doc["ledBrightness"] = s.ledBrightness;
   doc["ledScreenOff"] = s.ledScreenOff;
 #endif
+  doc["mqttEnabled"] = s.MqttEnabled;
+  doc["mqttHost"] = s.MqttHost;
+  doc["mqttPort"] = s.MqttPort;
+  doc["mqttUser"] = s.MqttUser;
+  doc["mqttTopic"] = s.MqttTopic;
   doc["version"] = CURRENT_VERSION;
 
   serializeJsonPretty(doc, Serial);
@@ -580,7 +591,10 @@ static void executeCommand(const String &rawLine)
     }
     else if (key == "city" || key == "lat" || key == "latitude" || key == "lon" || key == "longitude" ||
              key == "ledmode" || key == "ledcolor" || key == "ledbright" || key == "ledbrightness" ||
-             key == "ledscreen" || key == "ledscreenoff" || key == "webpass" || key == "webpassword" || key == "led") {
+             key == "ledscreen" || key == "ledscreenoff" || key == "webpass" || key == "webpassword" || key == "led" ||
+             key == "mqtt" || key == "mqttenabled" || key == "mqtthost" || key == "mqhost" ||
+             key == "mqttport" || key == "mqport" || key == "mqttuser" || key == "mquser" ||
+             key == "mqttpass" || key == "mqpass" || key == "mqtttopic" || key == "mqtopic") {
       const TSettings before = currentSettings();
       TSettings next = before;
       StaticJsonDocument<256> doc;

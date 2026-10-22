@@ -196,8 +196,8 @@ void init_WifiManager()
     // Custom elements
     WiFiManagerParameter pool_text_box("Poolurl", "Pool url", Settings.PoolAddress.c_str(), 80);
 
-    char convertedValue[6];
-    sprintf(convertedValue, "%d", Settings.PoolPort);
+    char convertedValue[12];
+    snprintf(convertedValue, sizeof(convertedValue), "%d", Settings.PoolPort);
     WiFiManagerParameter port_text_box_num("Poolport", "Pool port", convertedValue, 7);
 
     WiFiManagerParameter addr_text_box("btcAddress", "Your BTC address", Settings.BtcWallet, 80);

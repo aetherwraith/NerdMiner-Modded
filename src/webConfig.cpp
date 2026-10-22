@@ -2,11 +2,13 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
+#include <esp_timer.h>
 #include "webConfig.h"
 #include "version.h"
 #include "wManager.h"
 #include "mining.h"
 #include "monitor.h"
+#include "mqttPublisher.h"
 #include "drivers/devices/device.h"
 #include "drivers/displays/display.h"
 #include "drivers/storage/storage.h"
@@ -16,6 +18,10 @@
 #include "cities.h"
 #include "drivers/storage/nvMemory.h"
 #include "ota.h"
+#include "webMonitorPage.h"
+#ifdef M5STICK_C_PLUS2
+#include "m5stickPlus2Hw.h"
+#endif
 
 extern TSettings Settings;
 extern double best_diff;
@@ -171,8 +177,15 @@ static void handleRoot()
 #endif
   page += "<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='" + String(Settings.Brightness) + "'>";
 #endif
+#ifdef TDISPLAY_PULSE
+  page += "<label><input type='checkbox' name='flip' " + String(Settings.flipDisplay ? "checked" : "") + "> Flip display (USB on the left)</label>";
+  page += "<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='" + String(Settings.Brightness) + "'>";
+#endif
+#if defined(M5STICK_C_PLUS2) && PLUS2_BACKLIGHT_PWM
+  page += "<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='" + String(Settings.Brightness) + "'>";
+#endif
 #ifdef HAS_BACKLIGHT_CONTROL
-  page += "<label>Screen off after (minutes without a touch, 0 = never)</label><input type='number' name='screenoff' min='0' max='1440' value='" + String(Settings.ScreenTimeout) + "'>";
+  page += "<label>Screen off after (minutes without a touch or button press, 0 = never)</label><input type='number' name='screenoff' min='0' max='1440' value='" + String(Settings.ScreenTimeout) + "'>";
   page += "<label><input type='checkbox' name='nightdim' " + String(Settings.nightDim ? "checked" : "") + "> Dim the screen at night</label>";
   page += "<small>Fades from the brightness above to the night brightness around sunset, and back at sunrise. " + nightDimStatus() + "</small>";
   page += "<label>Night brightness (1-255)</label><input type='number' name='nightbright' min='1' max='255' value='" + String(Settings.NightBrightness) + "'>";
@@ -218,6 +231,17 @@ static void handleRoot()
     page += "<label><input type='checkbox' name='ledscreen' " + String(Settings.ledScreenOff ? "checked" : "") + "> LED off while the screen is off</label>";
   }
 #endif
+  flush();
+  page += F("<h3>MQTT (Home Assistant)</h3>");
+  page += "<label><input type='checkbox' name='mqtt' " + String(Settings.MqttEnabled ? "checked" : "") +
+          "> Publish the miner's state to an MQTT broker</label>";
+  page += "<label>Broker address (IP or name)</label><input type='text' name='mqhost' maxlength='64' value='" + htmlEscape(Settings.MqttHost) + "'>";
+  page += "<label>Broker port</label><input type='number' name='mqport' min='1' max='65535' value='" + String(Settings.MqttPort) + "'>";
+  page += "<label>User (optional)</label><input type='text' name='mquser' maxlength='64' autocomplete='off' value='" + htmlEscape(Settings.MqttUser) + "'>";
+  page += "<label>Password (optional)</label><input type='password' name='mqpass' maxlength='64' autocomplete='off' value='" + htmlEscape(Settings.MqttPass) + "'>";
+  page += "<label>Topic (empty: nerdminer/ and the end of the MAC address)</label><input type='text' name='mqtopic' maxlength='64' value='" + htmlEscape(Settings.MqttTopic) + "'>";
+  page += String("<p><small>") + (mqttConnected() ? "Connected to the broker." : Settings.MqttEnabled ? "Not connected to the broker." : "Off.") +
+          " Home Assistant finds the sensors by itself (MQTT discovery).</small></p>";
   page += F("<label>New password for this page (leave empty to keep it)</label>"
             "<input type='password' name='webpass' maxlength='63' autocomplete='new-password'>"
             "<label>New password again</label>"
@@ -225,10 +249,12 @@ static void handleRoot()
   page += F("<input type='submit' value='Save'>");
 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
   page += F("<p><small>Settings apply straight away. Changing invert or flip restarts the device.</small></p>");
+#elif defined(TDISPLAY_PULSE)
+  page += F("<p><small>Settings apply straight away. Changing flip restarts the device.</small></p>");
 #else
   page += F("<p><small>Settings apply straight away, no restart.</small></p>");
 #endif
-  page += F("</form><p><small>Miner status as JSON, no login needed: <a href='/api/status'>/api/status</a></small></p>");
+  page += F("</form><p><small><a href='/'>Live monitor</a> (no login needed) &middot; status as JSON: <a href='/api/status'>/api/status</a></small></p>");
   page += F("<hr style='margin-top:1.5em;border:0;border-top:1px solid #ddd'><div style='text-align:center;margin:1em 0'><a href='/update' style='color:#f59e0b;font-weight:bold;text-decoration:none'>⚡ Firmware Updates (OTA) &rarr;</a></div>");
 #ifdef HAS_BACKLIGHT_CONTROL
   page += F("<script>var f=document.forms[0],c=f.city,a=f.lat,o=f.lon;"
@@ -266,7 +292,7 @@ static void handleSave()
                         String("<!DOCTYPE html><html><head><meta charset='utf-8'>"
                                "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
                                "<body style='font-family:sans-serif'><p>") + problem +
-                            " Nothing was saved.</p><p><a href='/'>Back to settings</a></p></body></html>");
+                            " Nothing was saved.</p><p><a href='/settings'>Back to settings</a></p></body></html>");
       return;
     }
     next.WebPassword = webPass;
@@ -275,7 +301,7 @@ static void handleSave()
   if (webCfgServer.hasArg("pool"))
     next.PoolAddress = webCfgServer.arg("pool");
   if (webCfgServer.hasArg("port"))
-    next.PoolPort = webCfgServer.arg("port").toInt();
+    next.PoolPort = constrain(webCfgServer.arg("port").toInt(), 0, 65535); // like bport
   if (webCfgServer.hasArg("poolpass"))
     strncpy(next.PoolPassword, webCfgServer.arg("poolpass").c_str(), sizeof(next.PoolPassword) - 1);
   if (webCfgServer.hasArg("wallet"))
@@ -296,6 +322,23 @@ static void handleSave()
     next.BackupPoolPort = constrain(webCfgServer.arg("bport").toInt(), 0, 65535);
   if (webCfgServer.hasArg("bpoolpass"))
     strlcpy(next.BackupPoolPassword, webCfgServer.arg("bpoolpass").c_str(), sizeof(next.BackupPoolPassword));
+  next.MqttEnabled = webCfgServer.hasArg("mqtt");
+  if (webCfgServer.hasArg("mqhost"))
+  {
+    next.MqttHost = webCfgServer.arg("mqhost").substring(0, 64);
+    next.MqttHost.trim();
+  }
+  if (webCfgServer.hasArg("mqport"))
+    next.MqttPort = constrain(webCfgServer.arg("mqport").toInt(), 1, 65535);
+  if (webCfgServer.hasArg("mquser"))
+    next.MqttUser = webCfgServer.arg("mquser").substring(0, 64);
+  if (webCfgServer.hasArg("mqpass"))
+    next.MqttPass = webCfgServer.arg("mqpass").substring(0, 64);
+  if (webCfgServer.hasArg("mqtopic"))
+  {
+    next.MqttTopic = webCfgServer.arg("mqtopic").substring(0, 64);
+    next.MqttTopic.trim();
+  }
   if (webCfgServer.hasArg("tz"))
     next.Timezone = webCfgServer.arg("tz");
   if (webCfgServer.hasArg("currency"))
@@ -307,6 +350,15 @@ static void handleSave()
 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
   next.autoBrightness = webCfgServer.hasArg("autobrightness");
 #endif
+  if (webCfgServer.hasArg("brightness"))
+    next.Brightness = constrain(webCfgServer.arg("brightness").toInt(), 0, 255);
+#endif
+#ifdef TDISPLAY_PULSE
+  next.flipDisplay = webCfgServer.hasArg("flip");
+  if (webCfgServer.hasArg("brightness"))
+    next.Brightness = constrain(webCfgServer.arg("brightness").toInt(), 0, 255);
+#endif
+#if defined(M5STICK_C_PLUS2) && PLUS2_BACKLIGHT_PWM
   if (webCfgServer.hasArg("brightness"))
     next.Brightness = constrain(webCfgServer.arg("brightness").toInt(), 0, 255);
 #endif
@@ -355,9 +407,9 @@ static void handleSave()
     webCfgServer.send(200, "text/html",
                       "<!DOCTYPE html><html><head><meta charset='utf-8'>"
                       "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-                      "<meta http-equiv='refresh' content='3;url=/'></head>"
+                      "<meta http-equiv='refresh' content='3;url=/settings'></head>"
                       "<body style='font-family:sans-serif'>" + msg +
-                      "<p><a href='/'>Back to settings</a></p></body></html>");
+                      "<p><a href='/settings'>Back to settings</a></p></body></html>");
     return;
   }
 
@@ -368,12 +420,13 @@ static void handleSave()
                      "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
                      "<body style='font-family:sans-serif'>"
                      "<p>Saved. Restarting device...</p>"
-                     "<p><a href='/'>Back to settings</a></p>"
-                     "<script>function p(){fetch('/',{cache:'no-store'})"
-                     ".then(function(r){if(r.ok||r.status==401)location.replace('/');else setTimeout(p,1500)})"
+                     "<p><a href='/settings'>Back to settings</a></p>"
+                     "<script>function p(){fetch('/settings',{cache:'no-store'})"
+                     ".then(function(r){if(r.ok||r.status==401)location.replace('/settings');else setTimeout(p,1500)})"
                      ".catch(function(){setTimeout(p,1500)})}setTimeout(p,4000);</script>"
                      "</body></html>");
 
+  saveStat(); // stats mined since the last periodic save
   delay(1000);
   ESP.restart();
 }
@@ -411,6 +464,17 @@ bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poo
       WiFi.setHostname(Settings.Hostname);
     }
     Settings.WebPassword = next.WebPassword;
+    if (next.MqttEnabled != before.MqttEnabled || next.MqttHost != before.MqttHost || next.MqttPort != before.MqttPort ||
+        next.MqttUser != before.MqttUser || next.MqttPass != before.MqttPass || next.MqttTopic != before.MqttTopic)
+    {
+      Settings.MqttEnabled = next.MqttEnabled;
+      Settings.MqttHost = next.MqttHost;
+      Settings.MqttPort = next.MqttPort;
+      Settings.MqttUser = next.MqttUser;
+      Settings.MqttPass = next.MqttPass;
+      Settings.MqttTopic = next.MqttTopic;
+      mqttSettingsChanged();
+    }
     if (!next.Currency.equalsIgnoreCase(before.Currency))
       requestCurrencyChange(currencyFor(next.Currency).code); // monitor task
     Settings.Timezone = next.Timezone; // monitor task moves the clock
@@ -565,6 +629,12 @@ static void handleGetConfig()
   json += ",\"ledBrightness\":" + String(s.ledBrightness);
   json += ",\"ledScreenOff\":" + String(s.ledScreenOff ? "true" : "false");
 #endif
+  json += ",\"mqttEnabled\":" + String(s.MqttEnabled ? "true" : "false");
+  json += ",\"mqttHost\":\"" + htmlEscape(s.MqttHost) + "\"";
+  json += ",\"mqttPort\":" + String(s.MqttPort);
+  json += ",\"mqttUser\":\"" + htmlEscape(s.MqttUser) + "\"";
+  json += ",\"mqttTopic\":\"" + htmlEscape(s.MqttTopic) + "\"";
+  json += ",\"mqttConnected\":" + String(mqttConnected() ? "true" : "false");
   // Bitaxe / AxeOS / NMMiner / Wotcha aliases for seamless integration:
   json += ",\"stratumURL\":\"" + htmlEscape(s.PoolAddress) + "\"";
   json += ",\"stratumPort\":" + String(s.PoolPort);
@@ -830,6 +900,31 @@ static void handlePoolEndpoint()
   sendCorsJson(200, json);
 }
 
+static void handleMqttEndpoint()
+{
+  if (handleCorsOptions()) return;
+  HTTPMethod m = webCfgServer.method();
+  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
+    bool poolChanged = false, restart = false;
+    applyRequestConfig(poolChanged, restart);
+  } else if (m != HTTP_GET) {
+    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
+    return;
+  }
+
+  const TSettings s = currentSettings();
+  String json;
+  json.reserve(320);
+  json += "{\"mqttEnabled\":" + String(s.MqttEnabled ? "true" : "false");
+  json += ",\"mqttHost\":\"" + htmlEscape(s.MqttHost) + "\"";
+  json += ",\"mqttPort\":" + String(s.MqttPort);
+  json += ",\"mqttUser\":\"" + htmlEscape(s.MqttUser) + "\"";
+  json += ",\"mqttTopic\":\"" + htmlEscape(s.MqttTopic) + "\"";
+  json += ",\"mqttConnected\":" + String(mqttConnected() ? "true" : "false");
+  json += "}";
+  sendCorsJson(200, json);
+}
+
 static void handleProbe()
 {
   char best_diff_str[16] = {0};
@@ -916,28 +1011,37 @@ static void handleRestart()
 extern uint32_t templates, hashes, Mhashes;
 extern monitor_data mMonitor;
 
-static void handleApiStatus()
+// The miner's state as /api/status serves it; also the MQTT state message
+// (mqttPublisher.cpp). Cheap: cached values only.
+void fillMinerStatusJson(JsonDocument &doc)
 {
   const MinerStatus m = getMinerStatus();
-  DynamicJsonDocument doc(1024);
   doc["version"] = CURRENT_VERSION;
-  doc["uptime_s"] = (uint32_t)(millis() / 1000);
+  doc["uptime_s"] = (uint32_t)(esp_timer_get_time() / 1000000ULL); // 64-bit clock: millis() wraps after 49.7 days
   doc["state"] = mMonitor.NerdStatus == NM_hashing ? "mining" : mMonitor.NerdStatus == NM_Connecting ? "connecting" : "starting";
   doc["hashrate_khs"] = round(m.hashrateKHs * 10.0) / 10.0;
   doc["hashrate_avg_khs"] = round(m.avgHashrateKHs * 10.0) / 10.0; // since boot
   doc["total_mhashes"] = Mhashes + hashes / 1000000; // also kept across restarts when stats are saved
   doc["mining_time_s"] = (uint32_t)upTime;
   doc["templates"] = templates;
-  doc["best_diff"] = best_diff;
-  doc["shares_32bit"] = shares;
+  doc["best_diff"] = getBestDiff();
+  doc["shares_32bit"] = shares;                    // accepted by the pool
+  doc["shares_32bit_rejected"] = shares32Rejected; // refused by the pool
   doc["blocks_found"] = valids;
   doc["shares_accepted"] = m.accepted; // since boot
   doc["shares_rejected"] = m.rejected;
   JsonObject pool = doc.createNestedObject("pool");
-  pool["address"] = activePoolAddress();
-  pool["port"] = activePoolPort();
+  {
+    // The stratum task swaps a new pool into Settings under this mutex
+    // (takePoolChange); this runs on the other core, so copy it under it too.
+    std::lock_guard<std::mutex> lock(g_settingsMutex);
+    pool["address"] = activePoolAddress();
+    pool["port"] = activePoolPort();
+  }
   pool["backup"] = onBackupPool();
   pool["subscribed"] = m.subscribed;
+  if (m.authorized >= 0)
+    pool["authorized"] = m.authorized == 1; // missing: no answer yet
   pool["difficulty"] = m.poolDifficulty;
   JsonObject wifi = doc.createNestedObject("wifi");
   wifi["ssid"] = WiFi.SSID();
@@ -945,6 +1049,39 @@ static void handleApiStatus()
   wifi["ip"] = WiFi.localIP().toString();
   doc["free_heap"] = ESP.getFreeHeap();
 
+  // Cached values only: nothing here may start an HTTPS fetch or an NTP
+  // request (those run on the monitor task and pause the miner).
+  JsonObject clock = doc.createNestedObject("clock");
+  int hh, mi, ss, dd, mo, yy;
+  if (getLocalClock(hh, mi, ss, dd, mo, yy)) {
+    char buf[16];
+    clock["synced"] = true;
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hh, mi, ss);
+    clock["time"] = buf;
+    snprintf(buf, sizeof(buf), "%02d/%02d/%04d", dd, mo, yy);
+    clock["date"] = buf;
+  } else {
+    clock["synced"] = false;
+  }
+  JsonObject btc = doc.createNestedObject("btc");
+  btc["price"] = getBTCpriceValue();                         // 0 = not fetched yet
+  btc["prefix"] = currencyFor(currencySetting()).prefix;
+  btc["block_height"] = getBlockHeightValue();               // 0 = not fetched yet
+#if defined(M5STICK_C_PLUS2) && defined(PIN_BATTERY_ADC)
+  const int batMv = plus2BatteryCachedMillivolts();
+  if (batMv > 0) {
+    JsonObject bat = doc.createNestedObject("battery");
+    bat["mv"] = batMv;
+    bat["percent"] = plus2BatteryPercent(batMv);
+  }
+#endif
+}
+
+static void handleApiStatus()
+{
+  noteWebMonitorPoll(); // the live monitor (or a script) is watching
+  DynamicJsonDocument doc(1536);
+  fillMinerStatusJson(doc);
   String out;
   serializeJson(doc, out);
   webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
@@ -952,15 +1089,66 @@ static void handleApiStatus()
   webCfgServer.send(200, "application/json", out);
 }
 
+// --------------------------------------------------------------------------
+// Live monitor (webMonitorPage.h) and its hashrate history: one sample every
+// 30 s, the last hour, kept here in RAM (240 bytes).
+// --------------------------------------------------------------------------
+#define HISTORY_LEN 120
+#define HISTORY_PERIOD_ms 30000
+static uint16_t s_history[HISTORY_LEN]; // KH/s x 10
+static uint8_t s_historyCount = 0, s_historyHead = 0;
+static uint32_t s_historyLast = 0;
+
+static void historyTick()
+{
+  if (millis() - s_historyLast < HISTORY_PERIOD_ms)
+    return;
+  s_historyLast = millis();
+  uint32_t v = (uint32_t)(getMinerStatus().hashrateKHs * 10.0f + 0.5f);
+  if (v > 65535) v = 65535;
+  s_history[s_historyHead] = (uint16_t)v;
+  s_historyHead = (s_historyHead + 1) % HISTORY_LEN;
+  if (s_historyCount < HISTORY_LEN) s_historyCount++;
+}
+
+static void handleHistory()
+{
+  String out;
+  out.reserve(16 + s_historyCount * 7);
+  out = F("{\"interval_s\":");
+  out += HISTORY_PERIOD_ms / 1000;
+  out += F(",\"khs\":[");
+  for (uint8_t i = 0; i < s_historyCount; i++) {
+    const uint16_t v = s_history[(s_historyHead + HISTORY_LEN - s_historyCount + i) % HISTORY_LEN];
+    if (i) out += ',';
+    out += v / 10;
+    out += '.';
+    out += v % 10;
+  }
+  out += F("]}");
+  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
+  webCfgServer.sendHeader("Cache-Control", "no-store");
+  webCfgServer.send(200, "application/json", out);
+}
+
+static void handleMonitor()
+{
+  noteWebMonitorOpened(); // fetch the BTC price / block height if the screens never did
+  webCfgServer.sendHeader("Cache-Control", "no-cache");
+  webCfgServer.send_P(200, "text/html; charset=utf-8", MONITOR_HTML);
+}
+
 void setup_webConfig(void)
 {
   if (webCfgStarted)
     return;
 
-  webCfgServer.on("/", HTTP_GET, handleRoot);
+  webCfgServer.on("/", HTTP_GET, handleMonitor);            // live monitor, no login
+  webCfgServer.on("/settings", HTTP_GET, handleRoot);        // settings, login
   webCfgServer.on("/save", HTTP_POST, handleSave);
   webCfgServer.on("/status", HTTP_GET, handleStatus);
   webCfgServer.on("/api/status", HTTP_GET, handleApiStatus);
+  webCfgServer.on("/api/history", HTTP_GET, handleHistory);
   webCfgServer.on("/probe", HTTP_GET, handleProbe);
   webCfgServer.on("/api/system/info", HTTP_GET, handleStatus);
   webCfgServer.on("/api/system/restart", HTTP_POST, handleRestart);
@@ -980,7 +1168,30 @@ void setup_webConfig(void)
   webCfgServer.on("/api/display", handleDisplayEndpoint);
   webCfgServer.on("/api/system/pool", handlePoolEndpoint);
   webCfgServer.on("/api/pool", handlePoolEndpoint);
+  webCfgServer.on("/api/system/mqtt", handleMqttEndpoint);
+  webCfgServer.on("/api/mqtt", handleMqttEndpoint);
   setup_ota(webCfgServer);
+#ifdef TDISPLAY_UI_SCREENSHOT
+  // Dev builds: the screens rendered at boot (tDisplayPulseDriver.cpp),
+  // run-length encoded; tools/tdisplay_shots.py turns them into PNGs.
+  webCfgServer.on("/shot", HTTP_GET, []()
+  {
+    extern bool tDisplayShot(int i, const char **name, const uint8_t **data, size_t *len);
+    const char *name;
+    const uint8_t *data;
+    size_t len;
+    if (!tDisplayShot(webCfgServer.arg("i").toInt(), &name, &data, &len))
+    {
+      webCfgServer.send(404, "text/plain", "no such shot");
+      return;
+    }
+    webCfgServer.sendHeader("X-Shot-Name", name);
+    webCfgServer.send_P(200, "application/octet-stream", (PGM_P)data, len);
+  });
+#endif
+  // Browsers ask for it on every visit; without this it fell to onNotFound,
+  // which redirected to "/" and sent the whole 11 KB page again.
+  webCfgServer.on("/favicon.ico", HTTP_GET, []() { webCfgServer.send(204); });
   webCfgServer.onNotFound([]()
   {
     webCfgServer.sendHeader("Location", "/");
@@ -989,12 +1200,14 @@ void setup_webConfig(void)
   webCfgServer.begin();
   webCfgStarted = true;
 
-  Serial.print("[WEBCFG] Settings page available at http://");
-  Serial.println(WiFi.localIP());
+  Serial.print("[WEBCFG] Monitor at http://");
+  Serial.print(WiFi.localIP());
+  Serial.println("/  (settings: /settings)");
 }
 
 void webConfigProcess(void)
 {
+  historyTick(); // also before the server is up, so the graph has the full hour
   if (webCfgStarted) {
     webCfgServer.handleClient();
     otaProcess();

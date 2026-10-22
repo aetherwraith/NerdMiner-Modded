@@ -16,6 +16,8 @@
 #include "wManager.h"
 #include <mutex>
 #include <list>
+#include <stddef.h> // offsetof (saved stats record)
+#include <string.h>
 #include <map>
 #include "mbedtls/sha256.h"
 #include "i2c_master.h"
@@ -63,7 +65,7 @@ nvs_handle_t stat_handle;
 uint32_t templates = 0;
 uint32_t hashes = 0;
 uint32_t Mhashes = 0;
-uint32_t totalKHashes = 0;
+uint64_t totalKHashes = 0; // 32 bits wrapped after ~4.3 TH (about 50 days at 1 MH/s)
 uint32_t elapsedKHs = 0;
 uint64_t upTime = 0;
 
@@ -103,12 +105,39 @@ volatile uint32_t debugChunkCount = 0;
 volatile uint32_t debugHitOverheadUs = 0;
 volatile uint32_t debugHitOverheadCount = 0;
 
-volatile uint32_t shares; // increase if blockhash has 32 bits of zeroes
+volatile uint32_t shares; // 32-bit shares (difficulty >= 1) the pool ACCEPTED
+volatile uint32_t shares32Rejected = 0; // 32-bit shares the pool refused (see mining.h)
 volatile uint32_t valids; // increased if blockhash <= target
 volatile uint32_t rejects = 0; // increased if stratum pool rejects submission
 
 // Track best diff
+// Best hash found by THIS miner, whatever the pool difficulty. It used to be
+// updated only when the pool acknowledged a submitted share, and a share is
+// only submitted above the pool difficulty: with a pool that sets (or keeps)
+// a high difficulty, nothing ever got there and the value never moved. The
+// miners now feed every hash they check (16-bit prefilter) to updateBestDiff().
 double best_diff = 0.0;
+static portMUX_TYPE s_bestDiffMux = portMUX_INITIALIZER_UNLOCKED;
+
+void updateBestDiff(double diff)
+{
+  if (!(diff > best_diff)) // unlocked look first: improvements are very rare
+    return;
+  portENTER_CRITICAL(&s_bestDiffMux);
+  if (diff > best_diff)
+    best_diff = diff;
+  portEXIT_CRITICAL(&s_bestDiffMux);
+}
+
+// A double is two 32-bit words here: read it under the lock so a write from
+// a miner core can't be seen half done.
+double getBestDiff()
+{
+  portENTER_CRITICAL(&s_bestDiffMux);
+  double v = best_diff;
+  portEXIT_CRITICAL(&s_bestDiffMux);
+  return v;
+}
 
 // Variables to hold data from custom textboxes
 //Track mining stats in non volatile memory
@@ -193,22 +222,36 @@ static bool mainPoolAnswers(void)
 
 // For /api/status: counted by the stratum task...
 static volatile uint32_t s_sharesAccepted = 0;
+volatile uint32_t g_shareFoundEvents = 0; // see mining.h
+volatile uint32_t g_blockFoundEvents = 0;
 static volatile double s_poolDifficulty = DEFAULT_DIFFICULTY;
+// mining.authorize: id of the request still waiting for its answer (0: none),
+// and the answer: -1 none yet, 0 the pool refused the wallet/worker, 1 accepted.
+static unsigned long s_authId = 0;
+static volatile int8_t s_authorized = -1;
 // ...and the kH counter, sampled once a second by the monitor loop.
 #define STATUS_RATE_SAMPLES 11 // 10 s window
-static uint32_t s_rateKh[STATUS_RATE_SAMPLES];
+static uint64_t s_rateKh[STATUS_RATE_SAMPLES];
 static uint32_t s_rateMs[STATUS_RATE_SAMPLES];
 static volatile uint8_t s_rateHead = 0, s_rateCount = 0;
-static uint32_t s_bootKh = 0, s_bootMs = 0;
+// The since-boot average uses the 64-bit clock: millis() wraps after 49.7 days.
+static uint64_t s_bootKh = 0;
+static int64_t s_bootUs = 0, s_lastSampleUs = 0;
 
-static void statusRateSample(uint32_t kh, uint32_t ms)
+static void statusRateSample(uint64_t kh, uint32_t ms)
 {
   const uint8_t i = (s_rateHead + 1) % STATUS_RATE_SAMPLES;
   s_rateKh[i] = kh;
   s_rateMs[i] = ms;
+  s_lastSampleUs = esp_timer_get_time();
   s_rateHead = i;
   if (s_rateCount < STATUS_RATE_SAMPLES)
     s_rateCount++;
+}
+
+int8_t poolAuthorized(void)
+{
+  return s_authorized;
 }
 
 MinerStatus getMinerStatus(void)
@@ -221,14 +264,15 @@ MinerStatus getMinerStatus(void)
     const uint32_t ms = s_rateMs[head] - s_rateMs[oldest];
     if (ms)
       s.hashrateKHs = (s_rateKh[head] - s_rateKh[oldest]) * 1000.0f / ms;
-    const uint32_t bootMs = s_rateMs[head] - s_bootMs;
-    if (bootMs)
-      s.avgHashrateKHs = (s_rateKh[head] - s_bootKh) * 1000.0f / bootMs;
+    const int64_t bootUs = s_lastSampleUs - s_bootUs;
+    if (bootUs > 0)
+      s.avgHashrateKHs = (double)(s_rateKh[head] - s_bootKh) * 1e6 / (double)bootUs;
   }
   s.accepted = s_sharesAccepted;
   s.rejected = rejects;
   s.subscribed = isMinerSuscribed;
   s.poolDifficulty = s_poolDifficulty;
+  s.authorized = s_authorized;
   return s;
 }
 
@@ -276,6 +320,17 @@ static bool takePoolChange(void)
 }
 
 int saveIntervals[7] = {5 * 60, 15 * 60, 30 * 60, 1 * 3600, 3 * 3600, 6 * 3600, 12 * 3600};
+// Longest gap between two saves. After ~11 h of uptime the schedule above
+// saved only every 12 h, so a restart (flashing, unplugging, a crash) could
+// lose up to 12 h of shares / best diff. A board can cap it from
+// platformio.ini; NVS spreads the writes, so even every few minutes is far
+// within the flash's endurance.
+#ifndef STATS_SAVE_MAX_s
+#define STATS_SAVE_MAX_s (12 * 3600)
+#endif
+// Stats are only written once they have been read back at boot: saving the
+// still-empty in-RAM counters before that would wipe the saved ones.
+static volatile bool s_statsLoaded = false;
 int saveIntervalsSize = sizeof(saveIntervals)/sizeof(saveIntervals[0]);
 int currentIntervalIndex = 0;
 
@@ -292,14 +347,14 @@ bool checkPoolConnection(void) {
   //Resolve first time pool DNS and save IP
   if(serverIP == IPAddress(1,1,1,1)) {
     WiFi.hostByName(activePoolAddress().c_str(), serverIP);
-    Serial.printf("Resolved DNS and save ip (first time) got: %s\n", serverIP.toString());
+    Serial.printf("Resolved DNS and save ip (first time) got: %s\n", serverIP.toString().c_str());
   }
 
   //Try connecting pool IP
   if (!client.connect(serverIP, activePoolPort())) {
     Serial.println("Imposible to connect to : " + activePoolAddress());
     WiFi.hostByName(activePoolAddress().c_str(), serverIP);
-    Serial.printf("Resolved DNS got: %s\n", serverIP.toString());
+    Serial.printf("Resolved DNS got: %s\n", serverIP.toString().c_str());
     return false;
   }
 
@@ -312,21 +367,21 @@ bool checkPoolConnection(void) {
 unsigned long mStart0Hashrate = 0;
 bool checkPoolInactivity(unsigned int keepAliveTime, unsigned long inactivityTime){ 
 
-    unsigned long currentKHashes = (Mhashes*1000) + hashes/1000;
-    unsigned long elapsedKHs = currentKHashes - totalKHashes;
+    uint64_t currentKHashes = (uint64_t)Mhashes * 1000 + hashes / 1000;
+    uint64_t elapsedKHs = currentKHashes - totalKHashes;
 
     uint32_t time_now = millis();
 
     // If no shares sent to pool
     // send something to pool to hold socket oppened
-    if (time_now < mLastTXtoPool) //32bit wrap
-      mLastTXtoPool = time_now;
-    if ( time_now > mLastTXtoPool + keepAliveTime)
+    if (time_now - mLastTXtoPool > keepAliveTime) // wrap-safe
     {
       mLastTXtoPool = time_now;
       Serial.println("  Sending  : KeepAlive suggest_difficulty");
       //if (client.print("{}\n") == 0) {
-      tx_suggest_difficulty(client, DEFAULT_DIFFICULTY);
+      // The difficulty the pool already gave us: suggesting the minimum here
+      // made some pools restart their vardiff every 30 s without shares.
+      tx_suggest_difficulty(client, s_poolDifficulty);
       /*if(tx_suggest_difficulty(client, DEFAULT_DIFFICULTY)){
         Serial.println("  Sending keepAlive to pool -> Detected client disconnected");
         return true;
@@ -376,6 +431,22 @@ std::list<std::shared_ptr<JobRequest>> s_job_request_list_hw;
 #endif
 std::list<std::shared_ptr<JobResult>> s_job_result_list;
 static volatile uint8_t s_working_current_job_id = 0xFF;
+
+// Queues a miner's result; s_job_mutex held. When the list is full (the stratum
+// task busy for a while) a result without a share used to be dropped, and its
+// hashes were never counted: now they are added to the last queued result.
+// Results with a share are kept; the hard cap only guards against a stuck
+// stratum task.
+static void pushJobResult(const std::shared_ptr<JobResult> &r, size_t limit)
+{
+  if (s_job_result_list.size() >= limit && !s_job_result_list.empty() &&
+      (r->nonce == 0xFFFFFFFF || s_job_result_list.size() >= 4 * limit))
+  {
+    s_job_result_list.back()->nonce_count += r->nonce_count;
+    return;
+  }
+  s_job_result_list.push_back(r);
+}
 #if defined(PIPELINED_ASM_MINING) && defined(CONFIG_IDF_TARGET_ESP32)
 // What the pipelined HW loop works from (layout is known to the asm, see
 // src/pipelined_hw_sha_classic_v2.S).
@@ -556,10 +627,11 @@ void runStratumWorker(void *name) {
         continue;
       }
 
-      strcpy(mWorker.wName, Settings.BtcWallet);
-      strcpy(mWorker.wPass, activePoolPassword());
+      strlcpy(mWorker.wName, Settings.BtcWallet, sizeof(mWorker.wName));
+      strlcpy(mWorker.wPass, activePoolPassword(), sizeof(mWorker.wPass));
       // STEP 2: Pool authorize work (Block Info)
-      tx_mining_auth(client, mWorker.wName, mWorker.wPass); //Don't verifies authoritzation, TODO
+      s_authorized = -1;
+      tx_mining_auth(client, mWorker.wName, mWorker.wPass, s_authId); // answer checked in the loop below
       //tx_mining_auth2(client, mWorker.wName, mWorker.wPass); //Don't verifies authoritzation, TODO
 
       // STEP 3: Suggest pool difficulty
@@ -584,9 +656,7 @@ void runStratumWorker(void *name) {
 
     {
       uint32_t time_now = millis();
-      if (time_now < last_job_time) //32bit wrap
-        last_job_time = time_now;
-      if (time_now >= last_job_time + 10*60*1000)  //10minutes without job
+      if (time_now - last_job_time >= 10*60*1000)  //10minutes without job (wrap-safe)
       {
         client.stop();
         isMinerSuscribed=false;
@@ -735,22 +805,44 @@ void runStratumWorker(void *name) {
                                       break;
           case STRATUM_SUCCESS:       {
                                         unsigned long id = parse_extract_id(line);
+                                        if (s_authId != 0 && id == s_authId)
+                                        {
+                                          // "result": false without an error is a refusal too
+                                          s_authId = 0;
+                                          s_authorized = parse_extract_result(line) ? 1 : 0;
+                                          if (s_authorized == 1)
+                                            Serial.println("[STRATUM] Worker authorized by the pool");
+                                          else
+                                            Serial.printf("[STRATUM] The pool REFUSED the worker \"%s\": check the BTC address in the settings\n", mWorker.wName);
+                                          break;
+                                        }
                                         auto itt = s_submition_map.find(id);
                                         if (itt != s_submition_map.end())
                                         {
-                                          if (parse_extract_result(line))
+                                          const bool accepted = parse_extract_result(line);
+                                          if (accepted)
                                             s_sharesAccepted++;
                                           else
                                             rejects++; // "result":false without an error
 
-                                          if (itt->second->diff > best_diff)
-                                            best_diff = itt->second->diff;
-                                          if (itt->second->is32bit)
+                                          updateBestDiff(itt->second->diff);
+                                          // 32-bit shares: counted as accepted only when the pool
+                                          // took them (stock counted refused ones as well).
+                                          if (itt->second->is32bit && !accepted)
+                                            shares32Rejected++;
+                                          if (itt->second->is32bit && accepted)
+                                          {
                                             shares++;
+                                            // Signal only these (difficulty >= 1, the "32BITS SHARES"
+                                            // counter): pool shares at the suggested difficulty arrive
+                                            // more than once a second and made the buzzer beep non-stop.
+                                            g_shareFoundEvents++;
+                                          }
                                           if (itt->second->isValid)
                                           {
                                             Serial.println("CONGRATULATIONS! Valid block found");
                                             valids++;
+                                            g_blockFoundEvents++;
                                           }
                                           s_submition_map.erase(itt);
                                         }
@@ -758,11 +850,20 @@ void runStratumWorker(void *name) {
                                       break;
           case STRATUM_PARSE_ERROR:   {
                                         unsigned long id = parse_extract_id(line);
+                                        if (s_authId != 0 && id == s_authId)
+                                        {
+                                          s_authId = 0;
+                                          s_authorized = 0;
+                                          Serial.printf("[STRATUM] The pool REFUSED the worker \"%s\": check the BTC address in the settings\n", mWorker.wName);
+                                          break;
+                                        }
                                         auto itt = s_submition_map.find(id);
                                         if (itt != s_submition_map.end())
                                         {
-                                          Serial.printf("Refuse submition %d\n", id);
+                                          Serial.printf("Refuse submition %lu\n", id);
                                           rejects++;
+                                          if (itt->second->is32bit)
+                                            shares32Rejected++;
                                           s_submition_map.erase(itt);
                                         }
                                       }
@@ -855,6 +956,8 @@ void runStratumWorker(void *name) {
       job_result_list.pop_front();
 
       hashes += res->nonce_count;
+      if (res->nonce != 0xFFFFFFFF)
+        updateBestDiff(res->difficulty); // I2C slave results (local miners already did it)
       if (res->difficulty > currentPoolDifficulty && job_pool == res->id && res->nonce != 0xFFFFFFFF)
       {
         if (!client.connected())
@@ -874,7 +977,7 @@ void runStratumWorker(void *name) {
         submition->is32bit = (res->hash[29] == 0 && res->hash[28] == 0);
         if (submition->is32bit)
         {
-          submition->isValid = checkValid(res->hash, mMiner.bytearray_target);
+          submition->isValid = checkValid(res->hash, mJob.nbits.c_str()); // res->id == job_pool: mJob is this share's job
         } else
           submition->isValid = false;
 
@@ -909,8 +1012,7 @@ void minerWorkerSw(void * task_id)
       std::lock_guard<std::mutex> lock(s_job_mutex);
       if (result)
       {
-        if (s_job_result_list.size() < 16)
-          s_job_result_list.push_back(result);
+        pushJobResult(result, 16);
         result.reset();
       }
       if (!s_job_request_list_sw.empty())
@@ -934,9 +1036,17 @@ void minerWorkerSw(void * task_id)
         #ifdef DEBUG_MINING
         (*myDebugCounter)++;
         #endif
+#if defined(CONFIG_IDF_TARGET_ESP32)
+        // Assembly prefilter first; the C version only runs for the 1 nonce in
+        // 65536 that passes it, to produce the hash.
+        if (nerd_sha256d_prefilter(job->midstate, job->sha_buffer+64, job->bake) &&
+            nerd_sha256d_baked(job->midstate, job->sha_buffer+64, job->bake, hash))
+#else
         if (nerd_sha256d_baked(job->midstate, job->sha_buffer+64, job->bake, hash))
+#endif
         {
           double diff_hash = diff_from_target(hash);
+          updateBestDiff(diff_hash);
           if (diff_hash > result->difficulty)
           {
             result->difficulty = diff_hash;
@@ -1250,8 +1360,7 @@ void minerWorkerHw(void * task_id)
       std::lock_guard<std::mutex> lock(s_job_mutex);
       if (result)
       {
-        if (s_job_result_list.size() < 16)
-          s_job_result_list.push_back(result);
+        pushJobResult(result, 16);
         result.reset();
       }
       if (!s_job_request_list_hw.empty())
@@ -1314,7 +1423,9 @@ void minerWorkerHw(void * task_id)
             else
               debugPipelinedHwSwMismatch++;
             #endif
-            if (confirmed && diff_from_target(sw_hash) > job->difficulty && isSha256Valid(sw_hash))
+            const double cand_diff = confirmed && isSha256Valid(sw_hash) ? diff_from_target(sw_hash) : 0.0;
+            updateBestDiff(cand_diff);
+            if (cand_diff > job->difficulty)
             {
               // A share: hand it over now, not when the chunk ends (a job
               // change in between would void it).
@@ -1325,11 +1436,10 @@ void minerWorkerHw(void * task_id)
               share->id = job->id;
               share->nonce = cand;
               share->nonce_count = 0;
-              share->difficulty = diff_from_target(sw_hash);
+              share->difficulty = cand_diff;
               memcpy(share->hash, sw_hash, sizeof(sw_hash));
               std::lock_guard<std::mutex> lock(s_job_mutex);
-              if (s_job_result_list.size() < 64) // only guards against a stuck stratum task
-                s_job_result_list.push_back(share);
+              pushJobResult(share, 64);
             }
           }
 
@@ -1363,8 +1473,7 @@ void minerWorkerHw(void * task_id)
             progress->difficulty = job->difficulty;
             reported = done;
             std::lock_guard<std::mutex> lock(s_job_mutex);
-            if (s_job_result_list.size() < 64)
-              s_job_result_list.push_back(progress);
+            pushJobResult(progress, 64);
           }
         }
         result->nonce_count = (n - job->nonce_start) - reported;
@@ -1411,6 +1520,8 @@ void minerWorkerHw(void * task_id)
 #endif
           //~5 per second
           double diff_hash = diff_from_target(hash);
+          if (isSha256Valid(hash))
+            updateBestDiff(diff_hash);
           if (diff_hash > result->difficulty)
           {
             if (isSha256Valid(hash))
@@ -1804,8 +1915,7 @@ void minerWorkerHw(void * task_id)
       std::lock_guard<std::mutex> lock(s_job_mutex);
       if (result)
       {
-        if (s_job_result_list.size() < 16)
-          s_job_result_list.push_back(result);
+        pushJobResult(result, 16);
         result.reset();
       }
       if (!s_job_request_list_hw.empty())
@@ -1902,7 +2012,9 @@ void minerWorkerHw(void * task_id)
             debugPipelinedHwSwMismatch++;
           #endif
 
-          if (confirmed && diff_from_target(sw_hash) > job->difficulty && isSha256Valid(sw_hash))
+          const double cand_diff = confirmed && isSha256Valid(sw_hash) ? diff_from_target(sw_hash) : 0.0;
+          updateBestDiff(cand_diff);
+          if (cand_diff > job->difficulty)
           {
             // A share. Hand it over now rather than with the chunk's
             // result: at low pool difficulty a 256K-nonce chunk regularly
@@ -1915,11 +2027,10 @@ void minerWorkerHw(void * task_id)
             share->id = job->id;
             share->nonce = cand_native_pl;
             share->nonce_count = 0;
-            share->difficulty = diff_from_target(sw_hash);
+            share->difficulty = cand_diff;
             memcpy(share->hash, sw_hash, sizeof(sw_hash));
             std::lock_guard<std::mutex> lock(s_job_mutex);
-            if (s_job_result_list.size() < 64) // only guards against a stuck stratum task
-              s_job_result_list.push_back(share);
+            pushJobResult(share, 64);
           }
 
           #ifdef DEBUG_MINING
@@ -1969,6 +2080,8 @@ void minerWorkerHw(void * task_id)
         {
           //~5 per second
           double diff_hash = diff_from_target(hash);
+          if (isSha256Valid(hash))
+            updateBestDiff(diff_hash);
           if (diff_hash > result->difficulty)
           {
             if (isSha256Valid(hash))
@@ -2008,6 +2121,130 @@ void minerWorkerHw(void * task_id)
 #define DELAY 100
 #define REDRAW_EVERY 10
 
+// ---------------------------------------------------------------------------
+// Saved mining stats: two slots, "statA" / "statB", written in turn.
+//
+// Each save is one blob (a single NVS item) with a sequence number and its
+// own CRC; at boot the newest slot with a good CRC wins. If the power goes
+// in the middle of a save, only the slot being written can be damaged: the
+// other one still holds the previous save (at most STATS_SAVE_MAX_s old).
+// The stock format wrote 7 separate keys; a save cut half-way left a CRC
+// mismatch and every counter was reset to zero at the next boot.
+// Stats in the old format are read once (migration) and then saved as slots.
+// ---------------------------------------------------------------------------
+#define STATS_MAGIC_V1 0x53524D4EUL // "NMRS": first slot format, no rejected count
+#define STATS_MAGIC    0x32524D4EUL // "NMR2": + 32-bit shares the pool refused
+
+struct StatsRecordV1 { // read only (migration)
+  uint32_t magic;
+  uint32_t seq;
+  double best_diff;
+  uint32_t Mhashes;
+  uint32_t shares;
+  uint32_t valids;
+  uint32_t templates;
+  uint64_t upTime;
+  uint32_t crc;
+};
+
+struct StatsRecord {
+  uint32_t magic;
+  uint32_t seq;
+  double best_diff;
+  uint32_t Mhashes;
+  uint32_t shares;           // 32-bit shares accepted
+  uint32_t valids;
+  uint32_t templates;
+  uint32_t shares32Rejected; // 32-bit shares refused
+  uint64_t upTime;
+  uint32_t crc; // over every field above
+};
+
+static std::mutex s_statsMutex; // saves come from the monitor task and, before a restart/power off, from others
+static uint32_t s_statsSeq = 0;
+
+static uint32_t statsRecordCrc(const StatsRecord &r)
+{
+  uint32_t crc = crc32_reset();
+  crc = crc32_add(crc, &r, offsetof(StatsRecord, crc));
+  return crc32_finish(crc);
+}
+
+static uint32_t statsRecordV1Crc(const StatsRecordV1 &r)
+{
+  uint32_t crc = crc32_reset();
+  crc = crc32_add(crc, &r, offsetof(StatsRecordV1, crc));
+  return crc32_finish(crc);
+}
+
+// Reads a slot in either format; a v1 record comes back as v2 (0 refused).
+// missing: the key doesn't exist yet (only one save so far), as opposed to a
+// slot that is there but unreadable.
+static bool readStatsSlot(const char *key, StatsRecord &r, bool &missing)
+{
+  union { StatsRecord v2; StatsRecordV1 v1; } buf;
+  size_t size = sizeof(buf);
+  const esp_err_t err = nvs_get_blob(stat_handle, key, &buf, &size);
+  missing = (err == ESP_ERR_NVS_NOT_FOUND);
+  if (err != ESP_OK)
+    return false;
+  if (size == sizeof(StatsRecord) && buf.v2.magic == STATS_MAGIC && buf.v2.crc == statsRecordCrc(buf.v2)) {
+    r = buf.v2;
+    return true;
+  }
+  if (size == sizeof(StatsRecordV1) && buf.v1.magic == STATS_MAGIC_V1 && buf.v1.crc == statsRecordV1Crc(buf.v1)) {
+    const StatsRecordV1 old = buf.v1;
+    memset(&r, 0, sizeof(r));
+    r.magic = STATS_MAGIC;
+    r.seq = old.seq;
+    r.best_diff = old.best_diff;
+    r.Mhashes = old.Mhashes;
+    r.shares = old.shares;
+    r.valids = old.valids;
+    r.templates = old.templates;
+    r.shares32Rejected = 0;
+    r.upTime = old.upTime;
+    return true;
+  }
+  return false;
+}
+
+// Stock format (separate keys + "crc32"): only used when no slot exists yet.
+static bool readLegacyStats()
+{
+  double nv_best = 0.0;
+  uint32_t nv_mhashes = 0, nv_shares = 0, nv_valids = 0, nv_templates = 0, nv_crc = 0;
+  uint64_t nv_uptime = 0;
+  size_t required_size = sizeof(double);
+  if (nvs_get_u32(stat_handle, "crc32", &nv_crc) != ESP_OK)
+    return false; // never saved
+  nvs_get_blob(stat_handle, "best_diff", &nv_best, &required_size);
+  nvs_get_u32(stat_handle, "Mhashes", &nv_mhashes);
+  nvs_get_u32(stat_handle, "shares", &nv_shares);
+  nvs_get_u32(stat_handle, "valids", &nv_valids);
+  nvs_get_u32(stat_handle, "templates", &nv_templates);
+  nvs_get_u64(stat_handle, "upTime", &nv_uptime);
+
+  uint32_t crc = crc32_reset();
+  crc = crc32_add(crc, &nv_best, sizeof(nv_best));
+  crc = crc32_add(crc, &nv_mhashes, sizeof(nv_mhashes));
+  crc = crc32_add(crc, &nv_shares, sizeof(nv_shares));
+  crc = crc32_add(crc, &nv_valids, sizeof(nv_valids));
+  crc = crc32_add(crc, &nv_templates, sizeof(nv_templates));
+  crc = crc32_add(crc, &nv_uptime, sizeof(nv_uptime));
+  crc = crc32_finish(crc);
+  if (crc != nv_crc)
+    return false;
+
+  best_diff = nv_best;
+  Mhashes = nv_mhashes;
+  shares = nv_shares;
+  valids = nv_valids;
+  templates = nv_templates;
+  upTime = nv_uptime;
+  return true;
+}
+
 void restoreStat() {
   if(!Settings.saveStats) return;
   esp_err_t ret = nvs_flash_init();
@@ -2017,67 +2254,81 @@ void restoreStat() {
   }
 
   ret = nvs_open("state", NVS_READWRITE, &stat_handle);
+  if (ret != ESP_OK) {
+    Serial.printf("[MONITOR] Stats: NVS open failed (%d), not saved this run\n", ret);
+    return;
+  }
 
-  size_t required_size = sizeof(double);
-  nvs_get_blob(stat_handle, "best_diff", &best_diff, &required_size);
-  nvs_get_u32(stat_handle, "Mhashes", &Mhashes);
-  uint32_t nv_shares, nv_valids;
-  nvs_get_u32(stat_handle, "shares", &nv_shares);
-  nvs_get_u32(stat_handle, "valids", &nv_valids);
-  shares = nv_shares;
-  valids = nv_valids;
-  nvs_get_u32(stat_handle, "templates", &templates);
-  nvs_get_u64(stat_handle, "upTime", &upTime);
-
-  uint32_t crc = crc32_reset();
-  crc = crc32_add(crc, &best_diff, sizeof(best_diff));
-  crc = crc32_add(crc, &Mhashes, sizeof(Mhashes));
-  crc = crc32_add(crc, &nv_shares, sizeof(nv_shares));
-  crc = crc32_add(crc, &nv_valids, sizeof(nv_valids));
-  crc = crc32_add(crc, &templates, sizeof(templates));
-  crc = crc32_add(crc, &upTime, sizeof(upTime));
-  crc = crc32_finish(crc);
-
-  uint32_t nv_crc;
-  nvs_get_u32(stat_handle, "crc32", &nv_crc);
-  if (nv_crc != crc)
-  {
+  std::lock_guard<std::mutex> lock(s_statsMutex);
+  StatsRecord a, b;
+  bool missingA, missingB;
+  const bool okA = readStatsSlot("statA", a, missingA);
+  const bool okB = readStatsSlot("statB", b, missingB);
+  if (okA || okB) {
+    // newest valid slot (sequence compare that survives the 32-bit wrap)
+    const StatsRecord &r = (okA && (!okB || (int32_t)(a.seq - b.seq) > 0)) ? a : b;
+    best_diff = r.best_diff;
+    Mhashes = r.Mhashes;
+    shares = r.shares;
+    valids = r.valids;
+    templates = r.templates;
+    shares32Rejected = r.shares32Rejected;
+    upTime = r.upTime;
+    s_statsSeq = r.seq;
+    const bool otherMissing = (&r == &a) ? missingB : missingA;
+    Serial.printf("[MONITOR] Stats restored from slot %s (save #%u)%s\n", &r == &a ? "A" : "B",
+                  (unsigned)r.seq, (okA && okB) ? "" : otherMissing ? ", other slot empty" : ", other slot damaged");
+  } else if (readLegacyStats()) {
+    shares32Rejected = 0;
+    s_statsSeq = 0;
+    Serial.printf("[MONITOR] Stats restored from the old format, now saved in slots A/B\n");
+  } else {
     best_diff = 0.0;
     Mhashes = 0;
     shares = 0;
     valids = 0;
     templates = 0;
+    shares32Rejected = 0;
     upTime = 0;
+    s_statsSeq = 0;
+    Serial.printf("[MONITOR] No saved stats, starting from zero\n");
   }
+  s_statsLoaded = true;
 }
 
 void saveStat() {
   if(!Settings.saveStats) return;
-  Serial.printf("[MONITOR] Saving stats\n");
-  nvs_set_blob(stat_handle, "best_diff", &best_diff, sizeof(best_diff));
-  nvs_set_u32(stat_handle, "Mhashes", Mhashes);
-  nvs_set_u32(stat_handle, "shares", shares);
-  nvs_set_u32(stat_handle, "valids", valids);
-  nvs_set_u32(stat_handle, "templates", templates);
-  nvs_set_u64(stat_handle, "upTime", upTime);
+  if(!s_statsLoaded) return; // not read back yet: would overwrite them with zeros
+  std::lock_guard<std::mutex> lock(s_statsMutex);
 
-  uint32_t crc = crc32_reset();
-  crc = crc32_add(crc, &best_diff, sizeof(best_diff));
-  crc = crc32_add(crc, &Mhashes, sizeof(Mhashes));
-  uint32_t nv_shares = shares;
-  uint32_t nv_valids = valids;
-  crc = crc32_add(crc, &nv_shares, sizeof(nv_shares));
-  crc = crc32_add(crc, &nv_valids, sizeof(nv_valids));
-  crc = crc32_add(crc, &templates, sizeof(templates));
-  crc = crc32_add(crc, &upTime, sizeof(upTime));
-  crc = crc32_finish(crc);
-  nvs_set_u32(stat_handle, "crc32", crc);
+  StatsRecord r;
+  memset(&r, 0, sizeof(r));
+  r.magic = STATS_MAGIC;
+  r.seq = s_statsSeq + 1;
+  r.best_diff = getBestDiff();
+  r.Mhashes = Mhashes;
+  r.shares = shares;
+  r.valids = valids;
+  r.templates = templates;
+  r.shares32Rejected = shares32Rejected;
+  r.upTime = upTime;
+  r.crc = statsRecordCrc(r);
+
+  const char *slot = (r.seq & 1) ? "statA" : "statB";
+  if (nvs_set_blob(stat_handle, slot, &r, sizeof(r)) == ESP_OK && nvs_commit(stat_handle) == ESP_OK) {
+    s_statsSeq = r.seq; // the next save goes to the other slot
+    Serial.printf("[MONITOR] Stats saved (slot %s, #%u)\n", slot + 4, (unsigned)r.seq);
+  } else {
+    Serial.printf("[MONITOR] Stats save failed (slot %s)\n", slot + 4);
+  }
 }
 
 void resetStat() {
     Serial.printf("[MONITOR] Resetting NVS stats\n");
     templates = hashes = Mhashes = totalKHashes = elapsedKHs = upTime = shares = valids = rejects = s_sharesAccepted = 0;
+    shares32Rejected = 0;
     best_diff = 0.0;
+    if (stat_handle) s_statsLoaded = true; // zeros are what we want saved here
     saveStat();
 }
 
@@ -2095,19 +2346,19 @@ void runMonitor(void *name)
 
   uint32_t seconds_elapsed = 0;
 
-  totalKHashes = (Mhashes * 1000) + hashes / 1000;
+  totalKHashes = (uint64_t)Mhashes * 1000 + hashes / 1000;
   uint32_t last_update_millis = millis();
   uint32_t uptime_frac = 0;
   s_bootKh = totalKHashes;
-  s_bootMs = last_update_millis;
-  statusRateSample(s_bootKh, s_bootMs);
+  statusRateSample(s_bootKh, last_update_millis);
+  s_bootUs = s_lastSampleUs;
 
   while (1)
   {
+    // No clamp on millis() going "back": it wraps after 49.7 days, and clamping
+    // it to the last value froze this block (screen, stats, settings) for the
+    // next 49.7 days. Unsigned subtraction already handles the wrap.
     uint32_t now_millis = millis();
-    if (now_millis < last_update_millis)
-      now_millis = last_update_millis;
-    
     uint32_t mElapsed = now_millis - mLastCheck;
     if (mElapsed >= 1000)
     { 
@@ -2149,8 +2400,8 @@ void runMonitor(void *name)
       }
       #endif
 
-      unsigned long currentKHashes = (Mhashes * 1000) + hashes / 1000;
-      elapsedKHs = currentKHashes - totalKHashes;
+      uint64_t currentKHashes = (uint64_t)Mhashes * 1000 + hashes / 1000;
+      elapsedKHs = (uint32_t)(currentKHashes - totalKHashes);
       totalKHashes = currentKHashes;
       statusRateSample(currentKHashes, now_millis);
 
@@ -2162,6 +2413,7 @@ void runMonitor(void *name)
       }
 
       applyPendingSettings(); // from the LAN settings page
+      webMonitorDataTick();   // price / block height for the live web monitor
       backlightTick();
       drawCurrentScreen(mElapsed);
 
@@ -2181,7 +2433,9 @@ void runMonitor(void *name)
 
       seconds_elapsed++;
 
-      if(seconds_elapsed % (saveIntervals[currentIntervalIndex]) == 0){
+      int saveInterval = saveIntervals[currentIntervalIndex];
+      if (saveInterval > STATS_SAVE_MAX_s) saveInterval = STATS_SAVE_MAX_s;
+      if(seconds_elapsed % saveInterval == 0){
         saveStat();
         seconds_elapsed = 0;
         if(currentIntervalIndex < saveIntervalsSize - 1)

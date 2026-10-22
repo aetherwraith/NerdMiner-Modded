@@ -15,22 +15,23 @@ Original NerdMiner_v2 project https://github.com/BitMaker-hub/NerdMiner_v2
 
 ![NerdMiner Modded running on a CYD](images/nerdminer-mod.gif)
 
-> **⚠️ Tested on three boards only.** The changes in this fork have been developed and tested on the **ESP32-2432S028R (2.8" "Cheap Yellow Display", CYD)**, the **4.0" CYD with the 320x480 ST7796 panel** and a **screenless ESP32-WROOM-32 dev board**. Other boards still build from the same code base as the original, but they have **not** been tested with these changes. Expect rough edges, and please report what you find.
+> **⚠️ Tested on four boards only.** The changes in this fork have been developed and tested on the **ESP32-2432S028R (2.8" "Cheap Yellow Display", CYD)**, the **4.0" CYD with the 320x480 ST7796 panel**, the **LilyGO T-Display 1.14"** and a **screenless ESP32-WROOM-32 dev board**. Other boards still build from the same code base as the original, but they have **not** been tested with these changes. Expect rough edges, and please report what you find.
 
 - **High hashrate on the CYD** – the SHA-256 mining path for the classic ESP32 has been reworked to use the hardware SHA engine in a pipelined fashion, giving a sustained rate of roughly **990 KH/s** on the CYD (classic ESP32, both cores mining). Changes to the mining code are validated hash by hash against software, so the extra speed is not coming at the cost of invalid shares.
 - **New "Pulse" display theme** – the CYD UI has been completely redesigned. It is bitmap-free and has three screens: **MINE**, **MARKET** and **CLOCK**. Tap the wordmark to cycle the accent colour, and tap the top-right corner to toggle the backlight.
 - **4.0" CYD support** – the 4.0" 320x480 ST7796 variant of the CYD (ESP32-WROOM-32E, resistive touch) has its own build, `ESP32-4in-ST7796`: the same mining loop and the Pulse theme laid out for the larger 480x320 screen.
+- **Pulse on the LilyGO T-Display 1.14"** – the `TTGO-T-Display` build now uses the Pulse theme laid out for the 240x135 screen, with four screens: **MINE**, **MARKET**, **CLOCK** and **POOL** (workers, pool rate, pool best, uptime, pool and the settings page's IP address). It also frees enough memory for the BTC price, block height and network stats to load; with the old screens most of those requests failed on this board. Double-click the top button (USB on the right) to cycle the accent colour. Brightness, screen timeout, night dimming and display flip are set from the web settings page. See [T-Display 1.14" (Pulse)](#t-display-114-pulse) for the buttons.
 - **Headless build for a bare ESP32-WROOM-32** – a dev board without a screen has its own build, `ESP32-WROOM-Headless`: the same mining loop (measured at ~990 KH/s on a revision 3 chip), status on the serial port and the on-board LED. The LED can be switched off from the web settings page.
-- **Classic theme still available** – prefer the original look? Build the `ESP32-2432S028R-Classic` environment (`pio run -e ESP32-2432S028R-Classic -t upload`).
+- **Classic theme still available** – prefer the original look? Build the `ESP32-2432S028R-Classic` environment (`pio run -e ESP32-2432S028R-Classic -t upload`), or `TTGO-T-Display-Classic` on the T-Display 1.14".
 - **BTC price in your currency** – choose which fiat currency the BTC price is shown in from the web settings page.
 - **Improved web settings page** – the settings page stays reachable while mining, and now also has options for display flip (USB on the left), colour inversion, brightness and currency. Changes apply without a restart, including switching pool or wallet; only colour inversion and display flip restart the device. See [Web settings page](#web-settings-page) for how to log in. The page also takes a backup pool, a password of your own, and serves the miner's state as JSON at `/api/status`.
-- **Screen timeout and night dimming** – on the boards with a touch screen the backlight can switch off after a set number of minutes without a touch, and fade down to a night level around sunset (and back up at sunrise) for the city or coordinates you pick. Both are set from the web settings page.
+- **Screen timeout and night dimming** – on the boards with a touch screen, and on the T-Display 1.14", the backlight can switch off after a set number of minutes without a touch, and fade down to a night level around sunset (and back up at sunrise) for the city or coordinates you pick. Both are set from the web settings page.
 
 ### Why this hashrate is real
 
 The ~990 KH/s is what the miner actually hashes, not what a counter says:
 
-- **Hardware limit** – the classic ESP32's SHA engine can't be loaded with an external midstate, so every nonce costs three hardware hash blocks plus two engine loads: about 228 CPU cycles of engine time, a ceiling of roughly 1.05 MH/s at 240 MHz. The mining loop keeps the engine busy for all but ~20 cycles of each nonce (247 cycles per nonce, ~970 KH/s); the second core adds ~25 KH/s in software.
+- **Hardware limit** – the classic ESP32's SHA engine can't be loaded with an external midstate, so every nonce costs three hardware hash blocks plus two engine loads: about 228 CPU cycles of engine time, a ceiling of roughly 1.05 MH/s at 240 MHz. The mining loop keeps the engine busy for all but ~20 cycles of each nonce (247 cycles per nonce, ~970 KH/s); the second core adds ~35 KH/s in software (a hand-scheduled assembly SHA-256 up to its 16-bit early exit, checked on the chip against mbedTLS on 2.8 million nonces).
 - **Measured on the chip** – the loop's timing comes from an on-device bench (`-D SHA_BENCH`, see `src/sha_bench.cpp`) that checks every single hash against software, also while the other core hammers the peripheral bus. That is how the hardware quirk behind silently corrupted hashes in the usual pipelined loops was found: writes to the SHA registers less than three cycles apart can be dropped whenever the other core is using the same bus.
 - **Only valid hashes are counted** – every candidate the hardware finds is recomputed in software before it is used. A hashrate counter on its own can look faster after an optimisation while the miner is quietly producing *fewer* valid shares, because corrupted hashes are still counted; here the firmware checks itself with a known-answer test at power-on and falls back to a slower loop (first one with two more cycles on every delay, ~930 KH/s) if the fast one ever gets hashes wrong.
 - **The rate is the rate it actually mines at** – it's the sustained average over a long run, not a short burst or a best-case peak.
@@ -75,7 +76,7 @@ Every time an stratum job notification is received miner update its current work
 - LILYGO T-Display S3 ([Aliexpress link\*](https://s.click.aliexpress.com/e/_Ddy7739))
 - ESP32-WROOM-32, ESP32-Devkit1.. ([Aliexpress link\*](https://s.click.aliexpress.com/e/_DCzlUiX)) (fast mining loop: build environment `ESP32-WROOM-Headless`)
 - LILYGO T-QT pro ([Aliexpress link\*](https://s.click.aliexpress.com/e/_DBQIr43))
-- LILYGO T-Display 1.14 ([Aliexpress link\*](https://s.click.aliexpress.com/e/_DEqGvSJ))
+- LILYGO T-Display 1.14 ([Aliexpress link\*](https://s.click.aliexpress.com/e/_DEqGvSJ)) (Pulse theme: build environment `TTGO-T-Display`, original look: `TTGO-T-Display-Classic`)
 - LILYGO T-Display S3 AMOLED ([Aliexpress link\*](https://s.click.aliexpress.com/e/_DmOIK6j))
 - LILYGO T-Display S3 AMOLED Touch ([Board Info](https://www.lilygo.cc/products/t-display-s3-amoled?variant=43532279939253))
 - LILYGO T-Dongle S3 ([Aliexpress link\*](https://s.click.aliexpress.com/e/_DmQCPyj))
@@ -94,6 +95,7 @@ Every time an stratum job notification is received miner update its current work
 - LILYGO T-HMI ([Aliexpress link\*](https://s.click.aliexpress.com/e/_oFII4s2)) / Dev support: @cosmicpsyop
 - ESP32-C3 0.42 Inch OLED ([Aliexpress link\*](https://s.click.aliexpress.com/e/_oDmT4Id) / Dev support: @mrthiti / ⚡ wallet@thiti.dev)
 - ESP32-S3 0.42 Inch OLED ([Aliexpress link\*](https://s.click.aliexpress.com/e/_oFIMUoh) / Dev support: @mrthiti / ⚡ wallet@thiti.dev)
+- M5StickC Plus2 (ESP32-PICO-V3-02, build environment `M5Stick-C-Plus2`, see [M5StickC Plus2 notes](#m5stickc-plus2))
 
 \*Affiliate links
 
@@ -152,11 +154,15 @@ Note: when BTC address of your selected wallet is not provided, mining will not 
    - If you are using public-pool.io and you want to set a custom name to your worker you can append a string with format _.yourworkername_ to the address
 
 
+#### Live web monitor
+
+`http://<miner IP address>/` shows the miner live in any browser on the same network, phone or computer, no login needed: hashrate with a graph of the last hour, 32-bit shares, best difficulty, pool shares, mining time, BTC price and block height, clock, WiFi signal, pool, and on the M5StickC Plus2 the battery. It refreshes by itself every 3 s, follows the light/dark theme of the device and needs no internet access (everything is served by the miner). The BTC price and block height are fetched by the miner when the page is opened (unless a screen just did) and then once an hour while it stays open: each fetch pauses the hardware miner for about a second, so it doesn't follow the 3 s refresh. Like `/api/status` it shows nothing secret (no wallet address, no password). The graph's history is also available as JSON at `/api/history` (one value every 30 s, KH/s).
+
 #### Web settings page
 
-Once the miner is on your Wifi network it serves a settings page, also while it is mining, so you can change the pool, wallet, timezone, currency and display options without going back to the setup access point. On boards with a touch screen (CYD, 4" CYD, ES3C35P) it can also turn the screen off after a set number of minutes without a touch; any touch or press of the BOOT button wakes it again. On a board without a screen the page has a **Status LED** option instead of the display options, to switch the blinking LED off. On the CYD the RGB LED on the back can be switched off or set to any colour, see [LED on the back](#led-on-the-back-cyd).
+Once the miner is on your Wifi network it serves a settings page, also while it is mining, so you can change the pool, wallet, timezone, currency and display options without going back to the setup access point. On boards with a touch screen (CYD, 4" CYD, ES3C35P) and on the T-Display 1.14" it can also turn the screen off after a set number of minutes without a touch or button press; any touch or button press wakes it again. On a board without a screen the page has a **Status LED** option instead of the display options, to switch the blinking LED off. On the CYD the RGB LED on the back can be switched off or set to any colour, see [LED on the back](#led-on-the-back-cyd).
 
-1. Open `http://<miner IP address>/` in a browser on the same network. On the CYD the IP address is shown at the top of the screen; it is also printed on the serial log at start-up and listed by your router.
+1. Open `http://<miner IP address>/settings` in a browser on the same network (`http://<miner IP address>/` is the [live monitor](#live-web-monitor), with a link to the settings). On the CYD the IP address is shown at the top of the screen, on the T-Display 1.14" on its POOL screen; it is also printed on the serial log at start-up and listed by your router.
 1. Log in when the browser asks:
    - User: admin
    - Password: MineYourCoins, until you set your own at the bottom of the page (type it twice). If you forget it, a long press of the BOOT button erases the whole configuration (WiFi, pool, all settings and the saved statistics) and with it the password; set the miner up again through its setup access point.
@@ -184,7 +190,7 @@ Fill in **Backup pool URL**, port and (optionally) password to have the miner ca
 
 ##### Night dimming
 
-On the boards with a touch screen the settings page can also fade the backlight down after dark. Tick **Dim the screen at night**, set a night brightness and a fade length in minutes, and pick the nearest city from the list. A city a few hundred kilometres away is still good to a few minutes; for an exact location choose **Custom** and enter your latitude and longitude in decimal degrees (south and west are negative, e.g. London is 51.51 and -0.13). The backlight then moves between the normal brightness and the night level across a window centred on each crossing: the default 60 minute fade starts 30 minutes before sunset and finishes 30 minutes after, then reverses at sunrise.
+On the boards with a touch screen, and on the T-Display 1.14", the settings page can also fade the backlight down after dark. Tick **Dim the screen at night**, set a night brightness and a fade length in minutes, and pick the nearest city from the list. A city a few hundred kilometres away is still good to a few minutes; for an exact location choose **Custom** and enter your latitude and longitude in decimal degrees (south and west are negative, e.g. London is 51.51 and -0.13). The backlight then moves between the normal brightness and the night level across a window centred on each crossing: the default 60 minute fade starts 30 minutes before sunset and finishes 30 minutes after, then reverses at sunrise.
 
 The page prints the current sun state and today's sunrise and sunset next to the controls, in the timezone set on the page, so you can check the location is right. Until the clock has been set from the network, or with no location entered, the normal brightness is used.
 
@@ -273,11 +279,44 @@ With the USB-C port to the right:
 - One Click > turn the screen off and on again
 - Double click > change orientation (default is USB-C to the right)
 
-#### Build video
+#### T-Display 1.14" (Pulse)
 
-[![Ver video aquí](https://img.youtube.com/vi/POUT2R_opDs/0.jpg)](https://youtu.be/POUT2R_opDs)
+The same two buttons, plus:
 
-## Developers
+- **TOP BUTTON** double click > next accent colour (five to choose from; kept across restarts, like the last screen shown).
+- The orientation set by the bottom button's double click is kept across restarts too, and is the same setting as **Flip display** on the web settings page.
+- While the screen is off (bottom button, or the screen timeout from the settings page), the first press of either button only turns it back on.
+
+#### M5StickC Plus2
+
+Build environment: `M5Stick-C-Plus2` (`pio run -e M5Stick-C-Plus2 -t upload`).
+
+- **Button A** (front, "M5"): one click > screen off/on, double click > rotate 180°.
+- **Button B** (right side): one click > next screen, hold 5 s > **reset the configuration and reboot**. Hold it while powering on > **configuration mode**.
+- **Power button** (left side): press ~2 s to switch on. Once running, hold 2 s > **power off** (on USB power the stick goes to deep sleep instead; press the power button to wake it up).
+- The power-hold latch (GPIO4) is set before `setup()` and pad-latched, so automatic reboots (saving the Wi-Fi config, watchdog...) no longer switch the stick off when it runs on battery.
+- **Battery level** (GPIO38) with an icon in the top bar of the miner screen, instead of the chip temperature.
+- **Screen brightness, screen off after N minutes and night dimming** from the web settings page (backlight on GPIO27 driven in PWM). When the screen is off, any button press wakes it up.
+- **Last screen remembered** across restarts (e.g. keep the clock as the start screen).
+- **Share found**: short red LED flash + beep; a found block plays a longer pattern. Turn them off with `-D SHARE_LED=0` / `-D SHARE_BEEP=0` in the `M5Stick-C-Plus2` environment.
+- Both cores mine: the fast hardware SHA loop on core 1, a software miner on core 0.
+- Info screens (clock, global stats, BTC price) refresh every 5-10 min instead of 1-2 min, and a failed request waits 1 min before the next try: every HTTPS request pauses the hardware miner ~1.5 s. For the best hashrate, stay on the miner screen (it makes no request).
+- **Automatic summer/winter time** (EU rules, `-D AUTO_DST_EU=1`): set the timezone to the **winter** UTC offset (France: `1`) on the web page or in the WiFi portal; the hour is added on the last Sunday of March and removed on the last Sunday of October.
+- **Clock right at power-on**: the on-board BM8563 RTC gives the time until NTP answers (works without WiFi), and is set again after every NTP sync.
+- **Mining stats saved at least every 10 min** (`-D STATS_SAVE_MAX_s=600`; stock firmware: up to every 12 h, so a restart could lose hours of shares and best difficulty), and also right before a power off from the button, a flat-battery power off or a restart from the settings page.
+- **Power-cut-proof stats**: two save slots used in turn, each save one record with its own CRC. A power cut in the middle of a save only damages the slot being written; the miner restarts from the other one (the stock format reset every counter to zero in that case). Stats saved by the stock firmware are taken over automatically.
+- **Flat battery protection**: on battery, below 3.40 V for 30 s, a "Low battery" message then power off (no brown-out reboot loop). On USB nothing happens. `-D PLUS2_LOW_BATTERY_OFF=0` turns it off.
+
+### Unit tests (no board needed)
+
+`pio test -e native` builds the stratum parsing, the block header code (`calculateMiningData`), the share checks (`checkValid`, `diff_from_target`) and the software SHA-256d for the PC and runs 15 tests in a few seconds:
+
+- every stratum message form the miner meets (subscribe, notify, set_difficulty, replies, both error forms, `"error": false`), and the malformed jobs it must refuse;
+- requests sent to the pool: `mining.authorize` with a `"` or `\` in the worker name, the 8-digit nonce of `mining.submit`;
+- the 80-byte header built from two jobs, one with a 300-byte coinbase and 3 merkle branches, against vectors computed independently in Python (`test/test_native/gen_vectors.py`, hashlib);
+- block 125552 for `checkValid()` and `nerd_sha256d_baked()`, and 300,000 nonces of `nerd_sha256d_baked()` against a plain SHA-256.
+
+The firmware files are compiled as they are; `test/native_shim` stands in for the few Arduino/ESP-IDF pieces they use (String, Serial, WiFiClient, mbedTLS SHA-256).
 
 ### Project guidelines
 
@@ -285,37 +324,5 @@ With the USB-C port to the right:
 - Current project works with ESP32-S3 and ESP32-wroom.
 - Partition squeme should be build as huge app
 - All libraries needed shown on platform.ini
-
-### Job done
-
-- [x] Move project to platformIO
-- [x] Bug rectangle on screen when 1milion shares
-- [x] Bug memory leaks
-- [x] Bug Reboots when received JSON contains some null values
-- [x] Implement midstate sha256
-- [x] Bug Wificlient DNS unresolved on Wifi.h
-- [x] Code refactoring
-- [x] Add blockHeight to screen
-- [x] Add clock to show current time
-- [x] Add new screen with global mining stats
-- [x] Add pool support for low difficulty miners
-- [x] Add best difficulty on miner screen
-- [x] Add suport to standard ESP32 dev-kit / ESP32-WROOM
-- [x] Code changes to support adding multiple boards
-- [x] Add support to TTGO T-display 1.14
-- [x] Add support to Amoled
-
-### In process
-
-- [ ] Create a daisy chain protocol via UART or I2C to support ESP32 hashboards
-- [ ] Create new screen like clockMiner but with BTC price
-- [ ] Add support to control BM1397
-- [ ] Add password field in web configuration form
-
-### Donations/Project contributions
-
-If you would like to contribute and help dev team with this project you can send a donation to the following LN address ⚡teamnerdminer@getalby.com⚡ or using one of the affiliate links above.
-
-If you want to order a fully assembled Nerdminer you can contribute to my job at 🛒[bitronics.store](https://bitronics.store)🛒
 
 Enjoy

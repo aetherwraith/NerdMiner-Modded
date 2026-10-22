@@ -20,8 +20,8 @@ typedef struct {
     String extranonce1;
     String extranonce2;
     int extranonce2_size;
-    char wName[80];
-    char wPass[20];
+    char wName[80];  // same size as Settings.BtcWallet
+    char wPass[80];  // same size as Settings.PoolPassword (20 overflowed with a long password)
 } mining_subscribe;
 
 typedef struct {
@@ -47,7 +47,7 @@ typedef enum {
 
 unsigned long getNextId(unsigned long id);
 bool verifyPayload (String* line);
-bool checkError(const StaticJsonDocument<BUFFER_JSON_DOC> doc);
+bool checkError(const StaticJsonDocument<BUFFER_JSON_DOC>& doc);
 
 //Method Mining.subscribe
 mining_subscribe init_mining_subscribe(void);
@@ -55,7 +55,7 @@ bool tx_mining_subscribe(WiFiClient& client, mining_subscribe& mSubscribe);
 bool parse_mining_subscribe(String line, mining_subscribe& mSubscribe);
 
 //Method Mining.authorise
-bool tx_mining_auth(WiFiClient& client, const char * user, const char * pass);
+bool tx_mining_auth(WiFiClient& client, const char * user, const char * pass, unsigned long &auth_id);
 stratum_method parse_mining_method(String line);
 bool parse_mining_notify(String line, mining_job& mJob);
 

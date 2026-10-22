@@ -36,13 +36,19 @@ int to_byte_array(const char *in, size_t in_size, uint8_t *out) {
             if (!*in)
                 return count;
             *out = (*out << 4) | hex(*in++);
-            *out++;
+            out++;
             count++;
         }
         return count;
     } else {
         while (*in && out) {
-            *out++ = (hex(*in++) << 4) | hex(*in++);
+            // two statements: in "hex(*in++) << 4 | hex(*in++)" the order of the
+            // two reads is unspecified, the compiler was free to swap the nibbles
+            const uint8_t hi = hex(*in++);
+            if (!*in)
+                return count; // odd number of digits: drop the last one
+            const uint8_t lo = hex(*in++);
+            *out++ = (hi << 4) | lo;
             count++;
         }
         return count;
@@ -122,16 +128,33 @@ bool isSha256Valid(const void* sha256)
 /****************** PREMINING CALCULATIONS ********************/
 
 
-bool checkValid(unsigned char* hash, unsigned char* target) {
-  bool valid = true;
-  unsigned char diff_target[32];
-  memcpy(diff_target, &target, 32);
-  //convert target to little endian for comparison
-  reverse_bytes(diff_target, 32);
-
-  for(uint8_t i=31; i>=0; i--) {
-    if(hash[i] > diff_target[i]) {
-      valid = false;
+// True when a hash reaches the network target, i.e. it would make a block.
+// hash: 32 bytes as the miner produces them (little-endian: byte 31 is the
+// most significant). nbits: the job's compact target in hex, "17034219" =
+// 0x034219 * 256^(0x17 - 3).
+// The stock version compared the hash with the bytes of the target POINTER
+// (memcpy of &target) plus whatever followed it on the stack, and its
+// "uint8_t i >= 0" loop could only end on a mismatch, reading past the hash:
+// the result was random, which could count (and celebrate) a block that was
+// never found.
+bool checkValid(const unsigned char* hash, const char* nbitsHex) {
+  if (!hash || !nbitsHex)
+    return false;
+  const uint32_t nbits = strtoul(nbitsHex, NULL, 16);
+  if (nbits == 0 || (nbits & 0x00800000))
+    return false; // no target / negative target: nothing can be valid
+  uint8_t target[32] = {0}; // little-endian, like the hash
+  const int exponent = nbits >> 24;
+  const uint32_t mantissa = nbits & 0x007FFFFF;
+  for (int k = 0; k < 3; k++) {
+    const int pos = exponent - 3 + k;
+    if (pos >= 0 && pos < 32)
+      target[pos] = (mantissa >> (8 * k)) & 0xFF;
+  }
+  bool valid = true; // equal counts as valid (hash <= target)
+  for (int i = 31; i >= 0; i--) {
+    if (hash[i] != target[i]) {
+      valid = hash[i] < target[i];
       break;
     }
   }
@@ -208,39 +231,58 @@ miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
       mMiner.bytearray_target[j] ^= mMiner.bytearray_target[size_target - 1 - j];
     }
 
-    // get extranonce2 - extranonce2 = hex(random.randint(0,2**32-1))[2:].zfill(2*extranonce2_size)
-    //To review
-    //char extranonce2_char[2 * mWorker.extranonce2_size+1];	
-	//mWorker.extranonce2.toCharArray(extranonce2_char, 2 * mWorker.extranonce2_size + 1);
-    //getNextExtranonce2(mWorker.extranonce2_size, extranonce2_char);
-    if (mWorker.extranonce2_size == 2)
-        mWorker.extranonce2 = "0001";
-    else if (mWorker.extranonce2_size == 4)
-        mWorker.extranonce2 = "00000001";
-    else if (mWorker.extranonce2_size == 8)
-        mWorker.extranonce2 = "0000000000000001";
-    else
+    // extranonce2: a new value for every job. Each job restarts the nonce range, so with a
+    // fixed extranonce2 a job the pool re-sends (same job_id/ntime, e.g. after set_difficulty)
+    // hashed the same header again and re-submitted the same share -> "duplicate share" (issue #4).
     {
-        Serial.println("Unknown extranonce2");
-        mWorker.extranonce2 = "00000001";
+        static uint32_t s_extranonce2 = 0;
+        int size = mWorker.extranonce2_size;
+        if (size < 1 || size > 16)
+        {
+            Serial.println("Unknown extranonce2");
+            size = 4;
+        }
+        char en2[2 * 16 + 1];
+        uint32_t v = ++s_extranonce2;
+        for (int i = 2 * size - 1; i >= 0; --i, v >>= 4)
+            en2[i] = "0123456789abcdef"[v & 0xF];
+        en2[2 * size] = 0;
+        mWorker.extranonce2 = en2;
     }
-    //mWorker.extranonce2 = "00000002";
-    
+
     //get coinbase - coinbase_hash_bin = hashlib.sha256(hashlib.sha256(binascii.unhexlify(coinbase)).digest()).digest()
-    // Use char buffer instead of String concatenation to avoid memory leaks
-    static char coinbase_buffer[512]; // Static buffer to avoid repeated allocation
-    snprintf(coinbase_buffer, sizeof(coinbase_buffer), "%s%s%s%s", 
-             mJob.coinb1.c_str(), mWorker.extranonce1.c_str(), 
+    // Static buffer for the usual sizes; a bigger coinbase (pools with several
+    // payout outputs) gets a heap one. The fixed 512 digits used to cut it
+    // silently: wrong merkle root, every share rejected.
+    static char coinbase_static[512];
+    const size_t coinbase_hex = mJob.coinb1.length() + mWorker.extranonce1.length() +
+                                mWorker.extranonce2.length() + mJob.coinb2.length();
+    char *coinbase_heap = nullptr;
+    char *coinbase_buffer = coinbase_static;
+    size_t coinbase_size = sizeof(coinbase_static);
+    if (coinbase_hex + 1 > sizeof(coinbase_static))
+    {
+        coinbase_heap = (char *)malloc(coinbase_hex + 1);
+        if (coinbase_heap)
+        {
+            coinbase_buffer = coinbase_heap;
+            coinbase_size = coinbase_hex + 1;
+        } else
+            Serial.printf("    coinbase: %u hex digits, out of memory\n", (unsigned)coinbase_hex);
+    }
+    snprintf(coinbase_buffer, coinbase_size, "%s%s%s%s",
+             mJob.coinb1.c_str(), mWorker.extranonce1.c_str(),
              mWorker.extranonce2.c_str(), mJob.coinb2.c_str());
     Serial.print("    coinbase: "); Serial.println(coinbase_buffer);
     size_t str_len = strlen(coinbase_buffer)/2;
-    uint8_t bytearray[str_len];
+    // Decoded in place (each byte is written behind the two digits it comes
+    // from): no second buffer on the stratum task's stack.
+    uint8_t *bytearray = (uint8_t *)coinbase_buffer;
 
     size_t res = to_byte_array(coinbase_buffer, str_len*2, bytearray);
 
     #ifdef DEBUG_MINING
     Serial.print("    extranonce2: "); Serial.println(mWorker.extranonce2);
-    Serial.print("    coinbase: "); Serial.println(coinbase_buffer);
     Serial.print("    coinbase bytes - size: "); Serial.println(res);
     for (size_t i = 0; i < res; i++)
         Serial.printf("%02x", bytearray[i]);
@@ -261,6 +303,7 @@ miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
     mbedtls_sha256_update_ret(&ctx, interResult, 32);
     mbedtls_sha256_finish_ret(&ctx, shaResult);
     mbedtls_sha256_free(&ctx);
+    free(coinbase_heap);
 
     #ifdef DEBUG_MINING
     Serial.print("    coinbase double sha: ");
@@ -321,7 +364,7 @@ miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
       Serial.printf("%02x", mMiner.merkle_result[i]);
       snprintf(&merkle_root[i*2], 3, "%02x", mMiner.merkle_result[i]);
     }
-    merkle_root[65] = 0;
+    merkle_root[64] = 0; // 64 hex digits; [65] was one byte past the end
     Serial.println("");
 
     // calculate blockheader

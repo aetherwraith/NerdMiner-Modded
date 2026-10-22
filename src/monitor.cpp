@@ -13,11 +13,15 @@
 #include "drivers/devices/device.h"
 #include "currency.h"
 #include "timezone.h"
+#include "timeutil.h"
+#ifdef M5STICK_C_PLUS2
+#include "m5stickPlus2Hw.h"
+#endif
 
 extern uint32_t templates;
 extern uint32_t hashes;
 extern uint32_t Mhashes;
-extern uint32_t totalKHashes;
+extern uint64_t totalKHashes;
 extern uint32_t elapsedKHs;
 extern uint64_t upTime;
 
@@ -84,16 +88,35 @@ void setup_monitor(void){
 // block height, fees, difficulty and network hashrate empty.
 unsigned long mGlobalUpdate =0;
 
+// Every fetch below pauses the hardware miner for its whole duration (TLS
+// handshake under g_hwShaMutex, see above). They used to remember only the
+// last SUCCESS, so a failing one (CoinGecko "429 Too Many Requests", internet
+// down with WiFi still up...) was retried on every screen refresh, once a
+// second, each attempt holding the miner for up to the 10 s timeout. Now a
+// failed fetch waits FETCH_RETRY_ms before the next try, and the timeout is
+// shorter.
+#define FETCH_RETRY_ms   60000
+#define FETCH_TIMEOUT_ms 5000
+static bool fetchDue(unsigned long lastOk, unsigned long &lastTry, unsigned long periodMs)
+{
+    if (WiFi.status() != WL_CONNECTED) return false;
+    const unsigned long now = millis();
+    if (lastOk != 0 && now - lastOk <= periodMs) return false;
+    if (lastTry != 0 && now - lastTry < FETCH_RETRY_ms) return false;
+    lastTry = now;
+    return true;
+}
+static unsigned long mGlobalTry = 0;
+static unsigned long mHeightTry = 0;
+static unsigned long mBTCTry = 0;
+
 void updateGlobalData(void){
     
-    if((mGlobalUpdate == 0) || (millis() - mGlobalUpdate > UPDATE_Global_min * 60 * 1000)){
-    
-        if (WiFi.status() != WL_CONNECTED) return;
-        mGlobalUpdate = millis();
+    if(fetchDue(mGlobalUpdate, mGlobalTry, UPDATE_Global_min * 60 * 1000)){
             
         //Make first API call to get global hash and current difficulty
         HTTPClient http;
-        http.setTimeout(5000);
+        http.setTimeout(FETCH_TIMEOUT_ms);
         try {
         http.begin(getGlobalHash);
         int httpCode;
@@ -114,6 +137,8 @@ void updateGlobalData(void){
               gData.difficulty = temp.substring(0,temp.length()-2) + "." + temp.substring(temp.length()-2,temp.length()) + "T";
             }
             doc.clear();
+
+            mGlobalUpdate = millis();
         }
         http.end();
 
@@ -135,6 +160,8 @@ void updateGlobalData(void){
             if (doc.containsKey("minimumFee"))  gData.minimumFee = doc["minimumFee"].as<int>();
 #endif
             doc.clear();
+
+            mGlobalUpdate = millis();
         }
         
         http.end();
@@ -146,16 +173,14 @@ void updateGlobalData(void){
 }
 
 unsigned long mHeightUpdate = 0;
+static volatile uint32_t s_blockHeight = 0; // numeric copy, safe to read from any task
 
 String getBlockHeight(void){
     
-    if((mHeightUpdate == 0) || (millis() - mHeightUpdate > UPDATE_Height_min * 60 * 1000)){
-    
-        if (WiFi.status() != WL_CONNECTED) return current_block;
-        mHeightUpdate = millis();
+    if(fetchDue(mHeightUpdate, mHeightTry, UPDATE_Height_min * 60 * 1000)){
             
         HTTPClient http;
-        http.setTimeout(5000);
+        http.setTimeout(FETCH_TIMEOUT_ms);
         try {
         http.begin(getHeightAPI);
         int httpCode;
@@ -165,6 +190,9 @@ String getBlockHeight(void){
             String payload = http.getString();
             payload.trim();
             current_block = payload;
+            s_blockHeight = (uint32_t)payload.toInt();
+
+            mHeightUpdate = millis();
         }        
         http.end();
         } catch(...) {
@@ -182,16 +210,10 @@ String getBTCprice(void){
     const CurrencyInfo &cur = currencyFor(Settings.Currency);
     static char price_buffer[24];
 
-    if((mBTCUpdate == 0) || (millis() - mBTCUpdate > UPDATE_BTC_min * 60 * 1000)){
-
-        if (WiFi.status() != WL_CONNECTED) {
-            snprintf(price_buffer, sizeof(price_buffer), "%s%u", cur.prefix, bitcoin_price);
-            return String(price_buffer);
-        }
-        mBTCUpdate = millis();
+    if(fetchDue(mBTCUpdate, mBTCTry, UPDATE_BTC_min * 60 * 1000)){
 
         HTTPClient http;
-        http.setTimeout(5000);
+        http.setTimeout(FETCH_TIMEOUT_ms);
 
         try {
         http.begin(String(getBTCAPI) + cur.code);
@@ -209,6 +231,8 @@ String getBTCprice(void){
             }
 
             doc.clear();
+
+            mBTCUpdate = millis();
         }
         
         http.end();
@@ -224,59 +248,149 @@ String getBTCprice(void){
 
 unsigned long mPoolUpdate = 0;
 
-void getTime(unsigned long* currentHours, unsigned long* currentMinutes, unsigned long* currentSeconds){
+// ---------------------------------------------------------------------------
+// Clock
+//
+// initialTime is local STANDARD time (UTC + Settings.Timezone hours, as the
+// NTP client returns it) taken at millis() == mTriggerUpdate.
+//  - AUTO_DST_EU: Settings.Timezone is the winter offset (1 for France) and
+//    the EU summer-time hour is added on top, so the clock changes by itself
+//    on the last Sundays of March and October.
+//  - M5StickC Plus2: until the first NTP answer the time comes from the
+//    on-board BM8563 RTC (kept in UTC, written after every NTP sync), so the
+//    clock is right as soon as the stick is switched on, even without WiFi.
+// ---------------------------------------------------------------------------
+#ifdef M5STICK_C_PLUS2
+// Read once, by the monitor task only. Other tasks (web server) only look at
+// the result once s_rtcOk is set, after both values are fully written: a
+// 64-bit value read while the other core writes it could come out half old,
+// half new.
+static bool s_rtcTried = false;
+static volatile bool s_rtcOk = false;
+static int64_t s_rtcUtc = 0;            // RTC time read at boot...
+static unsigned long s_rtcMillis = 0;   // ...at this millis()
+
+static void rtcSeedOnce()
+{
+  if (s_rtcTried) return;
+  s_rtcTried = true;
+  int64_t utc;
+  if (plus2RtcRead(utc)) {
+    s_rtcUtc = utc;
+    s_rtcMillis = millis();
+    __sync_synchronize(); // both stored before the flag is seen by the other core
+    s_rtcOk = true;
+    Serial.println("Clock set from the on-board RTC");
+  } else {
+    Serial.println("On-board RTC not set yet (waiting for NTP)");
+  }
+}
+#endif
+
+// UTC now, from POSIX SNTP if synced, otherwise from the RTC (Plus2). False if neither.
+// seedRtc: only the monitor task may read/write the RTC chip (see rtcSeedOnce).
+static bool utcNow(int64_t &utc, bool seedRtc = true)
+{
+  time_t now;
+  time(&now);
+  if (now > 1500000000) {
+    utc = (int64_t)now;
+#ifdef M5STICK_C_PLUS2
+    static unsigned long s_lastRtcWrite = 0;
+    if (seedRtc && (s_lastRtcWrite == 0 || millis() - s_lastRtcWrite > 3600000UL)) {
+      s_lastRtcWrite = millis();
+      if (plus2RtcWrite(utc))
+        Serial.println("On-board RTC set from NTP");
+    }
+#endif
+    return true;
+  }
+#ifdef M5STICK_C_PLUS2
+  if (seedRtc) rtcSeedOnce();
+  if (s_rtcOk) {
+    __sync_synchronize();
+    utc = s_rtcUtc + (int64_t)((millis() - s_rtcMillis) / 1000);
+    return true;
+  }
+#endif
+  return false;
+}
+
+long currentDstOffset(void)
+{
+  int64_t utc;
+  if (!utcNow(utc, false))
+    return 0;
+  time_t t = (time_t)utc;
   struct tm timeinfo;
-  if (getLocalTime(&timeinfo, 10)) {
+  localtime_r(&t, &timeinfo);
+  return timeinfo.tm_isdst > 0 ? 3600 : 0;
+}
+
+// Display helpers: lets a screen show "--" instead of a made-up value
+// (00:00 before the clock is set, the hard-coded default block height,
+// a price of 0) until real data has arrived.
+bool isTimeSynced(void)
+{
+  int64_t utc;
+  return utcNow(utc);
+}
+bool isBlockHeightKnown(void) { return mHeightUpdate != 0; }
+uint32_t getBlockHeightValue(void) { return mHeightUpdate != 0 ? s_blockHeight : 0; }
+
+// Local date and time WITHOUT ever starting an NTP request: for the web server task.
+bool getLocalClock(int &hour, int &minute, int &second, int &day, int &month, int &year)
+{
+  int64_t utc;
+  if (!utcNow(utc, false)) // web server task: never touches the RTC chip itself
+    return false;
+  time_t t = (time_t)utc;
+  struct tm timeinfo;
+  localtime_r(&t, &timeinfo);
+  hour = timeinfo.tm_hour;
+  minute = timeinfo.tm_min;
+  second = timeinfo.tm_sec;
+  day = timeinfo.tm_mday;
+  month = timeinfo.tm_mon + 1;
+  year = timeinfo.tm_year + 1900;
+  return true;
+}
+unsigned int getBTCpriceValue(void) { return bitcoin_price; }
+
+void getTime(unsigned long* currentHours, unsigned long* currentMinutes, unsigned long* currentSeconds){
+  int64_t utc;
+  if (utcNow(utc, true)) {
+    time_t t = (time_t)utc;
+    struct tm timeinfo;
+    localtime_r(&t, &timeinfo);
     *currentHours = timeinfo.tm_hour;
     *currentMinutes = timeinfo.tm_min;
     *currentSeconds = timeinfo.tm_sec;
   } else {
-    time_t now;
-    time(&now);
-    if (now > 1500000000) {
-      localtime_r(&now, &timeinfo);
-      *currentHours = timeinfo.tm_hour;
-      *currentMinutes = timeinfo.tm_min;
-      *currentSeconds = timeinfo.tm_sec;
-    } else {
-      *currentHours = 0;
-      *currentMinutes = 0;
-      *currentSeconds = 0;
-    }
+    unsigned long secs = (millis() / 1000) % 86400;
+    *currentHours = secs / 3600;
+    *currentMinutes = (secs % 3600) / 60;
+    *currentSeconds = secs % 60;
   }
 }
 
-// UTC now; false until the clock has been set from NTP. With sync (monitor
-// task only) the NTP call is made here when it is due, as getTime() does.
+// UTC now; false until the clock has been set (NTP, or the RTC on the Plus2).
 bool getUtcTime(time_t &utc, bool sync){
-  if (sync) {
-    unsigned long h, m, s;
-    getTime(&h, &m, &s);
-  }
-  time_t now;
-  time(&now);
-  if (now > 1500000000) {
-    utc = now;
-    return true;
-  }
-  return false;
+  int64_t u;
+  if (!utcNow(u, sync)) return false; // sync == monitor task: the only one allowed to read the RTC chip
+  utc = (time_t)u;
+  return true;
 }
 
 String getDate(){
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo, 10)) {
+  int64_t utc;
+  if (utcNow(utc, true)) {
+    time_t t = (time_t)utc;
+    struct tm timeinfo;
+    localtime_r(&t, &timeinfo);
     char currentDate[20];
-    sprintf(currentDate, "%02d/%02d/%04d", timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+    snprintf(currentDate, sizeof(currentDate), "%02d/%02d/%04d", timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
     return String(currentDate);
-  } else {
-    time_t now;
-    time(&now);
-    if (now > 1500000000) {
-      localtime_r(&now, &timeinfo);
-      char currentDate[20];
-      sprintf(currentDate, "%02d/%02d/%04d", timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
-      return String(currentDate);
-    }
   }
   return String("00/00/0000");
 }
@@ -285,8 +399,8 @@ String getTime(void){
   unsigned long currentHours, currentMinutes, currentSeconds;
   getTime(&currentHours, &currentMinutes, &currentSeconds);
 
-  char LocalHour[10];
-  sprintf(LocalHour, "%02d:%02d", currentHours, currentMinutes);
+  char LocalHour[24];
+  snprintf(LocalHour, sizeof(LocalHour), "%02lu:%02lu", currentHours, currentMinutes);
   
   return String(LocalHour);
 }
@@ -355,9 +469,9 @@ mining_data getMiningData(unsigned long mElapsed)
   mining_data data;
 
   char best_diff_string[16] = {0};
-  suffix_string(best_diff, best_diff_string, 16, 0);
+  suffix_string(getBestDiff(), best_diff_string, 16, 0);
 
-  char timeMining[15] = {0};
+  char timeMining[24] = {0}; // [15] overflowed from 10000 days
   uint64_t tm = upTime;
   int secs = tm % 60;
   tm /= 60;
@@ -365,11 +479,11 @@ mining_data getMiningData(unsigned long mElapsed)
   tm /= 60;
   int hours = tm % 24;
   int days = tm / 24;
-  sprintf(timeMining, "%01d  %02d:%02d:%02d", days, hours, mins, secs);
+  snprintf(timeMining, sizeof(timeMining), "%01d  %02d:%02d:%02d", days, hours, mins, secs);
 
   data.completedShares = shares;
   data.totalMHashes = Mhashes;
-  data.totalKHashes = totalKHashes;
+  data.totalKHashes = String((unsigned long long)totalKHashes);
   data.currentHashRate = getCurrentHashRate(mElapsed);
   data.templates = templates;
   data.bestDiff = best_diff_string;
@@ -386,7 +500,7 @@ clock_data getClockData(unsigned long mElapsed)
   clock_data data;
 
   data.completedShares = shares;
-  data.totalKHashes = totalKHashes;
+  data.totalKHashes = String((unsigned long long)totalKHashes);
   data.currentHashRate = getCurrentHashRate(mElapsed);
   data.btcPrice = getBTCprice();
   data.blockHeight = getBlockHeight();
@@ -414,7 +528,7 @@ coin_data getCoinData(unsigned long mElapsed)
   updateGlobalData(); // Update gData vars asking mempool APIs
 
   data.completedShares = shares;
-  data.totalKHashes = totalKHashes;
+  data.totalKHashes = String((unsigned long long)totalKHashes);
   data.currentHashRate = getCurrentHashRate(mElapsed);
   data.btcPrice = getBTCprice();
   data.currentTime = getTime();
@@ -822,6 +936,7 @@ void applyPendingSettings(void) {
     if (currencyChanged) {
         bitcoin_price = 0; // the last figure is in the old currency
         mBTCUpdate = 0;    // fetch the price again next time it's shown
+        mBTCTry = 0;       // ...right away, not after the retry delay
     }
 
     if (s_poolChanged.exchange(false)) {
@@ -839,4 +954,46 @@ void applyPendingSettings(void) {
         pData = pool_data();
         mPoolUpdate = 0;
     }
+}
+
+// ---------------------------------------------------------------------------
+// BTC price and block height for the live web monitor. It shows the cached
+// values only (it never starts a fetch itself), and the screens fetch them
+// only on the pages that show them: a board left on its miner page never had
+// any. Each HTTPS fetch pauses the HW miner (~1.5 s), so the web page asks
+// for them sparingly: once when it is opened, then once an hour while it
+// stays open. getBTCprice() / getBlockHeight() still skip the request if a
+// screen fetched within their usual period. Monitor task only.
+// ---------------------------------------------------------------------------
+#define WEB_PRICE_REFRESH_ms (60UL * 60 * 1000) // while the page stays open
+#define WEB_WATCHED_ms (60UL * 1000)            // no poll for this long: closed
+
+static std::atomic<bool> s_webOpened{false};
+static std::atomic<uint32_t> s_webSeenMs{0};
+
+void noteWebMonitorOpened(void)
+{
+    s_webSeenMs = millis();
+    s_webOpened = true;
+}
+
+void noteWebMonitorPoll(void)
+{
+    s_webSeenMs = millis();
+}
+
+void webMonitorDataTick(void)
+{
+    static uint32_t lastWebFetch = 0;
+    const uint32_t now = millis();
+    bool due = s_webOpened.exchange(false);
+    if (!due) {
+        const uint32_t seen = s_webSeenMs;
+        due = seen != 0 && now - seen < WEB_WATCHED_ms && now - lastWebFetch >= WEB_PRICE_REFRESH_ms;
+    }
+    if (!due)
+        return;
+    lastWebFetch = now;
+    getBTCprice();
+    getBlockHeight();
 }
