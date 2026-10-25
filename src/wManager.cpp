@@ -40,8 +40,11 @@ String readWebflasherConfig(TSettings* settings) {
     Serial.println(F("DEBUG: Attempting to read flasher config from flash at 0x3F0000..."));
     
     const size_t DATA_SIZE = 1024;
-    uint8_t buffer[DATA_SIZE];
-    memset(buffer, 0, DATA_SIZE);
+    // One byte more than is read, left at 0: the flash holds no terminator.
+    // On huge_app boards 0x3F0000 is the (erased, all 0xFF) coredump
+    // partition, and String() below ran on past the buffer into the stack.
+    uint8_t buffer[DATA_SIZE + 1];
+    memset(buffer, 0, sizeof(buffer));
     
     esp_err_t result = esp_flash_read(NULL, buffer, 0x3F0000, DATA_SIZE);
     if (result != ESP_OK) {
@@ -49,7 +52,11 @@ String readWebflasherConfig(TSettings* settings) {
         return "";
     }
     
-    buffer[DATA_SIZE - 1] = '\0';
+    Serial.println("DEBUG: Successfully read from flash");
+    if (buffer[0] == 0xFF) {
+        Serial.println("DEBUG: Flash erased there - no custom config");
+        return "";
+    }
     String data = String((char*)buffer);
     
     if (data.startsWith("WEBFLASHER_CONFIG:")) {
@@ -259,26 +266,26 @@ void init_WifiManager()
     wm.addParameter(&screenOff_text_box_num);
     #endif
 
-    auto extractPortalParams = [&](bool applyPortalCheckboxes) {
+    // Copies the portal's fields into Settings. Only when its form was sent
+    // (shouldSaveConfig): each field is cut to its maximum length (80), and
+    // copying them back on every boot shortened a longer pool address set on
+    // the LAN settings page.
+    auto applyPortalValues = [&]() {
         Settings.PoolAddress = pool_text_box.getValue();
         Settings.PoolPort = atoi(port_text_box_num.getValue());
-        strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword) - 1);
-        Settings.PoolPassword[sizeof(Settings.PoolPassword) - 1] = '\0';
-        strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet) - 1);
-        Settings.BtcWallet[sizeof(Settings.BtcWallet) - 1] = '\0';
+        strlcpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword));
+        strlcpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet));
         Settings.Timezone = time_text_box.getValue();
-        if (applyPortalCheckboxes) {
-            Settings.saveStats = (strncmp(save_stats_to_nvs.getValue(), "T", 1) == 0);
-            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-            Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
-            Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
-            Settings.Brightness = atoi(brightness_text_box_num.getValue());
-            Settings.ScreenTimeout = constrain(atoi(screenOff_text_box_num.getValue()), 0, 1440);
-            #endif
-            #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-            Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);
-            #endif
-        }
+        Settings.saveStats = (strncmp(save_stats_to_nvs.getValue(), "T", 1) == 0);
+        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+        Settings.invertColors = (strncmp(invertColors.getValue(), "T", 1) == 0);
+        Settings.flipDisplay = (strncmp(flipDisplay.getValue(), "T", 1) == 0);
+        Settings.Brightness = atoi(brightness_text_box_num.getValue());
+        Settings.ScreenTimeout = constrain(atoi(screenOff_text_box_num.getValue()), 0, 1440);
+        #endif
+        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+        Settings.autoBrightness = (strncmp(autoBrightnessParam.getValue(), "T", 1) == 0);
+        #endif
     };
 
     Serial.println("AllDone: ");
@@ -292,7 +299,7 @@ void init_WifiManager()
         if (shouldSaveConfig)
         {
             Serial.println("failed to connect and hit timeout");
-            extractPortalParams(true);
+            applyPortalValues();
             nvMem.saveConfig(&Settings);
             delay(3*SECOND_MS);
             ESP.restart();            
@@ -308,7 +315,7 @@ void init_WifiManager()
         {
             Serial.println("Failed to connect to configured WIFI, and hit timeout");
             if (shouldSaveConfig) {
-                extractPortalParams(true);
+                applyPortalValues();
                 nvMem.saveConfig(&Settings);
                 vTaskDelay(2000 / portTICK_PERIOD_MS);      
             }        
@@ -328,32 +335,29 @@ void init_WifiManager()
             Settings.WifiPW = WiFi.psk();
         }
 
-        // Only apply checkbox values when the portal form was submitted: an
-        // unused checkbox still holds its "T", which would turn the saved
-        // setting on in memory.
-        extractPortalParams(shouldSaveConfig);
-
-        Serial.print("PoolString: ");
-        Serial.println(Settings.PoolAddress);
-        Serial.print("portNumber: ");
-        Serial.println(Settings.PoolPort);
-        Serial.print("poolPassword: ");
-        Serial.println(Settings.PoolPassword);
-        Serial.print("btcString: ");
-        Serial.println(Settings.BtcWallet);
-        Serial.print("TimeZone: ");
-        Serial.println(Settings.Timezone);
-        #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-        Serial.print("Invert Colors: ");
-        Serial.println(Settings.invertColors);
-        Serial.print("Brightness: ");
-        Serial.println(Settings.Brightness);
-        #endif
-
         // Always-on LAN settings page -- lets the user change pool/wallet/etc.
         // later without re-entering the device's own setup AP.
         setup_webConfig();
     }
+
+    if (shouldSaveConfig)
+        applyPortalValues();
+    Serial.print("PoolString: ");
+    Serial.println(Settings.PoolAddress);
+    Serial.print("portNumber: ");
+    Serial.println(Settings.PoolPort);
+    Serial.print("poolPassword: ");
+    Serial.println(Settings.PoolPassword[0] ? "(set)" : "(empty)");
+    Serial.print("btcString: ");
+    Serial.println(Settings.BtcWallet);
+    Serial.print("TimeZone: ");
+    Serial.println(Settings.Timezone);
+    #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+    Serial.print("Invert Colors: ");
+    Serial.println(Settings.invertColors);
+    Serial.print("Brightness: ");
+    Serial.println(Settings.Brightness);
+    #endif
     // Save the custom parameters to FS
     if (shouldSaveConfig)
     {

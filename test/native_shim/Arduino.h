@@ -72,11 +72,15 @@ public:
   }
   int indexOf(const char *x) const { size_t p = s_.find(x); return p == std::string::npos ? -1 : (int)p; }
   int indexOf(char c) const { size_t p = s_.find(c); return p == std::string::npos ? -1 : (int)p; }
+  int lastIndexOf(char c) const { size_t p = s_.rfind(c); return p == std::string::npos ? -1 : (int)p; }
+  int lastIndexOf(char c, unsigned from) const { size_t p = s_.rfind(c, from); return p == std::string::npos ? -1 : (int)p; }
   bool endsWith(const char *x) const { size_t n = strlen(x); return s_.size() >= n && s_.compare(s_.size() - n, n, x) == 0; }
   bool startsWith(const char *x) const { return s_.compare(0, strlen(x), x) == 0; }
   void remove(unsigned index) { if (index < s_.size()) s_.erase(index); }
   void remove(unsigned index, unsigned count) { if (index < s_.size()) s_.erase(index, count); }
   long toInt() const { return strtol(s_.c_str(), nullptr, 10); }
+  float toFloat() const { return strtof(s_.c_str(), nullptr); }
+  void toLowerCase() { for (char &c : s_) c = (char)tolower((unsigned char)c); }
   bool equalsIgnoreCase(const String &o) const { return strcasecmp(s_.c_str(), o.s_.c_str()) == 0; }
   bool concat(const char *s) { s_ += s ? s : ""; return true; }
   bool concat(const String &s) { s_ += s.s_; return true; }
@@ -133,5 +137,8 @@ public:
   template <class T> void println(const T &v) { print(v); print('\n'); }
   void println(double v, int d) { print(v, d); print('\n'); }
   void println() { print('\n'); }
+  // for serializeJson(..., Serial)
+  size_t write(uint8_t c) { if (on()) fputc(c, stderr); return 1; }
+  size_t write(const uint8_t *p, size_t n) { if (on()) fwrite(p, 1, n, stderr); return n; }
 };
 extern HostSerial Serial;

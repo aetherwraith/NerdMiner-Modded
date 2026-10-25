@@ -9,6 +9,9 @@
 #include "ShaTests/nerdSHA256plus.h"
 #include "mbedtls/sha256.h"
 #include "vectors.h"
+#include "SPIFFS.h"
+#define DEVKITV1 // any board: nvMemory.h includes the board header (see sources.cpp)
+#include "drivers/storage/nvMemory.h"
 
 void setUp() {}
 void tearDown() {}
@@ -35,6 +38,21 @@ static void test_subscribe_reply()
       "{\"id\":1,\"result\":[[[\"mining.notify\",\"ae6812eb4cd7735a302a8a9dd95cf71f\"]],\"f8002c90\",4],\"error\":null}", s));
   TEST_ASSERT_EQUAL_STRING("f8002c90", s.extranonce1.c_str());
   TEST_ASSERT_EQUAL_INT(4, s.extranonce2_size);
+}
+
+static void test_subscribe_refuses_bad_extranonces()
+{
+  mining_subscribe s = init_mining_subscribe();
+  // extranonce2_size missing, 0 or too big: every share would be rejected
+  TEST_ASSERT_FALSE(parse_mining_subscribe("{\"id\":1,\"result\":[[[\"mining.notify\",\"x\"]],\"f8002c90\"],\"error\":null}", s));
+  TEST_ASSERT_FALSE(parse_mining_subscribe("{\"id\":1,\"result\":[[[\"mining.notify\",\"x\"]],\"f8002c90\",0],\"error\":null}", s));
+  TEST_ASSERT_FALSE(parse_mining_subscribe("{\"id\":1,\"result\":[[[\"mining.notify\",\"x\"]],\"f8002c90\",17],\"error\":null}", s));
+  // extranonce1 empty, odd length or not hex
+  TEST_ASSERT_FALSE(parse_mining_subscribe("{\"id\":1,\"result\":[[[\"mining.notify\",\"x\"]],\"\",4],\"error\":null}", s));
+  TEST_ASSERT_FALSE(parse_mining_subscribe("{\"id\":1,\"result\":[[[\"mining.notify\",\"x\"]],\"f8002c9\",4],\"error\":null}", s));
+  TEST_ASSERT_FALSE(parse_mining_subscribe("{\"id\":1,\"result\":[[[\"mining.notify\",\"x\"]],\"f8002c9z\",4],\"error\":null}", s));
+  TEST_ASSERT_TRUE(parse_mining_subscribe("{\"id\":1,\"result\":[[[\"mining.notify\",\"x\"]],\"f8002c90\",8],\"error\":null}", s));
+  TEST_ASSERT_EQUAL_INT(8, s.extranonce2_size);
 }
 
 static void test_method_and_replies()
@@ -73,6 +91,51 @@ static String withParam(int index, const char *json)
   String out;
   serializeJson(d, out);
   return out;
+}
+
+// A notify far bigger than the shared 4 KB JSON document (pools with many
+// payout outputs): it used to be dropped as a parse error without a word.
+static String hugeNotify(size_t coinb2Digits, int branches)
+{
+  DynamicJsonDocument d(coinb2Digits + 16384);
+  deserializeJson(d, big_notify);
+  String coinb2;
+  coinb2.reserve(coinb2Digits);
+  for (size_t i = 0; i < coinb2Digits; i++)
+    coinb2 += "0123456789abcdef"[i % 16];
+  d["params"][3] = coinb2;
+  JsonArray b = d["params"][4];
+  while ((int)b.size() < branches)
+    b.add("a61a86bfef236ffcdf31d3df360740364a803dc39653428b6bd5210fe8bd5ae5");
+  String out;
+  serializeJson(d, out);
+  return out;
+}
+
+static void test_huge_notify_is_parsed()
+{
+  const String line = hugeNotify(6000, 12);
+  TEST_ASSERT_TRUE(line.length() > 6000);
+  TEST_ASSERT_EQUAL(MINING_NOTIFY, parse_mining_method(line));
+  mining_job j;
+  TEST_ASSERT_TRUE(parse_mining_notify(line, j));
+  TEST_ASSERT_EQUAL_UINT(6000, j.coinb2.length());
+  TEST_ASSERT_EQUAL_UINT(12, j.merkle_branch.size());
+  TEST_ASSERT_EQUAL_STRING("a1b2", j.job_id.c_str());
+  // longer than MAX_NOTIFY_LEN: refused
+  TEST_ASSERT_FALSE(parse_mining_notify(hugeNotify(MAX_NOTIFY_LEN, 0), j));
+}
+
+static void test_merkle_branch_outlives_the_next_message()
+{
+  mining_job j;
+  TEST_ASSERT_TRUE(parse_mining_notify(big_notify, j));
+  // the next messages reuse the shared JSON document
+  TEST_ASSERT_EQUAL(STRATUM_SUCCESS, parse_mining_method("{\"id\":9,\"result\":[\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"],\"error\":null}"));
+  TEST_ASSERT_EQUAL(9, parse_extract_id("{\"id\":9,\"result\":true,\"error\":null}"));
+  TEST_ASSERT_EQUAL_UINT(3, j.merkle_branch.size());
+  TEST_ASSERT_EQUAL_STRING("a61a86bfef236ffcdf31d3df360740364a803dc39653428b6bd5210fe8bd5ae5", j.merkle_branch[0].c_str());
+  TEST_ASSERT_EQUAL_STRING("8e0f53ae84878e7bc8c61be28f0e3f30460ac51981738f07c2e4e91071539cf9", j.merkle_branch[2].c_str());
 }
 
 static void test_notify_refuses_malformed_jobs()
@@ -178,6 +241,19 @@ static void checkHeader(const char *notify, const char *en2, const uint8_t *want
 static void test_header_empty_block() { checkHeader(empty_notify, empty_en2, empty_header); }
 static void test_header_big_coinbase_and_branches() { checkHeader(big_notify, big_en2, big_header); }
 
+static void test_job_not_prepared_without_extranonce2_size()
+{
+  mining_subscribe w = init_mining_subscribe();
+  w.extranonce1 = "f8002c90";
+  w.extranonce2_size = 0;
+  mining_job j;
+  TEST_ASSERT_TRUE(parse_mining_notify(empty_notify, j));
+  TEST_ASSERT_FALSE(calculateMiningData(w, j).valid);
+  w.extranonce2_size = 4;
+  // (runs after the header tests: their extranonce2 values are fixed)
+  TEST_ASSERT_TRUE(calculateMiningData(w, j).valid);
+}
+
 static void test_check_valid()
 {
   // a real block meets its own target (and the 0x18 one, 2^16 times harder: its
@@ -251,12 +327,122 @@ static void test_sha256d_baked_matches_reference()
   TEST_ASSERT_TRUE(passes > 0);
 }
 
+// ------------------------------------------------------------ config file --
+
+static TSettings sampleSettings(const char *wallet)
+{
+  TSettings s;
+  // longer than the 80 characters of the setup portal's field
+  s.PoolAddress = "stratum.a-very-long-pool-hostname-that-goes-on-and-on.example.org.subdomain.example.net";
+  s.PoolPort = 4333;
+  strlcpy(s.PoolPassword, "d=0.001,it's", sizeof(s.PoolPassword));
+  strlcpy(s.BtcWallet, wallet, sizeof(s.BtcWallet));
+  s.BackupPoolAddress = "backup.example.org";
+  s.BackupPoolPort = 3333;
+  s.WebPassword = "web'pass";
+  s.MqttEnabled = true;
+  s.MqttHost = "192.168.1.10";
+  s.MqttPass = "mq-secret";
+  s.Timezone = "Europe/London";
+  s.saveStats = true;
+  return s;
+}
+
+static void resetDisk() { fakefs::disk() = fakefs::Disk(); }
+
+static void checkLoaded(const char *wallet)
+{
+  nvMemory fresh; // as after a restart
+  TSettings t;
+  TEST_ASSERT_TRUE(fresh.loadConfig(&t));
+  TEST_ASSERT_EQUAL_STRING(wallet, t.BtcWallet);
+  TEST_ASSERT_EQUAL_STRING(sampleSettings(wallet).PoolAddress.c_str(), t.PoolAddress.c_str());
+  TEST_ASSERT_EQUAL_STRING("d=0.001,it's", t.PoolPassword);
+  TEST_ASSERT_EQUAL_STRING("web'pass", t.WebPassword.c_str());
+  TEST_ASSERT_EQUAL_STRING("mq-secret", t.MqttPass.c_str());
+  TEST_ASSERT_EQUAL_INT(4333, t.PoolPort);
+  TEST_ASSERT_TRUE(t.saveStats);
+}
+
+static void test_config_round_trip()
+{
+  resetDisk();
+  nvMemory m;
+  TSettings s = sampleSettings("bc1qfirst");
+  TEST_ASSERT_TRUE(m.saveConfig(&s));
+  TEST_ASSERT_TRUE(SPIFFS.exists(JSON_CONFIG_FILE));
+  TEST_ASSERT_FALSE(SPIFFS.exists(JSON_CONFIG_FILE ".tmp")); // renamed into place
+  checkLoaded("bc1qfirst");
+}
+
+static void test_config_full_filesystem_keeps_old()
+{
+  resetDisk();
+  nvMemory m;
+  TSettings a = sampleSettings("bc1qfirst"), b = sampleSettings("bc1qsecond");
+  TEST_ASSERT_TRUE(m.saveConfig(&a));
+  fakefs::disk().writeBudget = 40; // the new file can't be written in full
+  TEST_ASSERT_FALSE(m.saveConfig(&b));
+  fakefs::disk().writeBudget = -1;
+  TEST_ASSERT_FALSE(SPIFFS.exists(JSON_CONFIG_FILE ".tmp"));
+  checkLoaded("bc1qfirst"); // the stock code had emptied it before writing
+}
+
+static void test_config_power_cut_while_writing_keeps_old()
+{
+  resetDisk();
+  nvMemory m;
+  TSettings a = sampleSettings("bc1qfirst"), b = sampleSettings("bc1qsecond");
+  TEST_ASSERT_TRUE(m.saveConfig(&a));
+  fakefs::disk().writeBudget = 40;     // the power goes half-way through the write...
+  fakefs::disk().stepsBeforeCut = 0;   // ...so nothing after it happens
+  TEST_ASSERT_FALSE(m.saveConfig(&b));
+  fakefs::disk().powerCut = false;    // restart
+  fakefs::disk().writeBudget = -1;
+  fakefs::disk().stepsBeforeCut = -1;
+  checkLoaded("bc1qfirst"); // the half-written temporary file is ignored
+}
+
+static void test_config_power_cut_before_rename_keeps_new()
+{
+  resetDisk();
+  nvMemory m;
+  TSettings a = sampleSettings("bc1qfirst"), b = sampleSettings("bc1qsecond");
+  TEST_ASSERT_TRUE(m.saveConfig(&a));
+  fakefs::disk().stepsBeforeCut = 1; // old file removed, then the power goes
+  TEST_ASSERT_FALSE(m.saveConfig(&b));
+  TEST_ASSERT_FALSE(SPIFFS.exists(JSON_CONFIG_FILE));
+  fakefs::disk().powerCut = false; // restart
+  fakefs::disk().stepsBeforeCut = -1;
+  checkLoaded("bc1qsecond"); // the complete new file is picked up
+  TEST_ASSERT_TRUE(SPIFFS.exists(JSON_CONFIG_FILE));
+  TEST_ASSERT_FALSE(SPIFFS.exists(JSON_CONFIG_FILE ".tmp"));
+}
+
+static void test_config_delete_removes_both()
+{
+  resetDisk();
+  nvMemory m;
+  TSettings a = sampleSettings("bc1qfirst");
+  TEST_ASSERT_TRUE(m.saveConfig(&a));
+  fakefs::disk().files[JSON_CONFIG_FILE ".tmp"] = "{}";
+  m.deleteConfig();
+  TEST_ASSERT_FALSE(SPIFFS.exists(JSON_CONFIG_FILE));
+  TEST_ASSERT_FALSE(SPIFFS.exists(JSON_CONFIG_FILE ".tmp"));
+  nvMemory fresh;
+  TSettings t;
+  TEST_ASSERT_FALSE(fresh.loadConfig(&t));
+}
+
 int main(int, char **)
 {
   UNITY_BEGIN();
   RUN_TEST(test_subscribe_reply);
+  RUN_TEST(test_subscribe_refuses_bad_extranonces);
   RUN_TEST(test_method_and_replies);
   RUN_TEST(test_notify_fields);
+  RUN_TEST(test_huge_notify_is_parsed);
+  RUN_TEST(test_merkle_branch_outlives_the_next_message);
   RUN_TEST(test_notify_refuses_malformed_jobs);
   RUN_TEST(test_set_difficulty);
   RUN_TEST(test_authorize_escapes_and_returns_id);
@@ -265,9 +451,15 @@ int main(int, char **)
   RUN_TEST(test_to_byte_array);
   RUN_TEST(test_header_empty_block);
   RUN_TEST(test_header_big_coinbase_and_branches);
+  RUN_TEST(test_job_not_prepared_without_extranonce2_size);
   RUN_TEST(test_check_valid);
   RUN_TEST(test_difficulty_of_a_hash);
   RUN_TEST(test_sha256d_baked_on_a_real_block);
   RUN_TEST(test_sha256d_baked_matches_reference);
+  RUN_TEST(test_config_round_trip);
+  RUN_TEST(test_config_full_filesystem_keeps_old);
+  RUN_TEST(test_config_power_cut_while_writing_keeps_old);
+  RUN_TEST(test_config_power_cut_before_rename_keeps_new);
+  RUN_TEST(test_config_delete_removes_both);
   return UNITY_END();
 }

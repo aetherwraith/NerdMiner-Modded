@@ -19,8 +19,6 @@
 #endif
 
 extern uint32_t templates;
-extern uint32_t hashes;
-extern uint32_t Mhashes;
 extern uint64_t totalKHashes;
 extern uint32_t elapsedKHs;
 extern uint64_t upTime;
@@ -482,7 +480,7 @@ mining_data getMiningData(unsigned long mElapsed)
   snprintf(timeMining, sizeof(timeMining), "%01d  %02d:%02d:%02d", days, hours, mins, secs);
 
   data.completedShares = shares;
-  data.totalMHashes = Mhashes;
+  data.totalMHashes = String((unsigned long)(getTotalHashes() / 1000000));
   data.totalKHashes = String((unsigned long long)totalKHashes);
   data.currentHashRate = getCurrentHashRate(mElapsed);
   data.templates = templates;
@@ -964,6 +962,9 @@ void applyPendingSettings(void) {
 // for them sparingly: once when it is opened, then once an hour while it
 // stays open. getBTCprice() / getBlockHeight() still skip the request if a
 // screen fetched within their usual period. Monitor task only.
+// -D NO_WEB_PRICE leaves the fetch out: on a board whose screens never fetch
+// anything (T-QT), it would link the HTTPS/TLS stack (~127 KB) into an app
+// partition that has no room for it.
 // ---------------------------------------------------------------------------
 #define WEB_PRICE_REFRESH_ms (60UL * 60 * 1000) // while the page stays open
 #define WEB_WATCHED_ms (60UL * 1000)            // no poll for this long: closed
@@ -994,6 +995,8 @@ void webMonitorDataTick(void)
     if (!due)
         return;
     lastWebFetch = now;
+#ifndef NO_WEB_PRICE
     getBTCprice();
     getBlockHeight();
+#endif
 }

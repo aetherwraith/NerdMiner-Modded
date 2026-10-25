@@ -14,6 +14,27 @@
 
 nvMemory::nvMemory() : Initialized_(false){};
 
+// Written first, then renamed over JSON_CONFIG_FILE once complete: opening the
+// config itself with "w" emptied it at once, so a power cut during a save left
+// no settings at all (the miner came back in its setup portal, then mined to
+// the default address).
+#define JSON_CONFIG_TMP JSON_CONFIG_FILE ".tmp"
+
+// The config as JSON on the serial log, without the passwords in it.
+// Modifies json in-place (call after reading from or writing to json).
+static void printConfigMasked(JsonDocument &json)
+{
+    for (const char *key : {JSON_SPIFFS_KEY_POOLPASS, JSON_SPIFFS_KEY_BACKUPPOOLPASS, JSON_SPIFFS_KEY_WEBPASSWORD,
+                            JSON_SPIFFS_KEY_MQTTPASS, JSON_KEY_PASW, JSON_KEY_POOLPASS})
+    {
+        const char *v = json[key].as<const char *>();
+        if (v && *v)
+            json[key] = "***";
+    }
+    serializeJsonPretty(json, Serial);
+    Serial.print('\n');
+}
+
 nvMemory::~nvMemory()
 {
     if (Initialized_)
@@ -75,26 +96,38 @@ bool nvMemory::saveConfig(TSettings* Settings)
             json[JSON_KEY_PASW] = Settings->WifiPW;
         }
 
-        // Open config file
-        File configFile = SPIFFS.open(JSON_CONFIG_FILE, "w");
+        // Into the temporary file first
+        File configFile = SPIFFS.open(JSON_CONFIG_TMP, "w");
         if (!configFile)
         {
             // Error, file did not open
             Serial.println("SPIFS: Failed to open config file for writing");
             return false;
         }
-
-        // Serialize JSON data to write to file
-        serializeJsonPretty(json, Serial);
-        Serial.print('\n');
-        if (serializeJson(json, configFile) == 0)
+        const size_t expected = measureJson(json);
+        const size_t written = serializeJson(json, configFile);
+        configFile.close();
+        printConfigMasked(json);
+        if (written == 0 || written != expected)
         {
-            // Error writing file
-            Serial.println(F("SPIFS: Failed to write to file"));
+            // Error writing file (full?): the saved config stays as it was
+            Serial.printf("SPIFS: Failed to write to file (%u of %u bytes)\n", (unsigned)written, (unsigned)expected);
+            SPIFFS.remove(JSON_CONFIG_TMP);
             return false;
         }
-        // Close file
-        configFile.close();
+        // ...then in place of the old one. SPIFFS can't rename over an
+        // existing file; a power cut between the two steps leaves only the
+        // complete temporary file, which loadConfig() picks up.
+        if (SPIFFS.exists(JSON_CONFIG_FILE) && !SPIFFS.remove(JSON_CONFIG_FILE))
+        {
+            Serial.println("SPIFS: Failed to replace the config file");
+            return false;
+        }
+        if (!SPIFFS.rename(JSON_CONFIG_TMP, JSON_CONFIG_FILE))
+        {
+            Serial.println("SPIFS: Failed to rename the new config file");
+            return false;
+        }
         return true;
     };
     return false;
@@ -354,6 +387,13 @@ bool nvMemory::loadConfig(TSettings* Settings)
 
     if (init())
     {
+        if (!SPIFFS.exists(JSON_CONFIG_FILE) && SPIFFS.exists(JSON_CONFIG_TMP))
+        {
+            // Power cut between the two steps of saveConfig(): the temporary
+            // file is complete (it is only renamed after a full write)
+            Serial.println("SPIFS: Restoring the config saved just before a power cut");
+            SPIFFS.rename(JSON_CONFIG_TMP, JSON_CONFIG_FILE);
+        }
         if (SPIFFS.exists(JSON_CONFIG_FILE))
         {
             // The file exists, reading and loading
@@ -364,11 +404,11 @@ bool nvMemory::loadConfig(TSettings* Settings)
                 DynamicJsonDocument json(3072); // room for the MQTT fields too
                 DeserializationError error = deserializeJson(json, configFile);
                 configFile.close();
-                serializeJsonPretty(json, Serial);
-                Serial.print('\n');
                 if (!error)
                 {
-                    return parseJsonConfig(json, Settings);
+                    bool ok = parseJsonConfig(json, Settings);
+                    printConfigMasked(json);
+                    return ok;
                 }
                 else
                 {
@@ -394,6 +434,7 @@ bool nvMemory::loadConfig(TSettings* Settings)
 bool nvMemory::deleteConfig()
 {
     Serial.println("SPIFS: Erasing config file..");
+    SPIFFS.remove(JSON_CONFIG_TMP);
     return SPIFFS.remove(JSON_CONFIG_FILE); //Borramos fichero
 }
 

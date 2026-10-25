@@ -110,9 +110,12 @@ bool SDCard::loadConfigFile(TSettings* Settings)
                 Serial.println("SDCard: Loading config file");
                 if (!error)
                 {
+                    bool res = nvMemory::parseJsonConfig(json, Settings);
+                    for (const char *key : {JSON_KEY_PASW, JSON_KEY_POOLPASS})
+                        if (json.containsKey(key))
+                            json[key] = "***";
                     serializeJsonPretty(json, Serial);
                     Serial.print('\n');
-                    bool res = nvMemory::parseJsonConfig(json, Settings);
                     Serial.printf("Carteira Lida SDs:%s\n", Settings->BtcWallet);                       
                     return res;
                 }

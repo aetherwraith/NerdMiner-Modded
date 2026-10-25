@@ -909,6 +909,11 @@ static void saveUiPrefs()
 
 static void refreshPool()
 {
+  // Screen off: nobody sees the pool stats, and each fetch is an HTTPS request
+  // that pauses the HW miner. The last values stay; the next draw with the
+  // screen on fetches again if they are older than UPDATE_POOL_min.
+  if (!screenLit())
+    return;
   if (Settings.PoolAddress != "tn.vkbit.com")
   {
     pData = getPoolData(); // throttled internally (UPDATE_POOL_min)
@@ -1078,12 +1083,23 @@ static void updateAutoBrightness(unsigned long now)
 void esp32_2432S028R_Init(void)
 {
   tft.init();
-  nvMem.loadConfig(&Settings);
-  invertColors = Settings.invertColors;
-  tft.invertDisplay(invertColors);
+  if (nvMem.loadConfig(&Settings))
+  {
+    invertColors = Settings.invertColors;
+  }
+  // TFT_INVERSION_ON (env ESP32_2432S028_2USB): this panel needs inverted
+  // colours to look right, so that is its normal state and the setting
+  // flips it. Without this, invertDisplay(false) undid the compiled-in
+  // inversion and 2-USB boards needed "Invert display colours" ticked.
+#ifdef TFT_INVERSION_ON
+  const bool panelInverted = !invertColors;
+#else
+  const bool panelInverted = invertColors;
+#endif
+  tft.invertDisplay(panelInverted);
   tft.setRotation(Settings.flipDisplay ? 3 : 1); // 1 = USB on the right, 3 = USB on the left (touch follows automatically)
   tft.setSwapBytes(true);
-  if (invertColors)
+  if (panelInverted)
   {
     tft.writecommand(ILI9341_GAMMASET);
     tft.writedata(2);
