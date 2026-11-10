@@ -86,14 +86,20 @@ def http_json(host, path, method="GET", payload=None, timeout=3.0, auth=None):
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
 
-def discover_subnet(subnet_prefix="192.168.4.", timeout=1.0):
-    prefix = subnet_prefix if subnet_prefix.endswith(".") else subnet_prefix + "."
+def discover_subnet(subnet_prefix="192.168.4.", timeout=1.2):
+    raw = subnet_prefix.split("/")[0].rstrip(".")
+    parts = raw.split(".")
+    if len(parts) == 4:
+        parts = parts[:3]
+    prefix = ".".join(parts) + "."
     found = []
 
     def probe_ip(ip):
         try:
             d = http_json(ip, "/probe", timeout=timeout)
-            if isinstance(d, dict) and (d.get("nerdminer") or "host" in d or "hostname" in d or "ver" in d):
+            if isinstance(d, dict) and (
+                d.get("nerdminer") is True or ("hr" in d and "ut" in d and "ebd" in d)
+            ):
                 return (ip, d)
         except Exception:
             pass
@@ -167,8 +173,8 @@ def fleet_status(hosts, auth=None):
         ver = st.get("version") or "-"
         kh = float(st.get("hashrate_khs") or 0.0)
         sh = int(st.get("shares_accepted") or st.get("shares_32bit") or 0)
-        sbest = float(st.get("session_best_difficulty") or 0.0)
-        abest = float(st.get("best_difficulty") or 0.0)
+        sbest = float(st.get("session_best_difficulty") or st.get("best_diff") or st.get("best_difficulty") or 0.0)
+        abest = float(st.get("best_diff") or st.get("best_difficulty") or 0.0)
         pool = st.get("pool") or {}
         ping = pool.get("ping_ms")
         ping_s = f"{ping}ms" if ping is not None and int(ping) >= 0 else "-"

@@ -1280,13 +1280,8 @@ void fillMinerStatusJson(JsonDocument &doc)
   doc["identifying"] = isIdentifying();
 
   JsonObject pool = doc.createNestedObject("pool");
-  {
-    // The stratum task swaps a new pool into Settings under this mutex
-    // (takePoolChange); this runs on the other core, so copy it under it too.
-    std::lock_guard<std::mutex> lock(g_settingsMutex);
-    pool["address"] = activePoolAddress();
-    pool["port"] = activePoolPort();
-  }
+  pool["address"] = activePoolAddress(); // locks g_settingsMutex internally
+  pool["port"] = activePoolPort();
   pool["backup"] = onBackupPool();
   pool["subscribed"] = st.subscribed;
   if (st.authorized >= 0)

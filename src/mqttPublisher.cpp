@@ -328,6 +328,7 @@ static void handleCommand(String cmd)
         }
       }
       bool saveLed = false;
+      TSettings ledSnap;
       {
         std::lock_guard<std::mutex> lock(g_settingsMutex);
         if (doc.containsKey("ledMode") && doc["ledMode"].is<int>())
@@ -341,10 +342,12 @@ static void handleCommand(String cmd)
           saveLed = true;
         }
         if (saveLed)
-        {
-          nvMem.saveConfig(&Settings);
-          handled = true;
-        }
+          ledSnap = Settings;
+      }
+      if (saveLed)
+      {
+        nvMem.saveConfig(&ledSnap);
+        handled = true;
       }
       if (doc.containsKey("reboot") && doc["reboot"].as<bool>())
       {
