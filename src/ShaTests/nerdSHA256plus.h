@@ -5,7 +5,7 @@
 
 *   Description:
 
-*   NerdSha256plus is a custom C implementation of sha256d based on Blockstream Jade 
+*   NerdSha256plus is a custom C implementation of sha256d based on Blockstream Jade
     code https://github.com/Blockstream/Jade
 
     The folowing file can be used on any ESP32 implementation using both cores
@@ -18,32 +18,36 @@
 #include <stddef.h>
 #include <stdint.h>
 
-
-struct nerdSHA256_context {
-    uint8_t buffer[64];
-    uint32_t digest[8];
-};
-
-/* Calculate midstate (once per job). On the classic ESP32 it lives in flash:
-   the IRAM it used goes to nerd_sha256d_prefilter(), the per-nonce hot path. */
-#if defined(CONFIG_IDF_TARGET_ESP32)
-#define NERD_MIDS_ATTR
-#else
-#define NERD_MIDS_ATTR IRAM_ATTR
-#endif
-NERD_MIDS_ATTR void nerd_mids(uint32_t* digest, const uint8_t* dataIn);
-
-IRAM_ATTR bool nerd_sha256d(nerdSHA256_context* midstate, const uint8_t* dataIn, uint8_t* doubleHash);
-
-IRAM_ATTR void nerd_sha256_bake(const uint32_t* digest, const uint8_t* dataIn, uint32_t* bake);  //15 words
-IRAM_ATTR bool nerd_sha256d_baked(const uint32_t* digest, const uint8_t* dataIn, const uint32_t* bake, uint8_t* doubleHash);
-
 // The assembly prefilter below runs on the Xtensa cores it was checked on:
 // classic ESP32 (LX6) and ESP32-S3 (LX7). Keep in step with the #if at the top
 // of src/sw_sha256d_prefilter.S.
 #if defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S3)
 #define NERD_SW_ASM 1
 #endif
+
+struct nerdSHA256_context {
+    uint8_t buffer[64];
+    uint32_t digest[8];
+};
+
+/* Calculate midstate (once per job). On the classic ESP32 and ESP32-S3 it
+   lives in flash so scarce IRAM stays free for nerd_sha256d_prefilter(). */
+#if defined(NERD_SW_ASM)
+#define NERD_MIDS_ATTR
+#define NERD_BAKED_ATTR
+#else
+#define NERD_MIDS_ATTR IRAM_ATTR
+#define NERD_BAKED_ATTR IRAM_ATTR
+#endif
+
+NERD_MIDS_ATTR void nerd_mids(uint32_t* digest, const uint8_t* dataIn);
+
+#ifdef HW_SHA256_TEST
+IRAM_ATTR bool nerd_sha256d(nerdSHA256_context* midstate, const uint8_t* dataIn, uint8_t* doubleHash);
+#endif
+
+NERD_BAKED_ATTR void nerd_sha256_bake(const uint32_t* digest, const uint8_t* dataIn, uint32_t* bake); // 15 words
+NERD_BAKED_ATTR bool nerd_sha256d_baked(const uint32_t* digest, const uint8_t* dataIn, const uint32_t* bake, uint8_t* doubleHash);
 
 #if defined(NERD_SW_ASM) && defined(__cplusplus)
 // Hand-scheduled Xtensa version of nerd_sha256d_baked() up to its 16-bit
@@ -53,7 +57,5 @@ IRAM_ATTR bool nerd_sha256d_baked(const uint32_t* digest, const uint8_t* dataIn,
 // (1 nonce in 65536).
 extern "C" bool nerd_sha256d_prefilter(const uint32_t* digest, const uint8_t* dataIn, const uint32_t* bake);
 #endif
-
-void ByteReverseWords(uint32_t* out, const uint32_t* in, uint32_t byteCount);
 
 #endif /* nerdSHA256plus_H_ */

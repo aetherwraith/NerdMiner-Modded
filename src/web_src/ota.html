@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>NerdMiner Firmware Update</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--line:#30363d;--txt:#e6edf3;--mut:#8b949e;--acc:#f7931a;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--grid:#21262d}
+@media (prefers-color-scheme:light){:root{--bg:#f6f8fa;--card:#fff;--line:#d0d7de;--txt:#1f2328;--mut:#59636e;--grid:#eaeef2}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:20px 16px 36px}
+.container{max-width:560px;margin:0 auto}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+h1{font-size:20px;margin:0;font-weight:700}
+h1 b{color:var(--acc)}
+h3{color:var(--acc);margin:0 0 8px;font-size:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;border:1px solid var(--line);background:var(--grid)}
+.badge-green{color:var(--ok);border-color:var(--ok)}
+.badge-red{color:var(--bad);border-color:var(--bad)}
+.badge-blue{color:#58a6ff;border-color:#58a6ff}
+button,.btn{background:var(--acc);color:#000;font-weight:700;border:1px solid transparent;padding:9px 14px;border-radius:8px;cursor:pointer;width:100%;margin-top:10px;font-size:14px;text-align:center;text-decoration:none;display:inline-block}
+button:hover,.btn:hover{filter:brightness(1.08)}
+button:disabled{opacity:.5;cursor:not-allowed;filter:none}
+.btn-sec{background:var(--card);color:var(--txt);border-color:var(--line);width:auto;margin-top:0;font-weight:600}
+.btn-sec:hover{border-color:var(--acc);filter:none}
+input[type=file]{display:block;width:100%;padding:10px;background:var(--bg);border:1px dashed var(--line);border-radius:8px;color:var(--mut);margin-top:8px}
+.progress-container{background:var(--grid);border-radius:6px;overflow:hidden;margin-top:10px;height:14px}
+.progress-bar{background:var(--ok);height:100%;width:0%;transition:width .2s}
+.info-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--grid);font-size:14px}
+.info-row:last-child{border-bottom:none}
+.warning{background:rgba(210,153,34,.15);border-left:4px solid var(--warn);padding:10px 12px;border-radius:8px;margin-bottom:14px;font-size:13.5px}
+.nav-row{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:18px}
+code{background:var(--grid);padding:2px 6px;border-radius:4px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>&#9889; Nerd<b>Miner</b> Firmware Update</h1>
+  </header>
+
+  <div id="dualWarn" class="warning" hidden>
+    &#9888;&#65039; <b>Dual-OTA not enabled:</b> This device is running a single partition. Flash once via USB to enable dual-partition OTA.
+  </div>
+
+  <div class="card">
+    <h3>Device Info</h3>
+    <div class="info-row"><span>Model</span><b id="model">&ndash;</b></div>
+    <div class="info-row"><span>Installed Version</span><b id="curVer">&ndash;</b></div>
+    <div class="info-row"><span>Active Partition</span><span class="badge badge-blue" id="runPart">&ndash;</span></div>
+    <div class="info-row"><span>Target Partition</span><span class="badge" id="nextPart">&ndash;</span></div>
+  </div>
+
+  <div class="card">
+    <h3>&#127760; Online Update (GitHub)</h3>
+    <p style="margin:0;font-size:13.5px;color:var(--mut)">Check and install official firmware builds directly from GitHub Releases.</p>
+    <button type="button" id="btnCheck">Check for Updates</button>
+    <div id="releaseInfo" hidden style="margin-top:10px;padding:10px;background:var(--bg);border:1px solid var(--line);border-radius:8px">
+      <div><b>Latest:</b> <span id="relTag"></span></div>
+      <div id="relNotes" style="font-size:13px;color:var(--mut);margin:6px 0"></div>
+      <button type="button" id="btnInstallOnline" style="background:var(--ok);color:#000">Install Now</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>&#128193; Manual Firmware Upload</h3>
+    <p style="margin:0;font-size:13.5px;color:var(--mut)">Select a <code id="binHint">firmware.bin</code> binary image:</p>
+    <form id="uploadForm" method="POST" action="/update" enctype="multipart/form-data">
+      <input type="file" id="fileInput" name="update" accept=".bin" required>
+      <button type="submit" id="btnUpload">Upload &amp; Flash Firmware</button>
+    </form>
+  </div>
+
+  <div class="card" id="statusCard" hidden>
+    <h3>Update Progress</h3>
+    <div id="statusText" style="font-weight:600;font-size:14px">Idle</div>
+    <div class="progress-container">
+      <div class="progress-bar" id="progBar"></div>
+    </div>
+  </div>
+
+  <div class="nav-row">
+    <a href="/settings" class="btn btn-sec">&larr; Back to Settings</a>
+    <a href="/" class="btn btn-sec">Live Monitor</a>
+  </div>
+</div>
+<script>
+(function(){
+  var $=function(id){return document.getElementById(id)};
+  var timer=null;
+
+  function applyInfo(d){
+    if(!d)return;
+    $('model').textContent=d.boardModel||'ESP32';
+    $('curVer').textContent=d.currentVersion||'–';
+    $('runPart').textContent=d.runningPartition||'–';
+    var np=$('nextPart');
+    np.textContent=d.nextPartition||'–';
+    np.className='badge '+(d.hasDualOta?'badge-green':'badge-red');
+    $('dualWarn').hidden=!!d.hasDualOta;
+    if(d.boardModel)$('binHint').textContent=d.boardModel+'_firmware.bin';
+    if(d.state===2||d.state===3)startPolling();
+  }
+
+  fetch('/api/system/update',{cache:'no-store'}).then(function(r){return r.json()}).then(applyInfo).catch(function(){});
+
+  $('btnCheck').addEventListener('click',function(){
+    var btn=$('btnCheck');
+    btn.disabled=true;btn.textContent='Checking…';
+    fetch('/api/system/update/check',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+      btn.disabled=false;btn.textContent='Check for Updates';
+      if(d.latestVersion){
+        $('releaseInfo').hidden=false;
+        $('relTag').textContent=d.latestVersion+(d.hasUpdate?' (New!)':' (Up to date)');
+        $('relNotes').textContent=d.releaseNotes?d.releaseNotes.slice(0,180)+'…':(d.downloadUrl?'Ready to install matching board image.':'No prebuilt binary matched this board model.');
+        $('btnInstallOnline').hidden=!d.downloadUrl;
+      }else{
+        alert(d.error||'No update found');
+      }
+    }).catch(function(e){
+      btn.disabled=false;btn.textContent='Check for Updates';
+      alert('Check failed: '+e);
+    });
+  });
+
+  $('btnInstallOnline').addEventListener('click',function(){
+    if(!confirm('Download and flash latest firmware and reboot?'))return;
+    fetch('/api/system/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({version:'latest'})})
+      .then(function(r){return r.json()}).then(function(d){
+        if(d.success)startPolling();
+        else alert(d.error||d.message||'Failed to start OTA');
+      });
+  });
+
+  $('uploadForm').addEventListener('submit',function(e){
+    e.preventDefault();
+    var f=$('fileInput').files[0];
+    if(!f){alert('Please select a .bin file');return;}
+    if(!confirm('Upload '+f.name+' ('+Math.round(f.size/1024)+' KB) and flash device?'))return;
+    $('statusCard').hidden=false;
+    $('btnUpload').disabled=true;
+    $('statusText').textContent='Uploading firmware…';
+    var xhr=new XMLHttpRequest();
+    xhr.open('POST','/update',true);
+    xhr.upload.onprogress=function(pe){
+      if(pe.lengthComputable){
+        var pct=Math.round((pe.loaded/pe.total)*100);
+        $('progBar').style.width=pct+'%';
+        $('statusText').textContent='Uploading: '+pct+'% ('+Math.round(pe.loaded/1024)+' / '+Math.round(pe.total/1024)+' KB)';
+      }
+    };
+    xhr.onload=function(){
+      $('btnUpload').disabled=false;
+      if(xhr.status===200){
+        $('progBar').style.width='100%';
+        $('statusText').textContent='✅ Flash complete! Device rebooting…';
+        countdown(15);
+      }else{
+        $('statusText').textContent='❌ Error: '+(xhr.responseText||('HTTP '+xhr.status));
+      }
+    };
+    xhr.onerror=function(){
+      $('btnUpload').disabled=false;
+      $('statusText').textContent='❌ Network error during upload';
+    };
+    var fd=new FormData();
+    fd.append('update',f);
+    xhr.send(fd);
+  });
+
+  function startPolling(){
+    $('statusCard').hidden=false;
+    if(timer)clearInterval(timer);
+    timer=setInterval(function(){
+      fetch('/api/system/update',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
+        var pct=d.progress||0;
+        $('progBar').style.width=pct+'%';
+        if(d.state===2)$('statusText').textContent='📥 Downloading update: '+pct+'%';
+        else if(d.state===3)$('statusText').textContent='⚡ Flashing firmware: '+pct+'%';
+        else if(d.state===4){clearInterval(timer);$('statusText').textContent='✅ Success! Device is rebooting…';countdown(15);}
+        else if(d.state===5){clearInterval(timer);$('statusText').textContent='❌ Error: '+(d.error||'Update failed');}
+      }).catch(function(){});
+    },1000);
+  }
+
+  function countdown(n){
+    var c=n;
+    var iv=setInterval(function(){
+      $('statusText').textContent='✅ Complete! Redirecting to monitor in '+c+'s…';
+      c--;
+      if(c<=0){clearInterval(iv);window.location.href='/';}
+    },1000);
+  }
+})();
+</script>
+</body>
+</html>

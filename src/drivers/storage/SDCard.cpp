@@ -98,24 +98,34 @@ bool SDCard::loadConfigFile(TSettings* Settings)
     {
         if (iSD_->exists(JSON_CONFIG_FILE))
         {
-            // The file exists, reading and loading
+            // The file exists, reading and loading via const char* reader
             File configFile = iSD_->open(JSON_CONFIG_FILE, "r");
             if (configFile)
             {
                 cardBusy_ = true;
-                StaticJsonDocument<768> json;
-                DeserializationError error = deserializeJson(json, configFile);
+                String raw;
+                raw.reserve(512);
+                char buf[128];
+                size_t n = 0;
+                while ((n = configFile.readBytes(buf, sizeof(buf) - 1)) > 0)
+                {
+                    buf[n] = '\0';
+                    raw += buf;
+                }
                 configFile.close();
                 cardBusy_ = false;
+                StaticJsonDocument<1024> json;
+                DeserializationError error = deserializeJson(json, raw.c_str());
                 Serial.println("SDCard: Loading config file");
                 if (!error)
                 {
                     bool res = nvMemory::parseJsonConfig(json, Settings);
-                    for (const char *key : {JSON_KEY_PASW, JSON_KEY_POOLPASS})
+                    for (const char *key : {JSON_KEY_PASW, JSON_KEY_POOLPASS, "wifiPass", "poolPassword", "mqttPass"})
                         if (json.containsKey(key))
-                            json[key] = "***";
-                    serializeJsonPretty(json, Serial);
-                    Serial.print('\n');
+                            json[key] = "********";
+                    String out;
+                    serializeJsonPretty(json, out);
+                    Serial.println(out);
                     Serial.printf("Carteira Lida SDs:%s\n", Settings->BtcWallet);                       
                     return res;
                 }

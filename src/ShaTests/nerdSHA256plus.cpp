@@ -88,30 +88,11 @@ DRAM_ATTR static const uint32_t K[64] = {
         h = temp1 + temp2;                                                                                             \
     }
 
-uint32_t rotlFixed(uint32_t x, uint32_t y)
-    {
-        return (x << y) | (x >> (sizeof(y) * 8 - y));
-    }
-
-uint32_t ByteReverseWord32(uint32_t value){
-    value = ((value & 0xFF00FF00) >> 8) | ((value & 0x00FF00FF) << 8);
-    return rotlFixed(value, 16U);
-}
-
-void ByteReverseWords(uint32_t* out, const uint32_t* in, uint32_t byteCount)
-{
-    uint32_t count, i;
-    count = byteCount/(uint32_t)sizeof(uint32_t);
-    for (i = 0; i < count; i++)  out[i] = ByteReverseWord32(in[i]);
-}
-
-
 NERD_MIDS_ATTR void nerd_mids(uint32_t* digest, const uint8_t* dataIn)
 {
     uint32_t A[8] = { 0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19 };
 
     uint32_t temp1, temp2, W[64];
-    uint8_t i;
 
     W[0] = GET_UINT32_BE(dataIn, 0);
     W[1] = GET_UINT32_BE(dataIn, 4);
@@ -205,6 +186,7 @@ NERD_MIDS_ATTR void nerd_mids(uint32_t* digest, const uint8_t* dataIn)
     digest[7] = 0x5BE0CD19 + A[7];
 }
 
+#ifdef HW_SHA256_TEST
 IRAM_ATTR bool nerd_sha256d(nerdSHA256_context* midstate, const uint8_t* dataIn, uint8_t* doubleHash)
 {
     uint32_t temp1, temp2;
@@ -452,9 +434,14 @@ IRAM_ATTR bool nerd_sha256d(nerdSHA256_context* midstate, const uint8_t* dataIn,
 
     return true;
 }
+#endif // HW_SHA256_TEST
 
+#if defined(NERD_SW_ASM)
+#pragma GCC push_options
+#pragma GCC optimize("Os")
+#endif
 
-IRAM_ATTR void nerd_sha256_bake(const uint32_t* digest, const uint8_t* dataIn, uint32_t* bake)  //15 words
+NERD_BAKED_ATTR void nerd_sha256_bake(const uint32_t* digest, const uint8_t* dataIn, uint32_t* bake)  //15 words
 {
     bake[0] = GET_UINT32_BE(dataIn, 0);
     bake[1] = GET_UINT32_BE(dataIn, 4);
@@ -486,7 +473,7 @@ IRAM_ATTR void nerd_sha256_bake(const uint32_t* digest, const uint8_t* dataIn, u
 }
 
 
-IRAM_ATTR bool nerd_sha256d_baked(const uint32_t* digest, const uint8_t* dataIn, const uint32_t* bake, uint8_t* doubleHash)
+NERD_BAKED_ATTR bool nerd_sha256d_baked(const uint32_t* digest, const uint8_t* dataIn, const uint32_t* bake, uint8_t* doubleHash)
 {
     uint32_t temp1, temp2;
     //*********** Init 1rst SHA ***********
@@ -512,6 +499,54 @@ IRAM_ATTR bool nerd_sha256d_baked(const uint32_t* digest, const uint8_t* dataIn,
     temp2 = bake[14];
     A[0] += temp1;
     A[4] = temp1 + temp2;
+
+#if defined(NERD_SW_ASM)
+    // On targets with nerd_sha256d_prefilter() in IRAM, nerd_sha256d_baked()
+    // runs on only 1 in 65,536 nonces: keep it compact in Flash instead of
+    // unrolling ~20 KB of straight-line round macros.
+    for (int t = 18; t < 64; ++t)
+        R(t);
+    {
+        uint32_t s0 = A[4], s1 = A[5], s2 = A[6], s3 = A[7],
+                 s4 = A[0], s5 = A[1], s6 = A[2], s7 = A[3];
+        for (int t = 4; t < 64; ++t)
+        {
+            temp1 = s7 + S3(s4) + F1(s4, s5, s6) + K[t] + W[t];
+            temp2 = S2(s0) + F0(s0, s1, s2);
+            s7 = s6; s6 = s5; s5 = s4; s4 = s3 + temp1;
+            s3 = s2; s2 = s1; s1 = s0; s0 = temp1 + temp2;
+        }
+        W[0] = s0 + digest[0];
+        W[1] = s1 + digest[1];
+        W[2] = s2 + digest[2];
+        W[3] = s3 + digest[3];
+        W[4] = s4 + digest[4];
+        W[5] = s5 + digest[5];
+        W[6] = s6 + digest[6];
+        W[7] = s7 + digest[7];
+    }
+    W[8] = 0x80000000;
+    for (int t = 9; t < 15; ++t)
+        W[t] = 0;
+    W[15] = 256;
+    for (int t = 16; t < 64; ++t)
+        R(t);
+    {
+        uint32_t s0 = 0x6A09E667, s1 = 0xBB67AE85, s2 = 0x3C6EF372, s3 = 0xA54FF53A,
+                 s4 = 0x510E527F, s5 = 0x9B05688C, s6 = 0x1F83D9AB, s7 = 0x5BE0CD19;
+        for (int t = 0; t < 64; ++t)
+        {
+            temp1 = s7 + S3(s4) + F1(s4, s5, s6) + K[t] + W[t];
+            if (t == 60 && ((uint32_t)((s3 + temp1) & 0xFFFF)) != 0x32E7)
+                return false;
+            temp2 = S2(s0) + F0(s0, s1, s2);
+            s7 = s6; s6 = s5; s5 = s4; s4 = s3 + temp1;
+            s3 = s2; s2 = s1; s1 = s0; s0 = temp1 + temp2;
+        }
+        A[0] = s0; A[1] = s1; A[2] = s2; A[3] = s3;
+        A[4] = s4; A[5] = s5; A[6] = s6; A[7] = s7;
+    }
+#else
 
     P(A[4], A[5], A[6], A[7], A[0], A[1], A[2], A[3], W[4], K[4]);
     P(A[3], A[4], A[5], A[6], A[7], A[0], A[1], A[2], W[5], K[5]);
@@ -720,6 +755,7 @@ IRAM_ATTR bool nerd_sha256d_baked(const uint32_t* digest, const uint8_t* dataIn,
     P(A[3], A[4], A[5], A[6], A[7], A[0], A[1], A[2], R(61), K[61]);
     P(A[2], A[3], A[4], A[5], A[6], A[7], A[0], A[1], R(62), K[62]);
     P(A[1], A[2], A[3], A[4], A[5], A[6], A[7], A[0], R(63), K[63]);
+#endif
 
 #if 1
     temp1 = 0x6A09E667 + A[0]; ((uint32_t*)doubleHash)[0] = (temp1 << 24) | ((temp1 << 8) & 0x00FF0000) | ((temp1 >> 8) & 0x0000FF00) | (temp1 >> 24);
@@ -742,3 +778,7 @@ IRAM_ATTR bool nerd_sha256d_baked(const uint32_t* digest, const uint8_t* dataIn,
 #endif
     return true;
 }
+
+#if defined(NERD_SW_ASM)
+#pragma GCC pop_options
+#endif

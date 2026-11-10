@@ -1,7 +1,6 @@
 #ifndef STRATUM_API_H
 #define STRATUM_API_H
 
-#include "cJSON.h"
 #include <stdint.h>
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -51,25 +50,24 @@ typedef enum {
 } stratum_method;
 
 unsigned long getNextId(unsigned long id);
-bool verifyPayload (String* line);
 bool checkError(const JsonDocument& doc);
 
-//Method Mining.subscribe
+// Method Mining.subscribe
 mining_subscribe init_mining_subscribe(void);
 bool tx_mining_subscribe(WiFiClient& client, mining_subscribe& mSubscribe);
-bool parse_mining_subscribe(String line, mining_subscribe& mSubscribe);
+bool parse_mining_subscribe(const String& line, mining_subscribe& mSubscribe);
 
-//Method Mining.authorise
+// Method Mining.authorise
 bool tx_mining_auth(WiFiClient& client, const char * user, const char * pass, unsigned long &auth_id);
-stratum_method parse_mining_method(String line);
-bool parse_mining_notify(String line, mining_job& mJob);
+stratum_method parse_mining_method(const String& line, unsigned long *idOut = nullptr, bool *resultOut = nullptr);
+bool parse_mining_notify(const String& line, mining_job& mJob);
 
-//Method Mining.submit
-bool tx_mining_submit(WiFiClient& client, mining_subscribe mWorker, mining_job mJob, unsigned long nonce, unsigned long &submit_id);
+// Method Mining.submit
+bool tx_mining_submit(WiFiClient& client, const mining_subscribe& mWorker, const mining_job& mJob, unsigned long nonce, unsigned long &submit_id);
 
-//Difficulty Methods 
+// Difficulty Methods
 bool tx_suggest_difficulty(WiFiClient& client, double difficulty);
-bool parse_mining_set_difficulty(String line, double& difficulty);
+bool parse_mining_set_difficulty(const String& line, double& difficulty);
 
 unsigned long parse_extract_id(const String &line);
 bool parse_extract_result(const String &line);

@@ -81,6 +81,14 @@ public:
   long toInt() const { return strtol(s_.c_str(), nullptr, 10); }
   float toFloat() const { return strtof(s_.c_str(), nullptr); }
   void toLowerCase() { for (char &c : s_) c = (char)tolower((unsigned char)c); }
+  void toUpperCase() { for (char &c : s_) c = (char)toupper((unsigned char)c); }
+  void replace(const char *from, const char *to)
+  {
+    if (!from || !*from) return;
+    const size_t fl = strlen(from), tl = to ? strlen(to) : 0;
+    for (size_t p = 0; (p = s_.find(from, p)) != std::string::npos; p += tl)
+      s_.replace(p, fl, to ? to : "");
+  }
   bool equalsIgnoreCase(const String &o) const { return strcasecmp(s_.c_str(), o.s_.c_str()) == 0; }
   bool concat(const char *s) { s_ += s ? s : ""; return true; }
   bool concat(const String &s) { s_ += s.s_; return true; }

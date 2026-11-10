@@ -2,10 +2,12 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
+#include <initializer_list>
 #include <vector>
 
 #include "drivers/storage/storage.h"
 #include "drivers/storage/nvMemory.h"
+#include "drivers/displays/display.h"
 #include "wManager.h"
 #include "webConfig.h"
 #include "mining.h"
@@ -25,7 +27,8 @@ extern volatile uint32_t valids;
 extern volatile uint32_t rejects;
 extern uint64_t upTime;
 
-static TaskHandle_t s_cliTaskHandle = NULL;
+static TaskHandle_t s_cliTaskHandle = nullptr;
+static volatile bool s_cliLoopMode = false;
 static char s_lineBuf[1024];
 static size_t s_lineLen = 0;
 static bool s_prevCharWasCr = false;
@@ -70,8 +73,9 @@ static void printHelp(void)
 {
   Serial.println(F("\n================ NerdMiner USB Serial CLI ================"));
   Serial.println(F("Status & Inspection:"));
-  Serial.println(F("  status                      - Display miner status, hashrate, IP, uptime, heap"));
+  Serial.println(F("  status                      - Display miner status, hashrate, ping, IP, heap"));
   Serial.println(F("  probe                       - Print compact JSON probe for automated tooling"));
+  Serial.println(F("  identify [seconds]          - Flash screen & LED to physically locate miner"));
   Serial.println(F("  config [get]                - Display current configuration in JSON format"));
   Serial.println(F("  timezones [query]           - List supported timezones (optional search filter)"));
   Serial.println();
@@ -122,10 +126,14 @@ static void printHelp(void)
   Serial.println(F("=========================================================="));
 }
 
-static void printStatus(void)
+static void cmdShowStatus(void)
 {
+  const TSettings cfg = currentSettings();
+  const MinerStatus m = getMinerStatus();
   char best_diff_str[16] = {0};
-  suffix_string(best_diff, best_diff_str, sizeof(best_diff_str), 0);
+  char sess_diff_str[16] = {0};
+  suffix_string(m.bestDiff, best_diff_str, sizeof(best_diff_str), 0);
+  suffix_string(m.sessionBestDiff, sess_diff_str, sizeof(sess_diff_str), 0);
   double khs = getHashrateKhs();
 
   const char* statusStr = "Unknown";
@@ -141,107 +149,78 @@ static void printStatus(void)
 
   Serial.println(F("\n================ NerdMiner Status ================"));
   Serial.printf("  Firmware:      %s (Chip: %s rev %d)\n", CURRENT_VERSION, ESP.getChipModel(), ESP.getChipRevision());
-  Serial.printf("  Hostname:      %s\n", Settings.Hostname);
+  Serial.printf("  Hostname:      %s%s\n", cfg.Hostname, isIdentifying() ? " [IDENTIFYING]" : "");
   Serial.printf("  State:         %s\n", statusStr);
   Serial.printf("  WiFi Status:   %s\n", WiFi.isConnected() ? "Connected" : "Disconnected / AP Mode");
   if (WiFi.isConnected()) {
     Serial.printf("  SSID / IP:     %s / %s (RSSI: %d dBm)\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
   } else {
-    Serial.printf("  AP SSID:       %s (IP: %s)\n", Settings.WifiSSID.c_str(), WiFi.softAPIP().toString().c_str());
+    Serial.printf("  AP SSID:       %s (IP: %s)\n", cfg.WifiSSID.c_str(), WiFi.softAPIP().toString().c_str());
   }
   Serial.printf("  MAC Address:   %s\n", WiFi.macAddress().c_str());
-  const MinerStatus m = getMinerStatus();
   Serial.printf("  Hashrate:      %.2f KH/s (avg: %.2f KH/s)\n", khs, m.avgHashrateKHs);
   Serial.printf("  Shares:        %u 32-bit, %u accepted, %u rejected, %u blocks\n",
                 shares, m.accepted, m.rejected, valids);
-  Serial.printf("  Best Diff:     %s (Pool Diff: %.5g)\n", best_diff_str, m.poolDifficulty);
+  Serial.printf("  Best Diff:     %s all-time / %s session (Pool Diff: %.5g)\n",
+                best_diff_str, sess_diff_str, m.poolDifficulty);
   Serial.printf("  Active Pool:   %s:%d (%s, User: %s)\n",
                 activePoolAddress().c_str(), activePoolPort(),
-                onBackupPool() ? "BACKUP" : "PRIMARY", Settings.BtcWallet);
-  if (!Settings.BackupPoolAddress.isEmpty()) {
-    Serial.printf("  Backup Pool:   %s:%d\n", Settings.BackupPoolAddress.c_str(), Settings.BackupPoolPort);
+                onBackupPool() ? "BACKUP" : "PRIMARY", cfg.BtcWallet);
+  if (m.pingMs >= 0) {
+    Serial.printf("  Pool Ping:     %ld ms\n", (long)m.pingMs);
+  } else {
+    Serial.println(F("  Pool Ping:     N/A (awaiting share ACK)"));
+  }
+  if (!cfg.BackupPoolAddress.isEmpty()) {
+    Serial.printf("  Backup Pool:   %s:%d\n", cfg.BackupPoolAddress.c_str(), cfg.BackupPoolPort);
   }
   Serial.printf("  Uptime:        %lud %02luh %02lum %02lus\n", days, hours, mins, s);
   Serial.printf("  Free Heap:     %u bytes (min: %u bytes)\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
   Serial.printf("  Internal Temp: %.1f °C\n", temperatureRead());
-  Serial.printf("  Timezone:      %s\n", Settings.Timezone.c_str());
+  Serial.printf("  Timezone:      %s\n", cfg.Timezone.c_str());
   Serial.printf("  Screen:        Brightness %d, AutoBrightness %s, Timeout %d min\n",
-                Settings.Brightness, Settings.autoBrightness ? "ON" : "OFF", Settings.ScreenTimeout);
+                cfg.Brightness, cfg.autoBrightness ? "ON" : "OFF", cfg.ScreenTimeout);
   Serial.println(F("=================================================="));
 }
 
 static void printProbe(void)
 {
+  const TSettings cfg = currentSettings();
+  const MinerStatus m = getMinerStatus();
   char best_diff_str[16] = {0};
-  suffix_string(best_diff, best_diff_str, sizeof(best_diff_str), 0);
+  char sess_diff_str[16] = {0};
+  suffix_string(m.bestDiff, best_diff_str, sizeof(best_diff_str), 0);
+  suffix_string(m.sessionBestDiff, sess_diff_str, sizeof(sess_diff_str), 0);
   double khs = getHashrateKhs();
   String ip = WiFi.isConnected() ? WiFi.localIP().toString() : "0.0.0.0";
   const char* statusStr = (mMonitor.NerdStatus == NM_hashing) ? "Mining" :
                           (mMonitor.NerdStatus == NM_Connecting) ? "Connecting" : "WaitConfig";
 
-  Serial.printf("{\"version\":\"%s\",\"chip\":\"%s\",\"host\":\"%s\",\"ip\":\"%s\",\"hashrate\":%.2f,\"status\":\"%s\",\"heap\":%u,\"bestDiff\":\"%s\",\"temp\":%.1f}\n",
-                CURRENT_VERSION, ESP.getChipModel(), Settings.Hostname, ip.c_str(), khs, statusStr, ESP.getFreeHeap(), best_diff_str, temperatureRead());
+  Serial.printf("{\"version\":\"%s\",\"chip\":\"%s\",\"host\":\"%s\",\"ip\":\"%s\",\"hashrate\":%.2f,\"status\":\"%s\",\"heap\":%u,\"bestDiff\":\"%s\",\"sessionBestDiff\":\"%s\",\"pingMs\":%ld,\"temp\":%.1f}\n",
+                CURRENT_VERSION, ESP.getChipModel(), jsonEscape(String(cfg.Hostname)).c_str(), ip.c_str(), khs, statusStr, ESP.getFreeHeap(), best_diff_str, sess_diff_str, (long)m.pingMs, temperatureRead());
 }
 
 static void printConfig(void)
 {
   const TSettings s = currentSettings();
   const TimeZoneInfo* tzInfo = findTimeZone(s.Timezone);
-  String tzPosix = getPosixTz(s.Timezone);
-  String tzLabel = tzInfo ? String(tzInfo->label) : s.Timezone;
 
-  DynamicJsonDocument doc(1024);
-  doc["wifiSSID"] = s.WifiSSID;
-  doc["pool"] = s.PoolAddress;
-  doc["port"] = s.PoolPort;
-  doc["wallet"] = s.BtcWallet;
-  doc["hostname"] = s.Hostname;
-  doc["poolPassword"] = s.PoolPassword;
-  doc["backupPool"] = s.BackupPoolAddress;
-  doc["backupPort"] = s.BackupPoolPort;
-  doc["backupPoolPassword"] = s.BackupPoolPassword;
-  doc["currency"] = s.Currency;
-  doc["timezone"] = s.Timezone;
-  doc["timezoneLabel"] = tzLabel;
-  doc["timezonePosix"] = tzPosix;
-  doc["saveStats"] = s.saveStats;
-  doc["brightness"] = s.Brightness;
-  doc["autoBrightness"] = s.autoBrightness;
-  doc["screenTimeout"] = s.ScreenTimeout;
-  doc["nightDim"] = s.nightDim;
-  doc["nightBrightness"] = s.NightBrightness;
-  doc["nightFade"] = s.NightFade;
-  doc["latitude"] = s.Latitude;
-  doc["longitude"] = s.Longitude;
-  doc["invertColors"] = s.invertColors;
-  doc["flipDisplay"] = s.flipDisplay;
-#ifdef NO_DISPLAY
-  doc["statusLed"] = s.statusLed;
-#endif
-#ifdef HAS_RGB_LED
-  doc["ledMode"] = s.ledMode;
-  doc["ledColor"] = s.ledColor;
-  char hexBuf[8];
-  snprintf(hexBuf, sizeof(hexBuf), "#%06lx", (unsigned long)(s.ledColor & 0xFFFFFF));
-  doc["ledColorHex"] = hexBuf;
-  doc["ledBrightness"] = s.ledBrightness;
-  doc["ledScreenOff"] = s.ledScreenOff;
-#endif
-  doc["mqttEnabled"] = s.MqttEnabled;
-  doc["mqttHost"] = s.MqttHost;
-  doc["mqttPort"] = s.MqttPort;
-  doc["mqttUser"] = s.MqttUser;
-  doc["mqttTopic"] = s.MqttTopic;
+  DynamicJsonDocument doc(2048);
+  nvMemory::fillConfigJson(doc, s, false, true);
+  doc["timezoneLabel"] = tzInfo ? String(tzInfo->label) : s.Timezone;
+  doc["timezonePosix"] = getPosixTz(s.Timezone);
   doc["version"] = CURRENT_VERSION;
 
-  serializeJsonPretty(doc, Serial);
-  Serial.println();
+  String out;
+  out.reserve(1024);
+  serializeJsonPretty(doc, out);
+  Serial.println(out);
 }
 
 static void handleConfigJson(const String &jsonStr)
 {
-  DynamicJsonDocument doc(1024);
-  DeserializationError err = deserializeJson(doc, jsonStr);
+  DynamicJsonDocument doc(1536);
+  DeserializationError err = deserializeJson(doc, jsonStr.c_str());
   if (err) {
     Serial.printf("[ERROR] Failed to parse JSON: %s\n", err.c_str());
     return;
@@ -256,6 +235,7 @@ static void handleConfigJson(const String &jsonStr)
 
   if (restart) {
     Serial.println(F("{\"success\":true,\"message\":\"Settings applied. Restarting device for changes...\",\"rebootRequired\":true}"));
+    saveStat();
     delay(1000);
     ESP.restart();
   } else {
@@ -284,6 +264,98 @@ static void handleTimezones(const std::vector<String> &args)
   Serial.printf("Total matching: %d\n", count);
 }
 
+static bool isSupportedSetKey(const String &key)
+{
+  static const char *const kValidKeys[] = {
+    "ssid", "wifissid", "wifipass", "wifipw", "wifipassword",
+    "pool", "poolurl", "stratum", "port", "poolport",
+    "wallet", "btcwallet", "user", "btc",
+    "pass", "poolpass", "poolpassword", "password",
+    "bpool", "backuppool", "bport", "backupport",
+    "bpass", "bpoolpass", "backuppass", "backuppoolpassword",
+    "hostname", "host", "tz", "timezone", "currency", "cur",
+    "savestats", "stats", "brightness", "bright",
+    "autobrightness", "autobright", "timeout", "screenoff", "screentimeout",
+    "nightdim", "nightbright", "nightbrightness", "nightfade",
+    "city", "lat", "latitude", "lon", "longitude",
+    "led", "statusled", "ledmode", "mode", "ledcolor", "ledcolorhex", "color",
+    "ledbright", "ledbrightness", "ledscreen", "ledscreenoff",
+    "mqtt", "mqttenabled", "mqtthost", "mqhost", "mqttport", "mqport",
+    "mqttuser", "mquser", "mqttpass", "mqpass", "mqtttopic", "mqtopic",
+    "webpass", "webpassword", "invert", "invertcolors", "flip", "flipdisplay"
+  };
+  for (const char *k : kValidKeys) {
+    if (key == k) return true;
+  }
+  return false;
+}
+
+static void cmdSetKey(const std::vector<String> &args)
+{
+  if (args.size() < 3) {
+    Serial.println(F("[ERROR] Usage: set <key> <value>. Type 'help' for examples."));
+    return;
+  }
+
+  String key = args[1];
+  key.toLowerCase();
+
+  if (key == "wifi") {
+    if (args.size() < 4) {
+      Serial.println(F("[ERROR] Usage: set wifi <ssid> <password>"));
+      return;
+    }
+    const TSettings before = currentSettings();
+    TSettings next = before;
+    StaticJsonDocument<384> doc;
+    doc["ssid"] = args[2].c_str();
+    doc["wifiPass"] = args[3].c_str();
+    nvMemory::parseJsonConfig(doc, &next);
+    bool poolChanged = false;
+    applyLiveSettings(before, next, poolChanged);
+    Serial.printf("[OK] WiFi configured for '%s'. Restarting in 1s to associate...\n", next.WifiSSID.c_str());
+    saveStat();
+    delay(1000);
+    ESP.restart();
+    return;
+  }
+
+  if (!isSupportedSetKey(key)) {
+    Serial.printf("[ERROR] Unknown setting key '%s'. Type 'help' for available keys.\n", key.c_str());
+    return;
+  }
+
+  if ((key == "port" || key == "poolport") && args[2].toInt() <= 0) {
+    Serial.println(F("[ERROR] Invalid port number"));
+    return;
+  }
+
+  const TSettings before = currentSettings();
+  TSettings next = before;
+  StaticJsonDocument<384> doc;
+  doc[key.c_str()] = args[2].c_str();
+
+  if ((key == "pool" || key == "poolurl" || key == "stratum") && args.size() >= 4 && args[3].toInt() > 0) {
+    doc["port"] = args[3].toInt();
+  } else if ((key == "bpool" || key == "backuppool") && args.size() >= 4 && args[3].toInt() > 0) {
+    doc["backupPort"] = args[3].toInt();
+  }
+
+  nvMemory::parseJsonConfig(doc, &next);
+  bool poolChanged = false;
+  bool restart = applyLiveSettings(before, next, poolChanged);
+
+  if (restart) {
+    Serial.printf("[OK] Setting '%s' saved. Restarting in 1s to apply...\n", key.c_str());
+    saveStat();
+    delay(1000);
+    ESP.restart();
+    return;
+  }
+
+  Serial.printf("[OK] Setting '%s' updated to '%s' (applied live)\n", key.c_str(), args[2].c_str());
+}
+
 static void executeCommand(const String &rawLine)
 {
   String line = rawLine;
@@ -305,10 +377,25 @@ static void executeCommand(const String &rawLine)
     printHelp();
   }
   else if (cmd == "status") {
-    printStatus();
+    cmdShowStatus();
   }
   else if (cmd == "probe") {
     printProbe();
+  }
+  else if (cmd == "identify" || cmd == "locate") {
+    uint32_t durationMs = 10000;
+    if (args.size() >= 2) {
+      long v = args[1].toInt();
+      if (args[1].equalsIgnoreCase("off") || args[1] == "0") durationMs = 0;
+      else if (v > 0 && v <= 120) durationMs = (uint32_t)v * 1000U;
+      else if (v > 120) durationMs = (uint32_t)constrain(v, 500L, 120000L);
+    }
+    triggerIdentify(durationMs);
+    if (durationMs > 0) {
+      Serial.printf("[OK] Identify locator active for %lu ms.\n", (unsigned long)durationMs);
+    } else {
+      Serial.println(F("[OK] Identify locator stopped."));
+    }
   }
   else if (cmd == "config") {
     if (args.size() >= 2 && args[1].equalsIgnoreCase("json")) {
@@ -328,7 +415,8 @@ static void executeCommand(const String &rawLine)
     handleTimezones(args);
   }
   else if (cmd == "save") {
-    saveSettingsToFlash(&Settings);
+    TSettings snap = currentSettings();
+    saveSettingsToFlash(&snap);
     Serial.println(F("[OK] Settings saved to SPIFFS (/config.json)."));
   }
   else if (cmd == "reset") {
@@ -338,6 +426,7 @@ static void executeCommand(const String &rawLine)
   }
   else if (cmd == "restart" || cmd == "reboot") {
     Serial.println(F("[REBOOT] Restarting device..."));
+    saveStat();
     delay(500);
     ESP.restart();
   }
@@ -400,233 +489,7 @@ static void executeCommand(const String &rawLine)
     }
   }
   else if (cmd == "set") {
-    if (args.size() < 3) {
-      Serial.println(F("[ERROR] Usage: set <key> <value>. Type 'help' for examples."));
-      return;
-    }
-    String key = args[1];
-    key.toLowerCase();
-
-    if (key == "wifi") {
-      if (args.size() < 4) {
-        Serial.println(F("[ERROR] Usage: set wifi <ssid> <password>"));
-        return;
-      }
-      String ssid = args[2];
-      String pass = args[3];
-      Settings.WifiSSID = ssid;
-      Settings.WifiPW = pass;
-      saveSettingsToFlash(&Settings);
-      WiFi.begin(ssid.c_str(), pass.c_str());
-      Serial.printf("[OK] WiFi configured for '%s'. Restarting in 1s to associate...\n", ssid.c_str());
-      delay(1000);
-      ESP.restart();
-    }
-    else if (key == "pool" || key == "stratum") {
-      String host = args[2];
-      int port = (args.size() >= 4) ? args[3].toInt() : Settings.PoolPort;
-      if (port <= 0) port = 3333;
-
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.PoolAddress = host;
-      next.PoolPort = port;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Stratum pool set to %s:%d (applied live)\n", host.c_str(), port);
-    }
-    else if (key == "port") {
-      int port = args[2].toInt();
-      if (port <= 0) {
-        Serial.println(F("[ERROR] Invalid port number"));
-        return;
-      }
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.PoolPort = port;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Stratum port set to %d (applied live)\n", port);
-    }
-    else if (key == "wallet" || key == "user" || key == "btc") {
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      strncpy(next.BtcWallet, args[2].c_str(), sizeof(next.BtcWallet) - 1);
-      next.BtcWallet[sizeof(next.BtcWallet) - 1] = '\0';
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Wallet payout address set to %s (applied live)\n", next.BtcWallet);
-    }
-    else if (key == "hostname" || key == "host") {
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      strncpy(next.Hostname, args[2].c_str(), sizeof(next.Hostname) - 1);
-      next.Hostname[sizeof(next.Hostname) - 1] = '\0';
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      WiFi.setHostname(next.Hostname);
-      Serial.printf("[OK] Hostname set to %s (applied live)\n", next.Hostname);
-    }
-    else if (key == "pass" || key == "poolpass" || key == "password") {
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      strncpy(next.PoolPassword, args[2].c_str(), sizeof(next.PoolPassword) - 1);
-      next.PoolPassword[sizeof(next.PoolPassword) - 1] = '\0';
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Pool password set to '%s' (applied live)\n", next.PoolPassword);
-    }
-    else if (key == "tz" || key == "timezone") {
-      String tz = args[2];
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.Timezone = tz;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      String posix = getPosixTz(tz);
-      setenv("TZ", posix.c_str(), 1);
-      tzset();
-      const TimeZoneInfo* info = findTimeZone(tz);
-      Serial.printf("[OK] Timezone set to '%s' (%s, POSIX: %s)\n", tz.c_str(), info ? info->label : tz.c_str(), posix.c_str());
-    }
-    else if (key == "currency" || key == "cur") {
-      String cur = currencyFor(args[2]).code;
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.Currency = cur;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Currency set to '%s' (applied live)\n", cur.c_str());
-    }
-    else if (key == "brightness" || key == "bright") {
-      int b = constrain(args[2].toInt(), 0, 255);
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.Brightness = b;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Brightness set to %d\n", b);
-    }
-    else if (key == "autobrightness" || key == "autobright") {
-      bool ab = (args[2] == "1" || args[2].equalsIgnoreCase("true") || args[2].equalsIgnoreCase("on"));
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.autoBrightness = ab;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Auto-brightness %s\n", ab ? "enabled" : "disabled");
-    }
-    else if (key == "timeout" || key == "screenoff") {
-      int t = constrain(args[2].toInt(), 0, 1440);
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.ScreenTimeout = t;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Screen timeout set to %d min\n", t);
-    }
-    else if (key == "nightdim") {
-      bool nd = (args[2] == "1" || args[2].equalsIgnoreCase("true") || args[2].equalsIgnoreCase("on"));
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.nightDim = nd;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Night dimming %s\n", nd ? "enabled" : "disabled");
-    }
-    else if (key == "bpool" || key == "backuppool") {
-      String host = args[2];
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      StaticJsonDocument<256> doc;
-      doc["backupPool"] = host;
-      if (args.size() >= 4 && args[3].toInt() > 0) doc["backupPort"] = args[3].toInt();
-      nvMemory::parseJsonConfig(doc, &next);
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Backup pool set to %s:%d (applied live)\n", next.BackupPoolAddress.c_str(), next.BackupPoolPort);
-    }
-    else if (key == "bport" || key == "backupport") {
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.BackupPoolPort = constrain(args[2].toInt(), 0, 65535);
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Backup pool port set to %d (applied live)\n", next.BackupPoolPort);
-    }
-    else if (key == "bpass" || key == "bpoolpass" || key == "backuppoolpassword") {
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      strlcpy(next.BackupPoolPassword, args[2].c_str(), sizeof(next.BackupPoolPassword));
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Backup pool password set to '%s' (applied live)\n", next.BackupPoolPassword);
-    }
-    else if (key == "savestats" || key == "stats") {
-      bool ss = (args[2] == "1" || args[2].equalsIgnoreCase("true") || args[2].equalsIgnoreCase("on"));
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.saveStats = ss;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Save stats %s\n", ss ? "enabled" : "disabled");
-    }
-    else if (key == "nightbright" || key == "nightbrightness") {
-      int nb = constrain(args[2].toInt(), 1, 255);
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.NightBrightness = nb;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Night brightness set to %d\n", nb);
-    }
-    else if (key == "nightfade") {
-      int nf = constrain(args[2].toInt(), 1, 240);
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.NightFade = nf;
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Night fade set to %d min\n", nf);
-    }
-    else if (key == "city" || key == "lat" || key == "latitude" || key == "lon" || key == "longitude" ||
-             key == "ledmode" || key == "ledcolor" || key == "ledbright" || key == "ledbrightness" ||
-             key == "ledscreen" || key == "ledscreenoff" || key == "webpass" || key == "webpassword" || key == "led" ||
-             key == "mqtt" || key == "mqttenabled" || key == "mqtthost" || key == "mqhost" ||
-             key == "mqttport" || key == "mqport" || key == "mqttuser" || key == "mquser" ||
-             key == "mqttpass" || key == "mqpass" || key == "mqtttopic" || key == "mqtopic") {
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      StaticJsonDocument<256> doc;
-      doc[key] = args[2];
-      nvMemory::parseJsonConfig(doc, &next);
-      bool poolChanged = false;
-      applyLiveSettings(before, next, poolChanged);
-      Serial.printf("[OK] Setting '%s' updated to '%s' (applied live)\n", key.c_str(), args[2].c_str());
-    }
-    else if (key == "invert") {
-      bool inv = (args[2] == "1" || args[2].equalsIgnoreCase("true") || args[2].equalsIgnoreCase("on"));
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.invertColors = inv;
-      saveSettingsToFlash(&next);
-      Serial.println(F("[OK] Invert display saved. Restarting in 1s to apply..."));
-      delay(1000);
-      ESP.restart();
-    }
-    else if (key == "flip") {
-      bool fl = (args[2] == "1" || args[2].equalsIgnoreCase("true") || args[2].equalsIgnoreCase("on"));
-      const TSettings before = currentSettings();
-      TSettings next = before;
-      next.flipDisplay = fl;
-      saveSettingsToFlash(&next);
-      Serial.println(F("[OK] Flip display saved. Restarting in 1s to apply..."));
-      delay(1000);
-      ESP.restart();
-    }
-    else {
-      Serial.printf("[ERROR] Unknown setting key '%s'. Type 'help' for available keys.\n", key.c_str());
-    }
+    cmdSetKey(args);
   }
   else {
     Serial.printf("[ERROR] Unknown command '%s'. Type 'help' for command list.\n", cmd.c_str());
@@ -676,17 +539,24 @@ void serialCliProcess(void)
 
 static void serialCliTask(void *param)
 {
-  Serial.println(F("\n[CLI] NerdMiner USB Serial CLI active (115200 baud). Type 'help' for commands."));
-  Serial.print(F("NerdMiner> "));
-  while (true) {
+  while (!s_cliLoopMode) {
     serialCliProcess();
     vTaskDelay(pdMS_TO_TICKS(25));
   }
+  s_cliTaskHandle = nullptr;
+  vTaskDelete(NULL);
 }
 
 void setup_serialCli(void)
 {
-  if (s_cliTaskHandle == NULL) {
-    xTaskCreatePinnedToCore(serialCliTask, "SerialCLI", 10240, NULL, 2, &s_cliTaskHandle, 0);
+  Serial.println(F("\n[CLI] NerdMiner USB Serial CLI active (115200 baud). Type 'help' for commands."));
+  Serial.print(F("NerdMiner> "));
+  if (!s_cliLoopMode && s_cliTaskHandle == nullptr) {
+    xTaskCreatePinnedToCore(serialCliTask, "SerialCLI", 4096, NULL, 2, &s_cliTaskHandle, 0);
   }
+}
+
+void serialCliEnterLoopMode(void)
+{
+  s_cliLoopMode = true;
 }

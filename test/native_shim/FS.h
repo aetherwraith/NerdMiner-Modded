@@ -71,6 +71,14 @@ public:
       buf[i] = (char)c;
     return i;
   }
+  size_t size() const { return ok_ ? fakefs::disk().files[path_].size() : 0; }
+  String readString()
+  {
+    String s;
+    for (int c; (c = read()) >= 0;)
+      s += (char)c;
+    return s;
+  }
   void close() { ok_ = false; }
 
 private:

@@ -1,6 +1,7 @@
 #ifndef DISPLAY_H
 #define DISPLAY_H
 
+#include <stdint.h>
 #include "displayDriver.h"
 
 extern DisplayDriver *currentDisplayDriver;
@@ -16,6 +17,13 @@ void drawCurrentScreen(unsigned long mElapsed);
 void animateCurrentScreen(unsigned long frame);
 void doLedStuff(unsigned long frame);
 
+// Physical device locator ("Identify Miner") and fleet share celebration cues.
+void triggerIdentify(uint32_t durationMs = 10000);
+bool isIdentifying(void);
+uint32_t identifyRemainingMs(void);
+void triggerShareCelebration(uint32_t durationMs = 4000);
+bool isCelebrating(void);
+
 // Backlight control on the boards whose backlight is LEDC channel 0 (M5StickC
 // Plus2: GPIO27, set up in tDisplayV1Driver.cpp) and set
 // from the LAN settings page; a no-op on the rest.
@@ -29,6 +37,7 @@ void doLedStuff(unsigned long frame);
 #include <Arduino.h>
 void noteScreenActivity();         // a touch or button press: restart the countdown
 bool wakeScreen();                 // backlight back on if it was off; true if it was
+void sleepScreen();                // turn backlight off immediately
 void backlightTick();              // monitor task, once a second
 int backlightLevel();              // duty to light the screen with right now (day, night or in between)
 String nightDimStatus();           // one line for the settings page: sun state, sunrise, sunset
@@ -36,6 +45,7 @@ inline bool screenLit() { return ledcRead(0) > 0; } // backlight on: someone may
 #else
 inline void noteScreenActivity() {}
 inline bool wakeScreen() { return false; }
+inline void sleepScreen() {}
 inline void backlightTick() {}
 inline bool screenLit() { return true; }
 #endif

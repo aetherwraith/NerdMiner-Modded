@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include "display.h"
 
 #ifdef NO_DISPLAY
@@ -87,8 +88,77 @@ void initDisplay()
   currentDisplayDriver->initDisplay();
 }
 
+static volatile uint32_t s_identifyUntilMs = 0;
+static volatile bool s_identifyActive = false;
+static volatile bool s_identifyRestoreDark = false;
+static volatile bool s_identifyWasActive = false;
+
+static volatile uint32_t s_celebrateUntilMs = 0;
+static volatile bool s_celebrateActive = false;
+
+bool isIdentifying(void)
+{
+  if (!s_identifyActive)
+    return false;
+  if ((int32_t)(s_identifyUntilMs - millis()) > 0)
+    return true;
+  s_identifyActive = false;
+  return false;
+}
+
+uint32_t identifyRemainingMs(void)
+{
+  if (!s_identifyActive)
+    return 0;
+  const int32_t rem = (int32_t)(s_identifyUntilMs - millis());
+  if (rem <= 0)
+  {
+    s_identifyActive = false;
+    return 0;
+  }
+  return (uint32_t)rem;
+}
+
+void triggerIdentify(uint32_t durationMs)
+{
+  if (durationMs == 0)
+  {
+    const bool restoreDark = s_identifyActive && s_identifyRestoreDark;
+    s_identifyActive = false;
+    s_identifyWasActive = false;
+    s_identifyRestoreDark = false;
+    s_identifyUntilMs = millis();
+    if (restoreDark)
+      sleepScreen();
+    return;
+  }
+  const bool wasIdentifying = isIdentifying();
+  const bool restoreDark = wasIdentifying ? s_identifyRestoreDark : !screenLit();
+  wakeScreen();
+  s_identifyRestoreDark = restoreDark;
+  s_identifyUntilMs = millis() + durationMs;
+  s_identifyActive = true;
+  s_identifyWasActive = true;
+}
+
+void triggerShareCelebration(uint32_t durationMs)
+{
+  const uint32_t dur = durationMs ? durationMs : 4000U;
+  s_celebrateUntilMs = millis() + dur;
+  s_celebrateActive = true;
+}
+
+bool isCelebrating(void)
+{
+  if (!s_celebrateActive)
+    return false;
+  if ((int32_t)(s_celebrateUntilMs - millis()) > 0)
+    return true;
+  s_celebrateActive = false;
+  return false;
+}
+
 #ifdef HAS_BACKLIGHT_CONTROL
-#include <Arduino.h>
 #include "../storage/storage.h"
 #include "../../monitor.h"
 #include "../../sunTimes.h"
@@ -125,6 +195,7 @@ int backlightLevel()
 void noteScreenActivity()
 {
   s_lastScreenActivity = millis();
+  s_identifyRestoreDark = false;
 }
 
 bool wakeScreen()
@@ -132,12 +203,31 @@ bool wakeScreen()
   noteScreenActivity();
   if (ledcRead(0) > 0)
     return false;
-  ledcWrite(0, backlightLevel());
+  int duty = backlightLevel();
+  if (duty <= 0)
+    duty = 250;
+  ledcWrite(0, duty);
   return true;
+}
+
+void sleepScreen()
+{
+  ledcWrite(0, 0);
 }
 
 void backlightTick()
 {
+  if (s_identifyWasActive && !isIdentifying())
+  {
+    s_identifyWasActive = false;
+    if (s_identifyRestoreDark)
+    {
+      s_identifyRestoreDark = false;
+      sleepScreen();
+      return;
+    }
+  }
+
   // Brightness (also when changed on the LAN settings page) and night
   // dimming. A screen that has been switched off stays off; one that is
   // only dark because the level was 0 follows the new level.
@@ -150,6 +240,9 @@ void backlightTick()
     if (lit && !Settings.autoBrightness)
       ledcWrite(0, level);
   }
+
+  if (isIdentifying())
+    return;
 
   const int minutes = Settings.ScreenTimeout;
   if (minutes <= 0 || ledcRead(0) == 0)
@@ -231,12 +324,12 @@ void switchToNextScreen()
 // Draw the current cyclic screen
 void drawCurrentScreen(unsigned long mElapsed)
 {
-#if defined(M5STICK_C_PLUS2) && PLUS2_BACKLIGHT_PWM
+#ifdef HAS_BACKLIGHT_CONTROL
   // Screen switched off: nothing to see, so skip the redraw (~1/s of core-0
   // time the software miner gets back) and, on the info screens, the HTTPS
   // fetches that would pause the hardware miner. The next draw after the
   // screen comes back on is at most a second away.
-  if (ledcRead(0) == 0)
+  if (!screenLit() && !isIdentifying())
     return;
 #endif
   currentDisplayDriver->cyclic_screens[currentDisplayDriver->current_cyclic_screen](mElapsed);
@@ -245,6 +338,10 @@ void drawCurrentScreen(unsigned long mElapsed)
 // Animate the current cyclic screen
 void animateCurrentScreen(unsigned long frame)
 {
+#ifdef HAS_BACKLIGHT_CONTROL
+  if (!screenLit() && !isIdentifying())
+    return;
+#endif
   currentDisplayDriver->animateCurrentScreen(frame);
 }
 

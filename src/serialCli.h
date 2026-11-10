@@ -4,15 +4,19 @@
 #include <Arduino.h>
 
 /**
- * @brief Initialize and start the interactive USB Serial CLI background task.
- * Runs non-blocking on Core 0 at priority 2, allowing complete configuration
- * over USB UART (115200 baud) without requiring an SD card or captive portal.
+ * @brief Initialize USB Serial CLI (spawns a lightweight boot task during setup()
+ * so captive-portal first-boot provisioning works immediately, then hands off to
+ * loop() via serialCliEnterLoopMode() to free the task stack during mining).
  */
 void setup_serialCli(void);
 
 /**
- * @brief Process incoming UART characters (can be called periodically from loop
- * or run inside serialCliTask).
+ * @brief Hand Serial CLI polling over to loop() and delete the boot task.
+ */
+void serialCliEnterLoopMode(void);
+
+/**
+ * @brief Process incoming UART characters non-blockingly.
  */
 void serialCliProcess(void);
 

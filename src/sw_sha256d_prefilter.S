@@ -5,7 +5,7 @@
 //                             const uint32_t *bake)
 // Software SHA-256d of a block header up to the 16-bit early exit of
 // nerd_sha256d_baked(): true exactly when that function would return true.
-// Xtensa LX6/LX7, windowed ABI, IRAM. 5294 instructions on the only path.
+// Xtensa LX6/LX7, windowed ABI, IRAM. 5290 instructions on the only path.
 
 // Used by minerWorkerSw() on the classic ESP32 (LX6) and the ESP32-S3 (LX7):
 // the targets it was run on (Espressif QEMU, against the C version and
@@ -113,31 +113,27 @@ nerd_sha256d_prefilter:
     or      a6, a6, a9
     s32i    a6, a1, 12
     l32i    a7, a4, 8
-    s32i    a7, a1, 8
-    l32i    a7, a4, 12
-    s32i    a7, a1, 64
-    l32i    a7, a4, 16
-    s32i    a7, a1, 68
-    l32i    a2, a1, 64
-    l32i    a3, a1, 8
+    l32i    a8, a4, 12
+    s32i    a8, a1, 64
+    l32i    a9, a4, 16
+    s32i    a9, a1, 68
     ssai    17
-    src     a5, a2, a2
+    src     a2, a8, a8
     ssai    19
-    src     a8, a2, a2
-    xor     a5, a5, a8
-    srli    a8, a2, 10
-    xor     a5, a5, a8
+    src     a5, a8, a8
+    xor     a2, a2, a5
+    srli    a5, a8, 10
+    xor     a2, a2, a5
     ssai    7
-    src     a7, a6, a6
+    src     a3, a6, a6
     ssai    18
-    src     a8, a6, a6
-    xor     a7, a7, a8
-    srli    a8, a6, 3
-    xor     a7, a7, a8
-    add     a5, a5, a7
-    add     a5, a5, a3
-    s32i    a5, a1, 72
-    l32i    a9, a1, 68
+    src     a5, a6, a6
+    xor     a3, a3, a5
+    srli    a5, a6, 3
+    xor     a3, a3, a5
+    add     a2, a2, a3
+    add     a2, a2, a7
+    s32i    a2, a1, 72
     ssai    17
     src     a10, a9, a9
     ssai    19
@@ -150,23 +146,23 @@ nerd_sha256d_prefilter:
     add     a10, a10, a11
     s32i    a10, a1, 76
     ssai    17
-    src     a13, a5, a5
+    src     a13, a2, a2
     ssai    19
-    src     a15, a5, a5
+    src     a15, a2, a2
     xor     a13, a13, a15
-    srli    a15, a5, 10
+    srli    a15, a2, 10
     xor     a13, a13, a15
     l32r    a14, .Lsw_k1
     add     a13, a13, a14
     s32i    a13, a1, 80
     ssai    17
-    src     a7, a10, a10
+    src     a3, a10, a10
     ssai    19
     src     a11, a10, a10
-    xor     a7, a7, a11
+    xor     a3, a3, a11
     srli    a11, a10, 10
-    xor     a7, a7, a11
-    s32i    a7, a1, 84
+    xor     a3, a3, a11
+    s32i    a3, a1, 84
     ssai    17
     src     a12, a13, a13
     ssai    19
@@ -178,14 +174,14 @@ nerd_sha256d_prefilter:
     add     a12, a12, a14
     s32i    a12, a1, 88
     ssai    17
-    src     a8, a7, a7
+    src     a5, a3, a3
     ssai    19
-    src     a14, a7, a7
-    xor     a8, a8, a14
-    srli    a14, a7, 10
-    xor     a8, a8, a14
-    add     a8, a8, a2
-    s32i    a8, a1, 92
+    src     a14, a3, a3
+    xor     a5, a5, a14
+    srli    a14, a3, 10
+    xor     a5, a5, a14
+    add     a5, a5, a8
+    s32i    a5, a1, 92
     ssai    17
     src     a15, a12, a12
     ssai    19
@@ -196,13 +192,13 @@ nerd_sha256d_prefilter:
     add     a15, a15, a9
     s32i    a15, a1, 96
     ssai    17
-    src     a11, a8, a8
+    src     a11, a5, a5
     ssai    19
-    src     a3, a8, a8
-    xor     a11, a11, a3
-    srli    a3, a8, 10
-    xor     a11, a11, a3
-    add     a11, a11, a5
+    src     a7, a5, a5
+    xor     a11, a11, a7
+    srli    a7, a5, 10
+    xor     a11, a11, a7
+    add     a11, a11, a2
     s32i    a11, a1, 100
     ssai    17
     src     a14, a15, a15
@@ -214,47 +210,47 @@ nerd_sha256d_prefilter:
     add     a14, a14, a10
     s32i    a14, a1, 104
     ssai    17
-    src     a3, a11, a11
-    ssai    19
     src     a7, a11, a11
-    xor     a3, a3, a7
-    srli    a7, a11, 10
-    xor     a3, a3, a7
-    add     a3, a3, a13
-    s32i    a3, a1, 108
+    ssai    19
+    src     a3, a11, a11
+    xor     a7, a7, a3
+    srli    a3, a11, 10
+    xor     a7, a7, a3
+    add     a7, a7, a13
+    s32i    a7, a1, 108
     l32i    a6, a1, 84
     ssai    17
-    src     a7, a14, a14
+    src     a3, a14, a14
     ssai    19
     src     a12, a14, a14
-    xor     a7, a7, a12
+    xor     a3, a3, a12
     srli    a12, a14, 10
-    xor     a7, a7, a12
-    add     a7, a7, a6
-    s32i    a7, a1, 112
-    l32i    a2, a1, 88
+    xor     a3, a3, a12
+    add     a3, a3, a6
+    s32i    a3, a1, 112
+    l32i    a8, a1, 88
     ssai    17
-    src     a12, a3, a3
+    src     a12, a7, a7
     ssai    19
-    src     a8, a3, a3
-    xor     a12, a12, a8
-    srli    a8, a3, 10
-    xor     a12, a12, a8
-    add     a12, a12, a2
+    src     a5, a7, a7
+    xor     a12, a12, a5
+    srli    a5, a7, 10
+    xor     a12, a12, a5
+    add     a12, a12, a8
     s32i    a12, a1, 116
     l32i    a9, a1, 92
     ssai    17
-    src     a8, a7, a7
+    src     a5, a3, a3
     ssai    19
-    src     a15, a7, a7
-    xor     a8, a8, a15
-    srli    a15, a7, 10
-    xor     a8, a8, a15
-    add     a8, a8, a9
-    l32r    a5, .Lsw_k2
-    add     a8, a8, a5
-    s32i    a8, a1, 120
-    l32i    a5, a1, 96
+    src     a15, a3, a3
+    xor     a5, a5, a15
+    srli    a15, a3, 10
+    xor     a5, a5, a15
+    add     a5, a5, a9
+    l32r    a2, .Lsw_k2
+    add     a5, a5, a2
+    s32i    a5, a1, 120
+    l32i    a2, a1, 96
     l32i    a15, a1, 64
     ssai    17
     src     a10, a12, a12
@@ -271,88 +267,88 @@ nerd_sha256d_prefilter:
     srli    a13, a15, 3
     xor     a11, a11, a13
     add     a10, a10, a11
-    add     a10, a10, a5
+    add     a10, a10, a2
     movi    a11, 640
     add     a10, a10, a11
     s32i    a10, a1, 124
     l32i    a11, a1, 100
     l32i    a13, a1, 68
     ssai    17
-    src     a14, a8, a8
+    src     a14, a5, a5
     ssai    19
-    src     a3, a8, a8
-    xor     a14, a14, a3
-    srli    a3, a8, 10
-    xor     a14, a14, a3
+    src     a7, a5, a5
+    xor     a14, a14, a7
+    srli    a7, a5, 10
+    xor     a14, a14, a7
     ssai    7
     src     a6, a13, a13
     ssai    18
-    src     a3, a13, a13
-    xor     a6, a6, a3
-    srli    a3, a13, 3
-    xor     a6, a6, a3
+    src     a7, a13, a13
+    xor     a6, a6, a7
+    srli    a7, a13, 3
+    xor     a6, a6, a7
     add     a14, a14, a6
     add     a14, a14, a11
     add     a14, a14, a15
     s32i    a14, a1, 128
     l32i    a6, a1, 104
-    l32i    a3, a1, 72
+    l32i    a7, a1, 72
     ssai    17
-    src     a2, a10, a10
+    src     a8, a10, a10
     ssai    19
     src     a9, a10, a10
-    xor     a2, a2, a9
+    xor     a8, a8, a9
     srli    a9, a10, 10
-    xor     a2, a2, a9
+    xor     a8, a8, a9
     ssai    7
-    src     a7, a3, a3
+    src     a3, a7, a7
     ssai    18
-    src     a9, a3, a3
-    xor     a7, a7, a9
-    srli    a9, a3, 3
-    xor     a7, a7, a9
-    add     a2, a2, a7
-    add     a2, a2, a6
-    add     a2, a2, a13
-    s32i    a2, a1, 132
-    l32i    a7, a1, 108
+    src     a9, a7, a7
+    xor     a3, a3, a9
+    srli    a9, a7, 3
+    xor     a3, a3, a9
+    add     a8, a8, a3
+    add     a8, a8, a6
+    add     a8, a8, a13
+    s32i    a8, a1, 132
+    l32i    a3, a1, 108
     l32i    a9, a1, 76
     ssai    17
     src     a12, a14, a14
     ssai    19
-    src     a8, a14, a14
-    xor     a12, a12, a8
-    srli    a8, a14, 10
-    xor     a12, a12, a8
+    src     a5, a14, a14
+    xor     a12, a12, a5
+    srli    a5, a14, 10
+    xor     a12, a12, a5
     ssai    7
+    src     a2, a9, a9
+    ssai    18
     src     a5, a9, a9
-    ssai    18
-    src     a8, a9, a9
-    xor     a5, a5, a8
-    srli    a8, a9, 3
-    xor     a5, a5, a8
-    add     a12, a12, a5
-    add     a12, a12, a7
+    xor     a2, a2, a5
+    srli    a5, a9, 3
+    xor     a2, a2, a5
+    add     a12, a12, a2
     add     a12, a12, a3
+    add     a12, a12, a7
     s32i    a12, a1, 136
-    l32i    a5, a1, 112
-    l32i    a8, a1, 80
+    l32i    a2, a1, 112
+    l32i    a5, a1, 80
     ssai    17
-    src     a15, a2, a2
+    src     a15, a8, a8
     ssai    19
-    src     a10, a2, a2
+    src     a10, a8, a8
     xor     a15, a15, a10
-    srli    a10, a2, 10
+    srli    a10, a8, 10
     xor     a15, a15, a10
     ssai    7
-    src     a11, a8, a8
+    src     a11, a5, a5
     ssai    18
-    src     a10, a8, a8
+    src     a10, a5, a5
     xor     a11, a11, a10
-    srli    a10, a8, 3
+    srli    a10, a5, 3
     xor     a11, a11, a10
     add     a15, a15, a11
-    add     a15, a15, a5
+    add     a15, a15, a2
     add     a15, a15, a9
     s32i    a15, a1, 140
     l32i    a11, a1, 116
@@ -373,30 +369,30 @@ nerd_sha256d_prefilter:
     xor     a6, a6, a14
     add     a13, a13, a6
     add     a13, a13, a11
-    add     a13, a13, a8
+    add     a13, a13, a5
     s32i    a13, a1, 144
     l32i    a6, a1, 120
     l32i    a14, a1, 88
     ssai    17
-    src     a3, a15, a15
+    src     a7, a15, a15
     ssai    19
-    src     a2, a15, a15
-    xor     a3, a3, a2
-    srli    a2, a15, 10
-    xor     a3, a3, a2
+    src     a8, a15, a15
+    xor     a7, a7, a8
+    srli    a8, a15, 10
+    xor     a7, a7, a8
     ssai    7
-    src     a7, a14, a14
+    src     a3, a14, a14
     ssai    18
-    src     a2, a14, a14
-    xor     a7, a7, a2
-    srli    a2, a14, 3
-    xor     a7, a7, a2
-    add     a3, a3, a7
-    add     a3, a3, a6
-    add     a3, a3, a10
-    s32i    a3, a1, 148
-    l32i    a7, a1, 124
-    l32i    a2, a1, 92
+    src     a8, a14, a14
+    xor     a3, a3, a8
+    srli    a8, a14, 3
+    xor     a3, a3, a8
+    add     a7, a7, a3
+    add     a7, a7, a6
+    add     a7, a7, a10
+    s32i    a7, a1, 148
+    l32i    a3, a1, 124
+    l32i    a8, a1, 92
     ssai    17
     src     a9, a13, a13
     ssai    19
@@ -405,25 +401,25 @@ nerd_sha256d_prefilter:
     srli    a12, a13, 10
     xor     a9, a9, a12
     ssai    7
-    src     a5, a2, a2
+    src     a2, a8, a8
     ssai    18
-    src     a12, a2, a2
-    xor     a5, a5, a12
-    srli    a12, a2, 3
-    xor     a5, a5, a12
-    add     a9, a9, a5
-    add     a9, a9, a7
+    src     a12, a8, a8
+    xor     a2, a2, a12
+    srli    a12, a8, 3
+    xor     a2, a2, a12
+    add     a9, a9, a2
+    add     a9, a9, a3
     add     a9, a9, a14
     s32i    a9, a1, 152
-    l32i    a5, a1, 128
+    l32i    a2, a1, 128
     l32i    a12, a1, 96
     ssai    17
-    src     a8, a3, a3
+    src     a5, a7, a7
     ssai    19
-    src     a15, a3, a3
-    xor     a8, a8, a15
-    srli    a15, a3, 10
-    xor     a8, a8, a15
+    src     a15, a7, a7
+    xor     a5, a5, a15
+    srli    a15, a7, 10
+    xor     a5, a5, a15
     ssai    7
     src     a11, a12, a12
     ssai    18
@@ -431,10 +427,10 @@ nerd_sha256d_prefilter:
     xor     a11, a11, a15
     srli    a15, a12, 3
     xor     a11, a11, a15
-    add     a8, a8, a11
-    add     a8, a8, a5
-    add     a8, a8, a2
-    s32i    a8, a1, 156
+    add     a5, a5, a11
+    add     a5, a5, a2
+    add     a5, a5, a8
+    s32i    a5, a1, 156
     l32i    a11, a1, 132
     l32i    a15, a1, 100
     ssai    17
@@ -458,78 +454,78 @@ nerd_sha256d_prefilter:
     l32i    a6, a1, 136
     l32i    a13, a1, 104
     ssai    17
-    src     a14, a8, a8
+    src     a14, a5, a5
     ssai    19
-    src     a3, a8, a8
-    xor     a14, a14, a3
-    srli    a3, a8, 10
-    xor     a14, a14, a3
+    src     a7, a5, a5
+    xor     a14, a14, a7
+    srli    a7, a5, 10
+    xor     a14, a14, a7
     ssai    7
-    src     a7, a13, a13
-    ssai    18
     src     a3, a13, a13
-    xor     a7, a7, a3
-    srli    a3, a13, 3
-    xor     a7, a7, a3
-    add     a14, a14, a7
+    ssai    18
+    src     a7, a13, a13
+    xor     a3, a3, a7
+    srli    a7, a13, 3
+    xor     a3, a3, a7
+    add     a14, a14, a3
     add     a14, a14, a6
     add     a14, a14, a15
     s32i    a14, a1, 164
-    l32i    a7, a1, 140
-    l32i    a3, a1, 108
+    l32i    a3, a1, 140
+    l32i    a7, a1, 108
     ssai    17
-    src     a2, a10, a10
+    src     a8, a10, a10
     ssai    19
     src     a9, a10, a10
-    xor     a2, a2, a9
+    xor     a8, a8, a9
     srli    a9, a10, 10
-    xor     a2, a2, a9
+    xor     a8, a8, a9
     ssai    7
-    src     a5, a3, a3
+    src     a2, a7, a7
     ssai    18
-    src     a9, a3, a3
-    xor     a5, a5, a9
-    srli    a9, a3, 3
-    xor     a5, a5, a9
-    add     a2, a2, a5
-    add     a2, a2, a7
-    add     a2, a2, a13
-    s32i    a2, a1, 168
-    l32i    a5, a1, 144
+    src     a9, a7, a7
+    xor     a2, a2, a9
+    srli    a9, a7, 3
+    xor     a2, a2, a9
+    add     a8, a8, a2
+    add     a8, a8, a3
+    add     a8, a8, a13
+    s32i    a8, a1, 168
+    l32i    a2, a1, 144
     l32i    a9, a1, 112
     ssai    17
     src     a12, a14, a14
     ssai    19
-    src     a8, a14, a14
-    xor     a12, a12, a8
-    srli    a8, a14, 10
-    xor     a12, a12, a8
+    src     a5, a14, a14
+    xor     a12, a12, a5
+    srli    a5, a14, 10
+    xor     a12, a12, a5
     ssai    7
     src     a11, a9, a9
     ssai    18
-    src     a8, a9, a9
-    xor     a11, a11, a8
-    srli    a8, a9, 3
-    xor     a11, a11, a8
+    src     a5, a9, a9
+    xor     a11, a11, a5
+    srli    a5, a9, 3
+    xor     a11, a11, a5
     add     a12, a12, a11
-    add     a12, a12, a5
-    add     a12, a12, a3
+    add     a12, a12, a2
+    add     a12, a12, a7
     s32i    a12, a1, 172
     l32i    a11, a1, 148
-    l32i    a8, a1, 116
+    l32i    a5, a1, 116
     ssai    17
-    src     a15, a2, a2
+    src     a15, a8, a8
     ssai    19
-    src     a10, a2, a2
+    src     a10, a8, a8
     xor     a15, a15, a10
-    srli    a10, a2, 10
+    srli    a10, a8, 10
     xor     a15, a15, a10
     ssai    7
-    src     a6, a8, a8
+    src     a6, a5, a5
     ssai    18
-    src     a10, a8, a8
+    src     a10, a5, a5
     xor     a6, a6, a10
-    srli    a10, a8, 3
+    srli    a10, a5, 3
     xor     a6, a6, a10
     add     a15, a15, a6
     add     a15, a15, a11
@@ -545,38 +541,38 @@ nerd_sha256d_prefilter:
     srli    a14, a12, 10
     xor     a13, a13, a14
     ssai    7
-    src     a7, a10, a10
+    src     a3, a10, a10
     ssai    18
     src     a14, a10, a10
-    xor     a7, a7, a14
+    xor     a3, a3, a14
     srli    a14, a10, 3
-    xor     a7, a7, a14
-    add     a13, a13, a7
+    xor     a3, a3, a14
+    add     a13, a13, a3
     add     a13, a13, a6
-    add     a13, a13, a8
+    add     a13, a13, a5
     s32i    a13, a1, 180
-    l32i    a7, a1, 156
+    l32i    a3, a1, 156
     l32i    a14, a1, 124
     ssai    17
-    src     a3, a15, a15
+    src     a7, a15, a15
     ssai    19
-    src     a2, a15, a15
-    xor     a3, a3, a2
-    srli    a2, a15, 10
-    xor     a3, a3, a2
+    src     a8, a15, a15
+    xor     a7, a7, a8
+    srli    a8, a15, 10
+    xor     a7, a7, a8
     ssai    7
-    src     a5, a14, a14
-    ssai    18
     src     a2, a14, a14
-    xor     a5, a5, a2
-    srli    a2, a14, 3
-    xor     a5, a5, a2
-    add     a3, a3, a5
-    add     a3, a3, a7
-    add     a3, a3, a10
-    s32i    a3, a1, 184
-    l32i    a5, a1, 160
-    l32i    a2, a1, 128
+    ssai    18
+    src     a8, a14, a14
+    xor     a2, a2, a8
+    srli    a8, a14, 3
+    xor     a2, a2, a8
+    add     a7, a7, a2
+    add     a7, a7, a3
+    add     a7, a7, a10
+    s32i    a7, a1, 184
+    l32i    a2, a1, 160
+    l32i    a8, a1, 128
     ssai    17
     src     a9, a13, a13
     ssai    19
@@ -585,25 +581,25 @@ nerd_sha256d_prefilter:
     srli    a12, a13, 10
     xor     a9, a9, a12
     ssai    7
-    src     a11, a2, a2
+    src     a11, a8, a8
     ssai    18
-    src     a12, a2, a2
+    src     a12, a8, a8
     xor     a11, a11, a12
-    srli    a12, a2, 3
+    srli    a12, a8, 3
     xor     a11, a11, a12
     add     a9, a9, a11
-    add     a9, a9, a5
+    add     a9, a9, a2
     add     a9, a9, a14
     s32i    a9, a1, 188
     l32i    a11, a1, 164
     l32i    a12, a1, 132
     ssai    17
-    src     a8, a3, a3
+    src     a5, a7, a7
     ssai    19
-    src     a15, a3, a3
-    xor     a8, a8, a15
-    srli    a15, a3, 10
-    xor     a8, a8, a15
+    src     a15, a7, a7
+    xor     a5, a5, a15
+    srli    a15, a7, 10
+    xor     a5, a5, a15
     ssai    7
     src     a6, a12, a12
     ssai    18
@@ -611,10 +607,10 @@ nerd_sha256d_prefilter:
     xor     a6, a6, a15
     srli    a15, a12, 3
     xor     a6, a6, a15
-    add     a8, a8, a6
-    add     a8, a8, a11
-    add     a8, a8, a2
-    s32i    a8, a1, 192
+    add     a5, a5, a6
+    add     a5, a5, a11
+    add     a5, a5, a8
+    s32i    a5, a1, 192
     l32i    a6, a1, 168
     l32i    a15, a1, 136
     ssai    17
@@ -625,97 +621,97 @@ nerd_sha256d_prefilter:
     srli    a13, a9, 10
     xor     a10, a10, a13
     ssai    7
-    src     a7, a15, a15
+    src     a3, a15, a15
     ssai    18
     src     a13, a15, a15
-    xor     a7, a7, a13
+    xor     a3, a3, a13
     srli    a13, a15, 3
-    xor     a7, a7, a13
-    add     a10, a10, a7
+    xor     a3, a3, a13
+    add     a10, a10, a3
     add     a10, a10, a6
     add     a10, a10, a12
     s32i    a10, a1, 196
-    l32i    a7, a1, 172
+    l32i    a3, a1, 172
     l32i    a13, a1, 140
     ssai    17
-    src     a14, a8, a8
+    src     a14, a5, a5
     ssai    19
-    src     a3, a8, a8
-    xor     a14, a14, a3
-    srli    a3, a8, 10
-    xor     a14, a14, a3
+    src     a7, a5, a5
+    xor     a14, a14, a7
+    srli    a7, a5, 10
+    xor     a14, a14, a7
     ssai    7
-    src     a5, a13, a13
+    src     a2, a13, a13
     ssai    18
-    src     a3, a13, a13
-    xor     a5, a5, a3
-    srli    a3, a13, 3
-    xor     a5, a5, a3
-    add     a14, a14, a5
-    add     a14, a14, a7
+    src     a7, a13, a13
+    xor     a2, a2, a7
+    srli    a7, a13, 3
+    xor     a2, a2, a7
+    add     a14, a14, a2
+    add     a14, a14, a3
     add     a14, a14, a15
     s32i    a14, a1, 200
-    l32i    a5, a1, 176
-    l32i    a3, a1, 144
+    l32i    a2, a1, 176
+    l32i    a7, a1, 144
     ssai    17
-    src     a2, a10, a10
+    src     a8, a10, a10
     ssai    19
     src     a9, a10, a10
-    xor     a2, a2, a9
+    xor     a8, a8, a9
     srli    a9, a10, 10
-    xor     a2, a2, a9
+    xor     a8, a8, a9
     ssai    7
-    src     a11, a3, a3
+    src     a11, a7, a7
     ssai    18
-    src     a9, a3, a3
+    src     a9, a7, a7
     xor     a11, a11, a9
-    srli    a9, a3, 3
+    srli    a9, a7, 3
     xor     a11, a11, a9
-    add     a2, a2, a11
-    add     a2, a2, a5
-    add     a2, a2, a13
-    s32i    a2, a1, 204
+    add     a8, a8, a11
+    add     a8, a8, a2
+    add     a8, a8, a13
+    s32i    a8, a1, 204
     l32i    a11, a1, 180
     l32i    a9, a1, 148
     ssai    17
     src     a12, a14, a14
     ssai    19
-    src     a8, a14, a14
-    xor     a12, a12, a8
-    srli    a8, a14, 10
-    xor     a12, a12, a8
+    src     a5, a14, a14
+    xor     a12, a12, a5
+    srli    a5, a14, 10
+    xor     a12, a12, a5
     ssai    7
     src     a6, a9, a9
     ssai    18
-    src     a8, a9, a9
-    xor     a6, a6, a8
-    srli    a8, a9, 3
-    xor     a6, a6, a8
+    src     a5, a9, a9
+    xor     a6, a6, a5
+    srli    a5, a9, 3
+    xor     a6, a6, a5
     add     a12, a12, a6
     add     a12, a12, a11
-    add     a12, a12, a3
+    add     a12, a12, a7
     s32i    a12, a1, 208
     l32i    a6, a1, 184
-    l32i    a8, a1, 152
+    l32i    a5, a1, 152
     ssai    17
-    src     a15, a2, a2
+    src     a15, a8, a8
     ssai    19
-    src     a10, a2, a2
+    src     a10, a8, a8
     xor     a15, a15, a10
-    srli    a10, a2, 10
+    srli    a10, a8, 10
     xor     a15, a15, a10
     ssai    7
-    src     a7, a8, a8
+    src     a3, a5, a5
     ssai    18
-    src     a10, a8, a8
-    xor     a7, a7, a10
-    srli    a10, a8, 3
-    xor     a7, a7, a10
-    add     a15, a15, a7
+    src     a10, a5, a5
+    xor     a3, a3, a10
+    srli    a10, a5, 3
+    xor     a3, a3, a10
+    add     a15, a15, a3
     add     a15, a15, a6
     add     a15, a15, a9
     s32i    a15, a1, 212
-    l32i    a7, a1, 188
+    l32i    a3, a1, 188
     l32i    a10, a1, 156
     ssai    17
     src     a13, a12, a12
@@ -725,38 +721,38 @@ nerd_sha256d_prefilter:
     srli    a14, a12, 10
     xor     a13, a13, a14
     ssai    7
-    src     a5, a10, a10
+    src     a2, a10, a10
     ssai    18
     src     a14, a10, a10
-    xor     a5, a5, a14
+    xor     a2, a2, a14
     srli    a14, a10, 3
-    xor     a5, a5, a14
+    xor     a2, a2, a14
+    add     a13, a13, a2
+    add     a13, a13, a3
     add     a13, a13, a5
-    add     a13, a13, a7
-    add     a13, a13, a8
     s32i    a13, a1, 216
-    l32i    a5, a1, 192
+    l32i    a2, a1, 192
     l32i    a14, a1, 160
     ssai    17
-    src     a3, a15, a15
+    src     a7, a15, a15
     ssai    19
-    src     a2, a15, a15
-    xor     a3, a3, a2
-    srli    a2, a15, 10
-    xor     a3, a3, a2
+    src     a8, a15, a15
+    xor     a7, a7, a8
+    srli    a8, a15, 10
+    xor     a7, a7, a8
     ssai    7
     src     a11, a14, a14
     ssai    18
-    src     a2, a14, a14
-    xor     a11, a11, a2
-    srli    a2, a14, 3
-    xor     a11, a11, a2
-    add     a3, a3, a11
-    add     a3, a3, a5
-    add     a3, a3, a10
-    s32i    a3, a1, 220
+    src     a8, a14, a14
+    xor     a11, a11, a8
+    srli    a8, a14, 3
+    xor     a11, a11, a8
+    add     a7, a7, a11
+    add     a7, a7, a2
+    add     a7, a7, a10
+    s32i    a7, a1, 220
     l32i    a11, a1, 196
-    l32i    a2, a1, 164
+    l32i    a8, a1, 164
     ssai    17
     src     a9, a13, a13
     ssai    19
@@ -765,11 +761,11 @@ nerd_sha256d_prefilter:
     srli    a12, a13, 10
     xor     a9, a9, a12
     ssai    7
-    src     a6, a2, a2
+    src     a6, a8, a8
     ssai    18
-    src     a12, a2, a2
+    src     a12, a8, a8
     xor     a6, a6, a12
-    srli    a12, a2, 3
+    srli    a12, a8, 3
     xor     a6, a6, a12
     add     a9, a9, a6
     add     a9, a9, a11
@@ -778,24 +774,24 @@ nerd_sha256d_prefilter:
     l32i    a6, a1, 200
     l32i    a12, a1, 168
     ssai    17
-    src     a8, a3, a3
+    src     a5, a7, a7
     ssai    19
-    src     a15, a3, a3
-    xor     a8, a8, a15
-    srli    a15, a3, 10
-    xor     a8, a8, a15
+    src     a15, a7, a7
+    xor     a5, a5, a15
+    srli    a15, a7, 10
+    xor     a5, a5, a15
     ssai    7
-    src     a7, a12, a12
+    src     a3, a12, a12
     ssai    18
     src     a15, a12, a12
-    xor     a7, a7, a15
+    xor     a3, a3, a15
     srli    a15, a12, 3
-    xor     a7, a7, a15
-    add     a8, a8, a7
-    add     a8, a8, a6
-    add     a8, a8, a2
-    s32i    a8, a1, 228
-    l32i    a7, a1, 204
+    xor     a3, a3, a15
+    add     a5, a5, a3
+    add     a5, a5, a6
+    add     a5, a5, a8
+    s32i    a5, a1, 228
+    l32i    a3, a1, 204
     l32i    a15, a1, 172
     ssai    17
     src     a10, a9, a9
@@ -805,97 +801,97 @@ nerd_sha256d_prefilter:
     srli    a13, a9, 10
     xor     a10, a10, a13
     ssai    7
-    src     a5, a15, a15
+    src     a2, a15, a15
     ssai    18
     src     a13, a15, a15
-    xor     a5, a5, a13
+    xor     a2, a2, a13
     srli    a13, a15, 3
-    xor     a5, a5, a13
-    add     a10, a10, a5
-    add     a10, a10, a7
+    xor     a2, a2, a13
+    add     a10, a10, a2
+    add     a10, a10, a3
     add     a10, a10, a12
     s32i    a10, a1, 232
-    l32i    a5, a1, 208
+    l32i    a2, a1, 208
     l32i    a13, a1, 176
     ssai    17
-    src     a14, a8, a8
+    src     a14, a5, a5
     ssai    19
-    src     a3, a8, a8
-    xor     a14, a14, a3
-    srli    a3, a8, 10
-    xor     a14, a14, a3
+    src     a7, a5, a5
+    xor     a14, a14, a7
+    srli    a7, a5, 10
+    xor     a14, a14, a7
     ssai    7
     src     a11, a13, a13
     ssai    18
-    src     a3, a13, a13
-    xor     a11, a11, a3
-    srli    a3, a13, 3
-    xor     a11, a11, a3
+    src     a7, a13, a13
+    xor     a11, a11, a7
+    srli    a7, a13, 3
+    xor     a11, a11, a7
     add     a14, a14, a11
-    add     a14, a14, a5
+    add     a14, a14, a2
     add     a14, a14, a15
     s32i    a14, a1, 236
     l32i    a11, a1, 212
-    l32i    a3, a1, 180
+    l32i    a7, a1, 180
     ssai    17
-    src     a2, a10, a10
+    src     a8, a10, a10
     ssai    19
     src     a9, a10, a10
-    xor     a2, a2, a9
+    xor     a8, a8, a9
     srli    a9, a10, 10
-    xor     a2, a2, a9
+    xor     a8, a8, a9
     ssai    7
-    src     a6, a3, a3
+    src     a6, a7, a7
     ssai    18
-    src     a9, a3, a3
+    src     a9, a7, a7
     xor     a6, a6, a9
-    srli    a9, a3, 3
+    srli    a9, a7, 3
     xor     a6, a6, a9
-    add     a2, a2, a6
-    add     a2, a2, a11
-    add     a2, a2, a13
-    s32i    a2, a1, 240
+    add     a8, a8, a6
+    add     a8, a8, a11
+    add     a8, a8, a13
+    s32i    a8, a1, 240
     l32i    a6, a1, 216
     l32i    a9, a1, 184
     ssai    17
     src     a12, a14, a14
     ssai    19
-    src     a8, a14, a14
-    xor     a12, a12, a8
-    srli    a8, a14, 10
-    xor     a12, a12, a8
+    src     a5, a14, a14
+    xor     a12, a12, a5
+    srli    a5, a14, 10
+    xor     a12, a12, a5
     ssai    7
-    src     a7, a9, a9
+    src     a3, a9, a9
     ssai    18
-    src     a8, a9, a9
-    xor     a7, a7, a8
-    srli    a8, a9, 3
-    xor     a7, a7, a8
-    add     a12, a12, a7
-    add     a12, a12, a6
+    src     a5, a9, a9
+    xor     a3, a3, a5
+    srli    a5, a9, 3
+    xor     a3, a3, a5
     add     a12, a12, a3
+    add     a12, a12, a6
+    add     a12, a12, a7
     s32i    a12, a1, 244
-    l32i    a7, a1, 220
-    l32i    a8, a1, 188
+    l32i    a3, a1, 220
+    l32i    a5, a1, 188
     ssai    17
-    src     a15, a2, a2
+    src     a15, a8, a8
     ssai    19
-    src     a10, a2, a2
+    src     a10, a8, a8
     xor     a15, a15, a10
-    srli    a10, a2, 10
+    srli    a10, a8, 10
     xor     a15, a15, a10
     ssai    7
-    src     a5, a8, a8
+    src     a2, a5, a5
     ssai    18
-    src     a10, a8, a8
-    xor     a5, a5, a10
-    srli    a10, a8, 3
-    xor     a5, a5, a10
-    add     a15, a15, a5
-    add     a15, a15, a7
+    src     a10, a5, a5
+    xor     a2, a2, a10
+    srli    a10, a5, 3
+    xor     a2, a2, a10
+    add     a15, a15, a2
+    add     a15, a15, a3
     add     a15, a15, a9
     s32i    a15, a1, 248
-    l32i    a5, a1, 224
+    l32i    a2, a1, 224
     l32i    a10, a1, 192
     ssai    17
     src     a13, a12, a12
@@ -912,8 +908,8 @@ nerd_sha256d_prefilter:
     srli    a14, a10, 3
     xor     a11, a11, a14
     add     a13, a13, a11
+    add     a13, a13, a2
     add     a13, a13, a5
-    add     a13, a13, a8
     s32i    a13, a1, 252
     l32i    a2, a4, 20
     l32i    a3, a4, 24

@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 #include "rgbLed.h"
+#include "display.h"
 #include "monitor.h"
 #include "../storage/storage.h"
 
@@ -28,9 +29,18 @@ static uint32_t level(uint32_t component, uint32_t brightness)
   return (v * v + 254) / 255;
 }
 
-static void show(uint32_t rgb)
+static uint32_t lerpRgb(uint32_t a, uint32_t b, uint32_t t255)
 {
-  const uint32_t b = constrain(Settings.ledBrightness, 1, 255);
+  const int32_t ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+  const int32_t br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
+  const uint32_t r = (uint32_t)(ar + ((br - ar) * (int32_t)t255) / 255);
+  const uint32_t g = (uint32_t)(ag + ((bg - ag) * (int32_t)t255) / 255);
+  const uint32_t bl = (uint32_t)(ab + ((bb - ab) * (int32_t)t255) / 255);
+  return (r << 16) | (g << 8) | bl;
+}
+
+static void show(uint32_t rgb, uint32_t b)
+{
   const uint32_t r = level((rgb >> 16) & 0xFF, b);
   const uint32_t g = level((rgb >> 8) & 0xFF, b);
   const uint32_t bl = level(rgb & 0xFF, b);
@@ -59,6 +69,27 @@ void rgbLedInit(void)
 
 void rgbLedTick(void)
 {
+  // Priority 1: Physical device locator ("Identify Miner") — bright Cyan/White
+  // strobe at full brightness regardless of LED mode, brightness, or screen state.
+  if (isIdentifying())
+  {
+    const uint32_t rgb = ((millis() / 125) & 1) ? 0xFFFFFF : 0x00FFFF;
+    show(rgb, 255);
+    return;
+  }
+
+  // Priority 2: Share celebration — smooth Gold -> Emerald -> Cyan -> Magenta
+  // cycle every 120 ms per transition at full brightness.
+  if (isCelebrating())
+  {
+    static const uint32_t kCeleb[4] = {0xFFD700, 0x00FF88, 0x00E5FF, 0xFF2AD4};
+    const uint32_t now = millis();
+    const uint32_t idx = (now / 120) & 3;
+    const uint32_t frac = ((now % 120) * 255) / 120;
+    show(lerpRgb(kCeleb[idx], kCeleb[(idx + 1) & 3], frac), 255);
+    return;
+  }
+
   uint32_t rgb = 0;
   switch (Settings.ledMode)
   {
@@ -92,7 +123,7 @@ void rgbLedTick(void)
 
   if (Settings.ledScreenOff && ledcRead(0) == 0)
     rgb = 0; // screen switched or timed out off (backlight is LEDC channel 0)
-  show(rgb);
+  show(rgb, constrain(Settings.ledBrightness, 1, 255));
 }
 
 #endif // HAS_RGB_LED

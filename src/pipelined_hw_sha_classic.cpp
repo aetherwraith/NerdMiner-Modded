@@ -43,7 +43,7 @@
 // existing software nerd_sha256d_baked() path before trusting/submitting it
 // -- this function only checks the early-reject 16 bits inline and does not
 // compute or return the full digest.
-#ifdef PIPELINED_ASM_MINING
+#if defined(PIPELINED_ASM_MINING) && (defined(HW_SHA256_TEST) || defined(SHA_BENCH))
 
 #include <Arduino.h>
 #include <soc/dport_reg.h>
@@ -278,4 +278,4 @@ extern "C" IRAM_ATTR void pipelined_hw_mine_classic_reinit(void)
     periph_module_reset(PERIPH_SHA_MODULE);
 }
 
-#endif // PIPELINED_ASM_MINING
+#endif // PIPELINED_ASM_MINING && (HW_SHA256_TEST || SHA_BENCH)

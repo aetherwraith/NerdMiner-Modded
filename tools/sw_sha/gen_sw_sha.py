@@ -293,20 +293,26 @@ def build():
     g.i("or      a6, a6, a8")
     g.i("or      a6, a6, a9")
     g.i("s32i    a6, a1, 12")
-    # baked words: W0..W2 = bake[0..2], W16 = bake[3], W17 = bake[4]
-    for t, bi in ((2, 2), (16, 3), (17, 4)):
-        g.i("l32i    a7, a4, %d" % (4 * bi))
-        g.i("s32i    a7, a1, %d" % (4 * t))
-    for t in (0, 1, 2, 3, 16, 17):
+    # baked words: W2 = bake[2] (only read in expand(18)), W16 = bake[3], W17 = bake[4];
+    # W[0..1] are never referenced in the first hash's schedule or rounds 4..63.
+    g.i("l32i    a7, a4, 8")
+    g.i("l32i    a8, a4, 12")
+    g.i("s32i    a8, a1, 64")
+    g.i("l32i    a9, a4, 16")
+    g.i("s32i    a9, a1, 68")
+    W[2] = ("r", "a7")
+    for t in (3, 16, 17):
         W[t] = ("m",)
     W[4] = ("c", 0x80000000)
     for t in range(5, 15):
         W[t] = ("c", 0)
     W[15] = ("c", 640)
-    regs = [r for r in ALL_REGS if r != "a4"]
+    regs = [r for r in ALL_REGS if r not in ("a4", "a6", "a7", "a8", "a9")]
     sc = Sched(g, W, regs)
     sc.put_cache(3, "a6")
-    sc.free.remove("a6")
+    sc.put_cache(2, "a7")
+    sc.put_cache(16, "a8")
+    sc.put_cache(17, "a9")
     for t in range(18, 64):
         sc.expand(t)
     sc.flush()

@@ -2,7 +2,6 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include "stratum.h"
-#include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_log.h"
@@ -10,9 +9,10 @@
 #include "utils.h"
 #include "version.h"
 
+#ifndef pdMS_TO_TICKS
+#define pdMS_TO_TICKS(ms) ((ms) / portTICK_PERIOD_MS)
+#endif
 
-
-StaticJsonDocument<BUFFER_JSON_DOC> doc;
 unsigned long id = 1;
 
 //Get next JSON RPC Id
@@ -24,32 +24,6 @@ unsigned long getNextId(unsigned long id) {
     return ++id;
 }
 
-// A value put between quotes in a JSON request: a " or \ in a worker name or a
-// password ended the string early and the pool got invalid JSON.
-static String jsonEscape(const char *s)
-{
-    String out;
-    out.reserve(strlen(s) + 8);
-    for (; *s; ++s)
-    {
-        const char c = *s;
-        if (c == '"' || c == '\\')
-        {
-            out += '\\';
-            out += c;
-        }
-        else if ((uint8_t)c < 0x20)
-        {
-            char u[7];
-            snprintf(u, sizeof(u), "\\u%04x", (unsigned)(uint8_t)c);
-            out += u;
-        }
-        else
-            out += c;
-    }
-    return out;
-}
-
 static bool isHex(const String &s)
 {
     for (size_t i = 0; i < s.length(); ++i)
@@ -58,11 +32,11 @@ static bool isHex(const String &s)
     return true;
 }
 
-// Only the envelope of a message (method, id, error, result) goes into the
-// shared document: a mining.notify bigger than BUFFER_JSON_DOC made the full
-// parse fail with NoMemory, the message was taken for an error and dropped
-// without a word, and the miner kept hashing the old job.
-static DeserializationError parseEnvelope(const String &line)
+// Only the envelope of a message (method, id, error, result) goes into a
+// small stack document: a mining.notify bigger than BUFFER_JSON_DOC made the
+// full parse fail with NoMemory, the message was taken for an error and
+// dropped without a word, and the miner kept hashing the old job.
+static DeserializationError parseEnvelope(JsonDocument &doc, const String &line)
 {
     static StaticJsonDocument<128> filter;
     if (filter.isNull())
@@ -72,16 +46,19 @@ static DeserializationError parseEnvelope(const String &line)
         filter["error"] = true;
         filter["result"] = true;
     }
-    return deserializeJson(doc, line, DeserializationOption::Filter(filter));
+    return deserializeJson(doc, line.c_str(), line.length(), DeserializationOption::Filter(filter));
 }
 
-//Verify Payload doesn't has zero lenght
-bool verifyPayload (String* line){
-  if(line->length() == 0) return false;
-  line->trim();
-  if(line->isEmpty()) return false;
-  return true;
-  
+// Verify payload is non-empty and not pure whitespace without mutating input
+static bool verifyPayload(const String &line)
+{
+    for (size_t i = 0; i < line.length(); ++i)
+    {
+        const char c = line[i];
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
+            return true;
+    }
+    return false;
 }
 
 // Pools send the error either as [code, "message", data] or as {"code":..,"message":..}.
@@ -135,7 +112,8 @@ bool tx_mining_subscribe(WiFiClient& client, mining_subscribe& mSubscribe)
     Serial.print("  Sending  : "); Serial.println(payload);
     client.print(payload);
     
-    vTaskDelay(200 / portTICK_PERIOD_MS); //Small delay
+    for (int i = 0; i < 50 && !client.available(); ++i)
+        vTaskDelay(pdMS_TO_TICKS(10));
     
     String line = client.readStringUntil('\n');
     if(!parse_mining_subscribe(line, mSubscribe)) return false;
@@ -148,19 +126,20 @@ bool tx_mining_subscribe(WiFiClient& client, mining_subscribe& mSubscribe)
     if((mSubscribe.extranonce1.length() == 0) ) { 
         Serial.printf("[WORKER] >>>>>>>>> Work aborted\n"); 
         Serial.printf("extranonce1 length: %u \n", mSubscribe.extranonce1.length());
-        doc.clear();
-        doc.garbageCollect();
         return false; 
     }
     return true;
 }
 
-bool parse_mining_subscribe(String line, mining_subscribe& mSubscribe)
+bool parse_mining_subscribe(const String& line, mining_subscribe& mSubscribe)
 {
-    if(!verifyPayload(&line)) return false;
+    if(!verifyPayload(line)) return false;
+    #ifdef DEBUG_MINING
     Serial.print("  Receiving: "); Serial.println(line);
+    #endif
    
-    DeserializationError error = deserializeJson(doc, line);
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, line.c_str(), line.length());
 
     if (error || checkError(doc)) return false;
     if (!doc.containsKey("result")) return false;
@@ -207,7 +186,7 @@ bool tx_mining_auth(WiFiClient& client, const char * user, const char * pass, un
     id = getNextId(id);
     auth_id = id; // the pool's answer to this id says whether it took the wallet
     snprintf(payload, sizeof(payload), "{\"params\": [\"%s\", \"%s\"], \"id\": %lu, \"method\": \"mining.authorize\"}\n",
-      jsonEscape(user).c_str(), jsonEscape(pass).c_str(), id);
+      jsonEscape(String(user ? user : "")).c_str(), jsonEscape(String(pass ? pass : "")).c_str(), id);
     
     Serial.printf("[WORKER] ==> Autorize work\n");
     // Not the payload itself: it holds the pool password
@@ -223,16 +202,28 @@ bool tx_mining_auth(WiFiClient& client, const char * user, const char * pass, un
 }
 
 
-stratum_method parse_mining_method(String line)
+stratum_method parse_mining_method(const String& line, unsigned long *idOut, bool *resultOut)
 {
-    if(!verifyPayload(&line)) return STRATUM_PARSE_ERROR;
+    if (idOut) *idOut = 0;
+    if (resultOut) *resultOut = false;
+
+    if(!verifyPayload(line)) return STRATUM_PARSE_ERROR;
+    #ifdef DEBUG_MINING
     Serial.print("  Receiving: "); Serial.println(line);
+    #endif
     
-    DeserializationError error = parseEnvelope(line);
+    StaticJsonDocument<512> doc;
+    DeserializationError error = parseEnvelope(doc, line);
     if (error) {
       Serial.printf("    not parsed (%u bytes): %s\n", line.length(), error.c_str());
       return STRATUM_PARSE_ERROR;
     }
+
+    if (idOut && doc.containsKey("id"))
+      *idOut = doc["id"] | 0UL;
+    if (resultOut)
+      *resultOut = doc["result"] | false;
+
     if (checkError(doc)) return STRATUM_PARSE_ERROR;
 
     if (!doc.containsKey("method")) {
@@ -243,20 +234,22 @@ stratum_method parse_mining_method(String line)
       return STRATUM_SUCCESS;
     }
     stratum_method result = STRATUM_UNKNOWN;
-
-    if (strcmp("mining.notify", (const char*) doc["method"]) == 0) {
-        result = MINING_NOTIFY;
-    } else if (strcmp("mining.set_difficulty", (const char*) doc["method"]) == 0) {
-        result = MINING_SET_DIFFICULTY;
+    const char *method = doc["method"];
+    if (method) {
+        if (strcmp("mining.notify", method) == 0) {
+            result = MINING_NOTIFY;
+        } else if (strcmp("mining.set_difficulty", method) == 0) {
+            result = MINING_SET_DIFFICULTY;
+        }
     }
 
     return result;
 }
 
-bool parse_mining_notify(String line, mining_job& mJob)
+bool parse_mining_notify(const String& line, mining_job& mJob)
 {
     Serial.println("    Parsing Method [MINING NOTIFY]");
-    if(!verifyPayload(&line)) return false;
+    if(!verifyPayload(line)) return false;
 
     if (line.length() > MAX_NOTIFY_LEN) {
       Serial.printf("    mining.notify refused: %u bytes (max %u)\n", line.length(), (unsigned)MAX_NOTIFY_LEN);
@@ -272,7 +265,7 @@ bool parse_mining_notify(String line, mining_job& mJob)
       Serial.printf("    mining.notify not parsed (%u bytes): out of memory\n", line.length());
       return false;
     }
-    DeserializationError error = deserializeJson(job, line);
+    DeserializationError error = deserializeJson(job, line.c_str(), line.length());
 
     if (error) {
       Serial.printf("    mining.notify not parsed (%u bytes): %s\n", line.length(), error.c_str());
@@ -341,7 +334,7 @@ bool parse_mining_notify(String line, mining_job& mJob)
 }
 
 
-bool tx_mining_submit(WiFiClient& client, mining_subscribe mWorker, mining_job mJob, unsigned long nonce, unsigned long &submit_id)
+bool tx_mining_submit(WiFiClient& client, const mining_subscribe& mWorker, const mining_job& mJob, unsigned long nonce, unsigned long &submit_id)
 {
     char payload[BUFFER] = {0};
     char nonceHex[9];
@@ -355,25 +348,25 @@ bool tx_mining_submit(WiFiClient& client, mining_subscribe mWorker, mining_job m
     submit_id = id;
     snprintf(payload, sizeof(payload), "{\"id\":%lu,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]}\n",
         id,
-        jsonEscape(mWorker.wName).c_str(),
-        jsonEscape(mJob.job_id.c_str()).c_str(),
+        jsonEscape(String(mWorker.wName)).c_str(),
+        jsonEscape(mJob.job_id).c_str(),
         mWorker.extranonce2.c_str(),
         mJob.ntime.c_str(),
         nonceHex
         );
     Serial.print("  Sending  : "); Serial.print(payload);
     client.print(payload);
-    //Serial.print("  Receiving: "); Serial.println(client.readStringUntil('\n'));
 
     return true;
 }
 
-bool parse_mining_set_difficulty(String line, double& difficulty)
+bool parse_mining_set_difficulty(const String& line, double& difficulty)
 {
     Serial.println("    Parsing Method [SET DIFFICULTY]");
-    if(!verifyPayload(&line)) return false;
+    if(!verifyPayload(line)) return false;
    
-    DeserializationError error = deserializeJson(doc, line);
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, line.c_str(), line.length());
 
     if (error) return false;
     if (!doc.containsKey("params")) return false;
@@ -405,22 +398,21 @@ bool tx_suggest_difficulty(WiFiClient& client, double difficulty)
 
 unsigned long parse_extract_id(const String &line)
 {
-    DeserializationError error = parseEnvelope(line);
-    if (error)
+    StaticJsonDocument<512> doc;
+    if (parseEnvelope(doc, line))
         return 0;
     
     if (!doc.containsKey("id"))
         return 0;
 
-    unsigned long id = doc["id"];
-
-    return id;
+    return doc["id"] | 0UL;
 }
 
 // A reply's "result": true when the pool accepted the submitted share.
 bool parse_extract_result(const String &line)
 {
-    if (parseEnvelope(line))
+    StaticJsonDocument<512> doc;
+    if (parseEnvelope(doc, line))
         return false;
     return doc["result"] | false;
 }

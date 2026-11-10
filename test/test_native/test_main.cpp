@@ -434,12 +434,101 @@ static void test_config_delete_removes_both()
   TEST_ASSERT_FALSE(fresh.loadConfig(&t));
 }
 
+static void test_single_pass_method_id_result()
+{
+  unsigned long id = 999;
+  bool res = false;
+  TEST_ASSERT_EQUAL(STRATUM_SUCCESS, parse_mining_method("{\"id\":42,\"result\":true,\"error\":null}", &id, &res));
+  TEST_ASSERT_EQUAL_UINT32(42, id);
+  TEST_ASSERT_TRUE(res);
+
+  TEST_ASSERT_EQUAL(STRATUM_SUCCESS, parse_mining_method("{\"id\":77,\"result\":false,\"error\":null}", &id, &res));
+  TEST_ASSERT_EQUAL_UINT32(77, id);
+  TEST_ASSERT_FALSE(res);
+
+  TEST_ASSERT_EQUAL(STRATUM_PARSE_ERROR, parse_mining_method("{\"id\":88,\"result\":null,\"error\":[21,\"Stale\",null]}", &id, &res));
+  TEST_ASSERT_EQUAL_UINT32(88, id);
+  TEST_ASSERT_FALSE(res);
+
+  TEST_ASSERT_EQUAL(MINING_NOTIFY, parse_mining_method(empty_notify, &id, &res));
+  TEST_ASSERT_EQUAL_UINT32(0, id);
+}
+
+static void test_json_escape()
+{
+  // Apostrophes stay literal in JSON (htmlEscape turned them into &#39;),
+  // while quotes, backslashes, and control bytes are escaped per RFC 8259.
+  const String s = jsonEscape("nm1's \"pool\"\\worker\n\t\x01");
+  TEST_ASSERT_EQUAL_STRING("nm1's \\\"pool\\\"\\\\worker\\n\\t\\u0001", s.c_str());
+
+  // Verify the escaped string parses back cleanly through ArduinoJson.
+  const String wrapped = String("{\"v\":\"") + s + "\"}";
+  StaticJsonDocument<256> doc;
+  TEST_ASSERT_EQUAL(DeserializationError::Ok, deserializeJson(doc, wrapped.c_str()).code());
+  TEST_ASSERT_EQUAL_STRING("nm1's \"pool\"\\worker\n\t\x01", doc["v"].as<const char *>());
+}
+
+static void test_fill_and_parse_config_json()
+{
+  TSettings s = sampleSettings("bc1qtestwallet");
+  strlcpy(s.BackupPoolPassword, "bk-secret", sizeof(s.BackupPoolPassword));
+
+  // Masked export hides secrets with "********"
+  DynamicJsonDocument masked(3072);
+  nvMemory::fillConfigJson(masked, s, false, true);
+  TEST_ASSERT_FALSE(masked.overflowed());
+  TEST_ASSERT_EQUAL_STRING("********", masked["poolPassword"].as<const char *>());
+  TEST_ASSERT_EQUAL_STRING("********", masked["backupPoolPassword"].as<const char *>());
+  TEST_ASSERT_EQUAL_STRING("********", masked["wifiPass"].as<const char *>());
+  TEST_ASSERT_EQUAL_STRING("********", masked["mqttPass"].as<const char *>());
+  TEST_ASSERT_EQUAL_STRING("bc1qtestwallet", masked["wallet"].as<const char *>());
+
+  // Unmasked export exposes actual secrets
+  DynamicJsonDocument plain(3072);
+  nvMemory::fillConfigJson(plain, s, false, false);
+  TEST_ASSERT_FALSE(plain.overflowed());
+  TEST_ASSERT_EQUAL_STRING("d=0.001,it's", plain["poolPassword"].as<const char *>());
+  TEST_ASSERT_EQUAL_STRING("bk-secret", plain["backupPoolPassword"].as<const char *>());
+  TEST_ASSERT_EQUAL_STRING("mq-secret", plain["mqttPass"].as<const char *>());
+
+  // Re-applying masked JSON preserves all existing secrets while applying edits
+  masked["webPass"] = "********";
+  masked["timezone"] = "America/New_York";
+  TEST_ASSERT_TRUE(nvMemory::parseJsonConfig(masked, &s));
+  TEST_ASSERT_EQUAL_STRING("d=0.001,it's", s.PoolPassword);
+  TEST_ASSERT_EQUAL_STRING("bk-secret", s.BackupPoolPassword);
+  TEST_ASSERT_EQUAL_STRING("web'pass", s.WebPassword.c_str());
+  TEST_ASSERT_EQUAL_STRING("mq-secret", s.MqttPass.c_str());
+  TEST_ASSERT_EQUAL_STRING("America/New_York", s.Timezone.c_str());
+
+  // Short CLI / Fleet API patch aliases update target fields cleanly
+  StaticJsonDocument<512> patch;
+  patch["tz"] = "Europe/Dublin";
+  patch["bpool"] = "solo2.ckpool.org:3334";
+  patch["city"] = "Belfast";
+  patch["ledmode"] = "steady";
+  patch["ledColorHex"] = "#12ab34";
+  patch["ledscreenoff"] = true;
+  patch["screenOffTimeout"] = 60;
+  TEST_ASSERT_TRUE(nvMemory::parseJsonConfig(patch, &s));
+  TEST_ASSERT_EQUAL_STRING("Europe/Dublin", s.Timezone.c_str());
+  TEST_ASSERT_EQUAL_STRING("solo2.ckpool.org", s.BackupPoolAddress.c_str());
+  TEST_ASSERT_EQUAL_INT(3334, s.BackupPoolPort);
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, 54.60f, s.Latitude);
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, -5.93f, s.Longitude);
+  TEST_ASSERT_EQUAL_INT(LED_MODE_STEADY, s.ledMode);
+  TEST_ASSERT_EQUAL_HEX32(0x12AB34, s.ledColor);
+  TEST_ASSERT_TRUE(s.ledScreenOff);
+  TEST_ASSERT_EQUAL_INT(1, s.ScreenTimeout);
+}
+
 int main(int, char **)
 {
   UNITY_BEGIN();
   RUN_TEST(test_subscribe_reply);
   RUN_TEST(test_subscribe_refuses_bad_extranonces);
   RUN_TEST(test_method_and_replies);
+  RUN_TEST(test_single_pass_method_id_result);
   RUN_TEST(test_notify_fields);
   RUN_TEST(test_huge_notify_is_parsed);
   RUN_TEST(test_merkle_branch_outlives_the_next_message);
@@ -449,6 +538,7 @@ int main(int, char **)
   RUN_TEST(test_submit_nonce_has_8_digits);
   RUN_TEST(test_password_fits);
   RUN_TEST(test_to_byte_array);
+  RUN_TEST(test_json_escape);
   RUN_TEST(test_header_empty_block);
   RUN_TEST(test_header_big_coinbase_and_branches);
   RUN_TEST(test_job_not_prepared_without_extranonce2_size);
@@ -461,5 +551,6 @@ int main(int, char **)
   RUN_TEST(test_config_power_cut_while_writing_keeps_old);
   RUN_TEST(test_config_power_cut_before_rename_keeps_new);
   RUN_TEST(test_config_delete_removes_both);
+  RUN_TEST(test_fill_and_parse_config_json);
   return UNITY_END();
 }

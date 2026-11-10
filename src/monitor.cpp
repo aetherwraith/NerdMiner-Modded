@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include "mbedtls/md.h"
 #include "HTTPClient.h"
 #include <WiFiClientSecure.h>
 #include <time.h>
@@ -9,6 +8,7 @@
 #include "utils.h"
 #include "monitor.h"
 #include "wManager.h"
+#include "drivers/displays/display.h"
 #include "drivers/storage/storage.h"
 #include "drivers/devices/device.h"
 #include "currency.h"
@@ -94,7 +94,7 @@ unsigned long mGlobalUpdate =0;
 // failed fetch waits FETCH_RETRY_ms before the next try, and the timeout is
 // shorter.
 #define FETCH_RETRY_ms   60000
-#define FETCH_TIMEOUT_ms 5000
+#define FETCH_TIMEOUT_ms 3000
 static bool fetchDue(unsigned long lastOk, unsigned long &lastTry, unsigned long periodMs)
 {
     if (WiFi.status() != WL_CONNECTED) return false;
@@ -108,64 +108,78 @@ static unsigned long mGlobalTry = 0;
 static unsigned long mHeightTry = 0;
 static unsigned long mBTCTry = 0;
 
+static const char *kGlobalHash1mUrl = "https://mempool.space/api/v1/mining/hashrate/1m";
+
 void updateGlobalData(void){
     
     if(fetchDue(mGlobalUpdate, mGlobalTry, UPDATE_Global_min * 60 * 1000)){
-            
-        //Make first API call to get global hash and current difficulty
+        // Reuse one TLS session across both mempool.space requests so mbedTLS
+        // only performs a single handshake (halving HW SHA pause and heap churn).
+        WiFiClientSecure client;
+        client.setInsecure();
         HTTPClient http;
         http.setTimeout(FETCH_TIMEOUT_ms);
+        http.setReuse(true);
         try {
-        http.begin(getGlobalHash);
+        http.begin(client, kGlobalHash1mUrl);
         int httpCode;
         { HW_SHA_REQUEST(); std::lock_guard<std::mutex> shaLock(g_hwShaMutex); httpCode = http.GET(); }
 
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
-            
-            StaticJsonDocument<1024> doc;
-            deserializeJson(doc, payload);
-            String temp = "";
-            if (doc.containsKey("currentHashrate")) temp = String(doc["currentHashrate"].as<float>());
-            if(temp.length()>18 + 3) //Exahashes more than 18 digits + 3 digits decimals
-              gData.globalHash = temp.substring(0,temp.length()-18 - 3);
-            if (doc.containsKey("currentDifficulty")) temp = String(doc["currentDifficulty"].as<float>());
-            if(temp.length()>10 + 3){ //Terahash more than 10 digits + 3 digit decimals
-              temp = temp.substring(0,temp.length()-10 - 3);
-              gData.difficulty = temp.substring(0,temp.length()-2) + "." + temp.substring(temp.length()-2,temp.length()) + "T";
+            StaticJsonDocument<128> filter;
+            filter["currentHashrate"] = true;
+            filter["currentDifficulty"] = true;
+            StaticJsonDocument<512> doc;
+            DeserializationError err = deserializeJson(doc, payload.c_str(), DeserializationOption::Filter(filter));
+            if (!err) {
+                double curHash = doc["currentHashrate"] | 0.0;
+                if (curHash > 0.0) {
+                    char hash_str[24] = {0};
+                    snprintf(hash_str, sizeof(hash_str), "%.0f", curHash / 1e18);
+                    gData.globalHash = hash_str;
+                }
+                double curDiff = doc["currentDifficulty"] | 0.0;
+                if (curDiff > 0.0) {
+                    char diff_str[24] = {0};
+                    suffix_string(curDiff, diff_str, sizeof(diff_str), 2);
+                    gData.difficulty = diff_str;
+                }
+                mGlobalUpdate = millis();
             }
             doc.clear();
-
-            mGlobalUpdate = millis();
         }
         http.end();
 
-      
-        //Make third API call to get fees
-        http.begin(getFees);
+        // Second API call on the same mempool.space connection: recommended fees
+        http.begin(client, getFees);
         { HW_SHA_REQUEST(); std::lock_guard<std::mutex> shaLock(g_hwShaMutex); httpCode = http.GET(); }
 
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
             
-            StaticJsonDocument<1024> doc;
-            deserializeJson(doc, payload);
-            if (doc.containsKey("halfHourFee")) gData.halfHourFee = doc["halfHourFee"].as<int>();
+            StaticJsonDocument<512> doc;
+            if (!deserializeJson(doc, payload.c_str())) {
+                if (doc.containsKey("halfHourFee")) gData.halfHourFee = doc["halfHourFee"].as<int>();
 #ifdef SCREEN_FEES_ENABLE
-            if (doc.containsKey("fastestFee"))  gData.fastestFee = doc["fastestFee"].as<int>();
-            if (doc.containsKey("hourFee"))     gData.hourFee = doc["hourFee"].as<int>();
-            if (doc.containsKey("economyFee"))  gData.economyFee = doc["economyFee"].as<int>();
-            if (doc.containsKey("minimumFee"))  gData.minimumFee = doc["minimumFee"].as<int>();
+                if (doc.containsKey("fastestFee"))  gData.fastestFee = doc["fastestFee"].as<int>();
+                if (doc.containsKey("hourFee"))     gData.hourFee = doc["hourFee"].as<int>();
+                if (doc.containsKey("economyFee"))  gData.economyFee = doc["economyFee"].as<int>();
+                if (doc.containsKey("minimumFee"))  gData.minimumFee = doc["minimumFee"].as<int>();
 #endif
+                mGlobalUpdate = millis();
+            }
             doc.clear();
-
-            mGlobalUpdate = millis();
         }
         
+        http.setReuse(false);
         http.end();
+        client.stop();
         } catch(...) {
           Serial.println("Global data HTTP error caught");
+          http.setReuse(false);
           http.end();
+          client.stop();
         }
     }
 }
@@ -204,9 +218,15 @@ String getBlockHeight(void){
 
 unsigned long mBTCUpdate = 0;
 
+static String formatCachedBTCprice(void){
+    const CurrencyInfo &cur = currencyFor(Settings.Currency);
+    char price_buffer[24];
+    snprintf(price_buffer, sizeof(price_buffer), "%s%u", cur.prefix, bitcoin_price);
+    return String(price_buffer);
+}
+
 String getBTCprice(void){
     const CurrencyInfo &cur = currencyFor(Settings.Currency);
-    static char price_buffer[24];
 
     if(fetchDue(mBTCUpdate, mBTCTry, UPDATE_BTC_min * 60 * 1000)){
 
@@ -221,8 +241,8 @@ String getBTCprice(void){
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
 
-            StaticJsonDocument<1024> doc;
-            deserializeJson(doc, payload);
+            StaticJsonDocument<512> doc;
+            deserializeJson(doc, payload.c_str());
           
             if (doc.containsKey("bitcoin") && doc["bitcoin"].containsKey(cur.code)) {
                 bitcoin_price = doc["bitcoin"][cur.code];
@@ -240,8 +260,7 @@ String getBTCprice(void){
         }
     }  
   
-  snprintf(price_buffer, sizeof(price_buffer), "%s%u", cur.prefix, bitcoin_price);
-  return String(price_buffer);
+    return formatCachedBTCprice();
 }
 
 unsigned long mPoolUpdate = 0;
@@ -496,12 +515,13 @@ mining_data getMiningData(unsigned long mElapsed)
 clock_data getClockData(unsigned long mElapsed)
 {
   clock_data data;
+  const bool lit = screenLit();
 
   data.completedShares = shares;
   data.totalKHashes = String((unsigned long long)totalKHashes);
   data.currentHashRate = getCurrentHashRate(mElapsed);
-  data.btcPrice = getBTCprice();
-  data.blockHeight = getBlockHeight();
+  data.btcPrice = lit ? getBTCprice() : formatCachedBTCprice();
+  data.blockHeight = lit ? getBlockHeight() : current_block;
   data.currentTime = getTime();
   data.currentDate = getDate();
 
@@ -522,13 +542,15 @@ clock_data_t getClockData_t(unsigned long mElapsed)
 coin_data getCoinData(unsigned long mElapsed)
 {
   coin_data data;
+  const bool lit = screenLit();
 
-  updateGlobalData(); // Update gData vars asking mempool APIs
+  if (lit)
+    updateGlobalData(); // Update gData vars asking mempool APIs
 
   data.completedShares = shares;
   data.totalKHashes = String((unsigned long long)totalKHashes);
   data.currentHashRate = getCurrentHashRate(mElapsed);
-  data.btcPrice = getBTCprice();
+  data.btcPrice = lit ? getBTCprice() : formatCachedBTCprice();
   data.currentTime = getTime();
 #ifdef SCREEN_FEES_ENABLE
   data.hourFee = String(gData.hourFee);
@@ -539,7 +561,7 @@ coin_data getCoinData(unsigned long mElapsed)
   data.halfHourFee = String(gData.halfHourFee) + " sat/vB";
   data.netwrokDifficulty = gData.difficulty;
   data.globalHashRate = gData.globalHash;
-  data.blockHeight = getBlockHeight();
+  data.blockHeight = lit ? getBlockHeight() : current_block;
 
   unsigned long currentBlock = data.blockHeight.toInt();
   unsigned long remainingBlocks = (((currentBlock / HALVING_BLOCKS) + 1) * HALVING_BLOCKS) - currentBlock;
@@ -577,7 +599,7 @@ static bool heliosRegionStale(void) {
 
 String getHeliosRegion(void) {
     if (!heliosRegionStale()) return heliosRegion;
-    const String& host = activePoolAddress();
+    const String host = activePoolAddress();
     const char* named = NULL;
     for (const char* r : HELIOS_REGIONS) {
         if (host.indexOf(r) >= 0) named = r;
@@ -642,7 +664,7 @@ static bool heliosJudgeAnswer(int httpCode, int workers) {
 String getPoolAPIUrl(void) {
     std::lock_guard<std::mutex> lock(s_poolApiMutex);
     // The pool being mined on: the main one, or the backup while it is down
-    const String& pool = activePoolAddress();
+    const String pool = activePoolAddress();
     const int poolPort = activePoolPort();
     int style = POOL_API_PUBLICPOOL;
     String url = String(getPublicPool);
@@ -737,7 +759,7 @@ pool_data getPoolData(void){
         WiFiClientSecure client;
         client.setInsecure();
         HTTPClient http;
-        http.setTimeout(10000);
+        http.setTimeout(FETCH_TIMEOUT_ms);
         try {
           String btcWallet = Settings.BtcWallet;
           // Serial.println(btcWallet);
@@ -791,7 +813,7 @@ pool_data getPoolData(void){
                 filter["workers"] = true;
                 filter["hashrate1hr"] = true;
                 StaticJsonDocument<1024> doc;
-                deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+                deserializeJson(doc, payload.c_str(), DeserializationOption::Filter(filter));
                 if (doc.containsKey("workers")) pData.workersCount = doc["workers"].as<int>();
                 if (doc.containsKey("hashrate1hr")) pData.workersHash = doc["hashrate1hr"].as<String>();
                 if (doc.containsKey("bestever")) {
@@ -812,7 +834,7 @@ pool_data getPoolData(void){
                 filter["workers"][0]["active"] = true;
                 filter["workers"][0]["hashrate"] = true;
                 StaticJsonDocument<2048> doc;
-                deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+                deserializeJson(doc, payload.c_str(), DeserializationOption::Filter(filter));
                 const JsonArray& workers = doc["workers"].as<JsonArray>();
                 int activeWorkers = 0;
                 float totalhashs = 0;
@@ -840,7 +862,7 @@ pool_data getPoolData(void){
                 filter["workers"][0]["sessionId"] = true;
                 filter["workers"][0]["hashRate"] = true;
                 StaticJsonDocument<2048> doc;
-                deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+                deserializeJson(doc, payload.c_str(), DeserializationOption::Filter(filter));
                 //Serial.println(serializeJsonPretty(doc, Serial));
                 if (doc.containsKey("workersCount")) pData.workersCount = doc["workersCount"].as<int>();
                 const JsonArray& workers = doc["workers"].as<JsonArray>();

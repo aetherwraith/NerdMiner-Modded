@@ -1,4 +1,3 @@
-
 #ifndef MINING_API_H
 #define MINING_API_H
 
@@ -16,15 +15,21 @@
 // depending on timing. Any code that touches SHA_TEXT_BASE directly (the
 // plain-C and pipelined-asm classic-ESP32 HW mining paths) must hold this
 // while doing so; any code that can trigger a TLS handshake with hardware
-// SHA active (e.g. the pool-stats HTTPS fetch) must hold it too.
+// SHA active (e.g. the pool-stats HTTPS fetch or OTA) must hold it too.
 extern std::mutex g_hwShaMutex;
 extern volatile bool g_otaUpdating;
 
+// Immediately request any in-flight hardware SHA chunk to yield so the caller
+// can acquire g_hwShaMutex without waiting up to 265-1190 ms for the chunk end.
+void pauseHwMinerForTls(void);
+
 // Bumped by the stratum task when the pool accepts a 32-bit share (difficulty
 // >= 1, the "32BITS SHARES" counter -- not every pool share, those come in
-// more than once a second) / when a valid block is found. Displays watch them to flash a LED or beep (M5StickC Plus2).
+// more than once a second), when a valid block is found, or when a new
+// all-time best difficulty is set after warmup.
 extern volatile uint32_t g_shareFoundEvents;
 extern volatile uint32_t g_blockFoundEvents;
+extern volatile uint32_t g_bestDiffEvents;
 
 // 32-bit shares (difficulty >= 1) the pool refused; the accepted ones are
 // the existing "shares" counter. Saved with the other stats.
@@ -61,42 +66,13 @@ struct HwShaRequest
 #define KEEPALIVE_TIME_ms       30000
 #define POOLINACTIVITY_TIME_ms  60000
 
-//#if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
 #define HARDWARE_SHA265
-//#endif
 
-// Build flag to A/B test: classic ESP32 (D0WD, e.g. CYD boards) has a SHA256
-// engine with no way to load an external midstate, so its "hardware" path
-// re-hashes the fixed first block on every nonce attempt (3 HW blocks/nonce)
-// instead of reusing the cached midstate like the software path does (S2/S3/C3
-// don't have this limitation). Define FORCE_SW_MINING to skip the hardware
-// path entirely and run the optimized software miner on both cores, to compare
-// real measured hashrate against the current hybrid HW+SW default.
 #ifdef FORCE_SW_MINING
 #undef HARDWARE_SHA265
 #endif
 
-// Build flag: pipelined classic-ESP32 HW mining loops that overlap the CPU's
-// register traffic with the SHA engine's busy time instead of idle-spinning
-// through it. The worker picks the fastest one that passes a known-answer
-// test at power-on (see pl_select_loop in mining.cpp):
-//   src/pipelined_hw_sha_classic_v2.S   schedule measured on the chip, no
-//                                       status polling
-//   src/pipelined_hw_sha_classic.cpp    the original BUSY-polling loop, ported
-//                                       (MIT license, same upstream) from
-//                                       dwespl/nerdminer-axehub
-//   pl_mine_plain (mining.cpp)          the non-pipelined loop; last fallback,
-//                                       and the only one used on chips before
-//                                       revision 3
-// Every candidate is still recomputed with the software nerd_sha256d_baked()
-// path before being trusted, so a bug in the asm can only cost a missed
-// share, never a bad submission. Only affects CONFIG_IDF_TARGET_ESP32
-// (classic ESP32 / D0WD, e.g. CYD boards) when HARDWARE_SHA265 is active.
-//#define PIPELINED_ASM_MINING
-
-
 void runMonitor(void *name);
-
 void runStratumWorker(void *name);
 
 // Pool address, port, wallet and pool password from the LAN settings page:
@@ -116,27 +92,42 @@ void readPoolSettings(TSettings &s);
 #define POOL_FAILBACK_ms    (10 * 60 * 1000UL)
 #endif
 bool onBackupPool(void);
-const String &activePoolAddress(void);
+String activePoolAddress(void);
 int activePoolPort(void);
 
 // Live miner state for the LAN status endpoint (/api/status).
 struct MinerStatus
 {
-  float hashrateKHs;    // last 10 s
-  float avgHashrateKHs; // since boot
-  uint32_t accepted;    // shares the pool accepted since boot
-  uint32_t rejected;    // ...and refused
-  bool subscribed;      // connected and subscribed to the pool
+  float hashrateKHs;       // last 10 s
+  float avgHashrateKHs;    // since boot
+  uint32_t accepted;       // shares the pool accepted since boot
+  uint32_t rejected;       // ...and refused
+  bool subscribed;         // connected and subscribed to the pool
   double poolDifficulty;
-  int8_t authorized;    // mining.authorize answer: -1 none yet, 0 refused, 1 accepted
+  int8_t authorized;       // mining.authorize answer: -1 none yet, 0 refused, 1 accepted
+  double bestDiff;         // all-time best share difficulty (NVS + session)
+  double sessionBestDiff;  // best share difficulty since boot
+  int32_t pingMs;          // last mining.submit -> ACK round-trip in ms (-1 if none yet)
+  uint64_t sessionHashes;  // hashes computed since boot
 };
 MinerStatus getMinerStatus(void);
-// mining.authorize answer for the current connection: -1 none yet, 0 the pool
-// refused the wallet/worker, 1 accepted (screens show a warning on 0).
 int8_t poolAuthorized(void);
 
-void runMiner(void *name);
+#define NOTABLE_SHARES_MAX 8
+struct NotableShare
+{
+  uint32_t epoch;     // UTC unix timestamp (0 if NTP not synced yet)
+  uint32_t uptimeS;   // seconds since boot when recorded
+  double difficulty;
+  bool is32Bit;       // difficulty >= 1.0
+  bool isBlock;       // met network target
+};
+size_t getNotableShares(NotableShare *out, size_t maxCount);
 
+// Non-blocking LAN UDP fleet share celebration (called from loop()).
+void celebrateProcess(void);
+
+void runMiner(void *name);
 void minerWorkerSw(void * task_id);
 void minerWorkerHw(void * task_id);
 
@@ -146,7 +137,9 @@ void resetStat();
 void updateBestDiff(double diff); // keep the best hash difficulty seen (any core)
 void addHashes(uint32_t n);        // stratum task: hashes the miners report
 uint64_t getTotalHashes();         // since the saved stats began; any task
+uint64_t getSessionHashes();       // since boot; any task
 double getBestDiff();
+double getSessionBestDiff();
 void saveStat();   // write the stats to NVS now (before a planned restart / power off)
 
 extern volatile uint32_t shares;
@@ -159,5 +152,4 @@ typedef struct{
   bool valid; // false: the job could not be prepared (see calculateMiningData)
 } miner_data;
 
-
-#endif // UTILS_API_H
+#endif // MINING_API_H

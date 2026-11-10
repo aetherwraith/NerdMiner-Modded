@@ -24,6 +24,7 @@
 #include <Preferences.h>
 #include "media/myFonts.h"
 #include "version.h"
+#include "mining.h"
 #include "monitor.h"
 #include "OpenFontRender.h"
 #include <SPI.h>
@@ -126,6 +127,16 @@ static float gaugeShown = 0;
 static uint8_t segLvl[G_SEGS];
 static unsigned long shareFlashUntil = 0;
 static uint32_t lastShares = 0;
+static bool s_showingIdentify = false;
+static int s_lastIdentifySec = -1;
+static String s_identifyStaticKey;
+static bool s_wasCelebrating = false;
+static bool s_lastRingFlash = false;
+
+static bool isShareFlashing()
+{
+  return shareFlashUntil != 0 && (int32_t)(shareFlashUntil - millis()) > 0;
+}
 
 // history of hashrate for the CLOCK screen
 #define HIST_N 48
@@ -377,6 +388,7 @@ static void noteHashrate(float kh)
 
 static void gaugeDraw(TFT_eSPI &d, float v)
 {
+  const bool flash = isShareFlashing();
   float pos = v * G_SEGS;
   for (int i = 0; i < G_SEGS; i++)
   {
@@ -385,7 +397,7 @@ static void gaugeDraw(TFT_eSPI &d, float v)
     if (lvl == segLvl[i])
       continue;
     segLvl[i] = lvl;
-    uint16_t full = mix565(cAlt, cAcc, (uint8_t)(i * 255 / (G_SEGS - 1)));
+    uint16_t full = flash ? C_GOLD : mix565(cAlt, cAcc, (uint8_t)(i * 255 / (G_SEGS - 1)));
     uint16_t col = lvl == 0 ? C_TRACK : (lvl == 4 ? full : mix565(C_TRACK, full, lvl * 64));
     int a0 = 45 + i * 9; // 270 degree sweep, gap at 6 o'clock
     d.drawArc(G_CX, G_CY, G_R, G_RI, a0, a0 + 7, col, C_BG, true);
@@ -944,6 +956,77 @@ static void logShare(const String &shares, const String &khashes, const String &
                 shares.c_str(), khashes.c_str(), rate.c_str());
 }
 
+static void paintIdentifyScreen()
+{
+  TFT_eSPI &d = out();
+  const String host = Settings.Hostname[0] ? String(Settings.Hostname) : String("nerdminer");
+  const String ip = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("No WiFi");
+  const String wallet = Settings.BtcWallet;
+  const int dot = wallet.indexOf('.');
+  const String worker = (dot >= 0 && dot + 1 < (int)wallet.length()) ? wallet.substring(dot) : String();
+
+  String staticKey = host + "|" + ip + "|" + worker + "|" + String(accentIdx);
+  if (!s_showingIdentify || s_identifyStaticKey != staticKey)
+  {
+    s_showingIdentify = true;
+    s_identifyStaticKey = staticKey;
+    s_lastIdentifySec = -1;
+    uiScreen = -1;
+
+    clearScreen(d);
+    panel(d, 6, 6, SCR_W - 12, SCR_H - 12, 12, C_BG, cAcc, C_BG);
+    d.drawRoundRect(8, 8, SCR_W - 16, SCR_H - 16, 10, cAcc);
+
+    const int bw = textW("LOCATE MINER", 12) + 24;
+    const uint16_t badgeBg = mix565(C_BG, cAcc, 56);
+    d.fillSmoothRoundRect((SCR_W - bw) / 2, 18, bw, 22, 11, badgeBg, C_BG);
+    text(d, "LOCATE MINER", SCR_W / 2, 22, 12, cAcc, badgeBg, Align::TopCenter);
+
+    panel(d, 16, 48, SCR_W - 32, 74, 10, C_PANEL, C_EDGE, C_BG);
+    unsigned hsz = 42;
+    while (hsz > 18 && textW(host.c_str(), hsz) > SCR_W - 48)
+      hsz -= 2;
+    const int hy = 48 + (74 - (int)hsz) / 2 - 4;
+    text(d, host.c_str(), SCR_W / 2, hy, hsz, cAcc, C_PANEL, Align::TopCenter);
+
+    if (worker.length() > 0)
+    {
+      panel(d, 16, 130, 168, 50, 8, C_PANEL, C_EDGE, C_BG);
+      text(d, "IP ADDRESS", 28, 137, 9, C_DIM, C_PANEL);
+      unsigned ipsz = 15;
+      while (ipsz > 10 && textW(ip.c_str(), ipsz) > 148)
+        ipsz--;
+      text(d, ip.c_str(), 28, 152, ipsz, C_TEXT, C_PANEL);
+
+      panel(d, 192, 130, 112, 50, 8, C_PANEL, C_EDGE, C_BG);
+      text(d, "WORKER", 204, 137, 9, C_DIM, C_PANEL);
+      unsigned wsz = 15;
+      while (wsz > 10 && textW(worker.c_str(), wsz) > 92)
+        wsz--;
+      text(d, worker.c_str(), 204, 152, wsz, C_GOOD, C_PANEL);
+    }
+    else
+    {
+      panel(d, 16, 130, SCR_W - 32, 50, 8, C_PANEL, C_EDGE, C_BG);
+      text(d, "IP ADDRESS", SCR_W / 2, 137, 9, C_DIM, C_PANEL, Align::TopCenter);
+      text(d, ip.c_str(), SCR_W / 2, 151, 17, C_TEXT, C_PANEL, Align::TopCenter);
+    }
+  }
+
+  const int secs = (int)((identifyRemainingMs() + 999U) / 1000U);
+  if (secs != s_lastIdentifySec)
+  {
+    s_lastIdentifySec = secs;
+    char cd[32];
+    snprintf(cd, sizeof(cd), "RETURNING IN %ds", secs);
+    if (wBegin(220, 26, C_BG))
+    {
+      text(wgt, cd, 110, 5, 13, C_TEXT, C_BG, Align::TopCenter);
+      wEnd((SCR_W - 220) / 2, 192);
+    }
+  }
+}
+
 void esp32_2432S028R_MinerScreen(unsigned long mElapsed)
 {
   if (restorePage > 0 && restorePage < currentDisplayDriver->num_cyclic_screens)
@@ -956,6 +1039,12 @@ void esp32_2432S028R_MinerScreen(unsigned long mElapsed)
     return;
   }
   restorePage = 0;
+  if (isIdentifying())
+  {
+    uiLive = true;
+    paintIdentifyScreen();
+    return;
+  }
   mining_data data = getMiningData(mElapsed);
   refreshPool();
   uiLive = true;
@@ -979,7 +1068,7 @@ void esp32_2432S028R_MinerScreen(unsigned long mElapsed)
   m.blocks = data.valids;
   m.total = data.totalMHashes;
   m.kh = kh;
-  m.flash = millis() < shareFlashUntil;
+  m.flash = isShareFlashing();
   m.strip.l[0] = "WORKERS";
   m.strip.v[0] = String(pData.workersCount);
   m.strip.l[1] = "POOL RATE";
@@ -997,6 +1086,12 @@ void esp32_2432S028R_MinerScreen(unsigned long mElapsed)
 
 void esp32_2432S028R_MarketScreen(unsigned long mElapsed)
 {
+  if (isIdentifying())
+  {
+    uiLive = true;
+    paintIdentifyScreen();
+    return;
+  }
   coin_data data = getCoinData(mElapsed);
   refreshPool();
   uiLive = true;
@@ -1029,6 +1124,12 @@ void esp32_2432S028R_MarketScreen(unsigned long mElapsed)
 
 void esp32_2432S028R_ClockScreen(unsigned long mElapsed)
 {
+  if (isIdentifying())
+  {
+    uiLive = true;
+    paintIdentifyScreen();
+    return;
+  }
   clock_data data = getClockData(mElapsed);
   uiLive = true;
   ensureChrome(SCR_CLOCK);
@@ -1221,13 +1322,23 @@ void esp32_2432S028R_SetupScreen(void)
 
 void esp32_2432S028R_AnimateCurrentScreen(unsigned long frame)
 {
-  if (!uiLive || uiScreen < 0)
+  if (isIdentifying() || !uiLive || uiScreen < 0)
     return;
   drawPulse(frame);
-  if (uiScreen == SCR_MINE && fabsf(gaugeTarget - gaugeShown) > 0.002f)
+  if (uiScreen == SCR_MINE)
   {
-    gaugeShown += (gaugeTarget - gaugeShown) * 0.3f; // ease toward the measured rate
-    gaugeDraw(out(), gaugeShown);
+    const bool flash = isShareFlashing();
+    if (flash != s_lastRingFlash)
+    {
+      s_lastRingFlash = flash;
+      memset(segLvl, 0xFF, sizeof(segLvl));
+      gaugeDraw(out(), gaugeShown);
+    }
+    else if (fabsf(gaugeTarget - gaugeShown) > 0.002f)
+    {
+      gaugeShown += (gaugeTarget - gaugeShown) * 0.3f; // ease toward the measured rate
+      gaugeDraw(out(), gaugeShown);
+    }
   }
 }
 
@@ -1308,13 +1419,43 @@ void esp32_2432S028R_DoLedStuff(unsigned long frame)
   }
 #endif
 
-  // Screen changed by touch or the boot button: draw the new page right away
-  // from the last values it showed; the next data tick refreshes them.
-  if (uiLive && currentDisplayDriver->current_cyclic_screen != uiScreen)
+  // Keep the 8-minute CLOCK hashrate history populated even while the screen is off.
+  noteHashrate(getMinerStatus().hashrateKHs);
+
+  const bool celebrating = isCelebrating();
+  if (celebrating && !s_wasCelebrating)
   {
-    int s = currentDisplayDriver->current_cyclic_screen;
-    ensureChrome(s);
-    repaintCached(s);
+    shareFlashUntil = millis() + 2000;
+  }
+  s_wasCelebrating = celebrating;
+
+  if (isIdentifying())
+  {
+    paintIdentifyScreen();
+  }
+  else
+  {
+    if (s_showingIdentify)
+    {
+      s_showingIdentify = false;
+      s_lastIdentifySec = -1;
+      uiScreen = -1;
+      if (screenLit() && uiLive)
+      {
+        int s = currentDisplayDriver->current_cyclic_screen;
+        ensureChrome(s);
+        repaintCached(s);
+      }
+    }
+
+    // Screen changed by touch or the boot button: draw the new page right away
+    // from the last values it showed; the next data tick refreshes them.
+    if (uiLive && screenLit() && currentDisplayDriver->current_cyclic_screen != uiScreen)
+    {
+      int s = currentDisplayDriver->current_cyclic_screen;
+      ensureChrome(s);
+      repaintCached(s);
+    }
   }
   if (uiLive)
     saveUiPrefs();

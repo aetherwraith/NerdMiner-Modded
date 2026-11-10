@@ -8,20 +8,10 @@
 #include <string.h>
 #include <stdio.h>
 
-#ifndef bswap_16
-#define bswap_16(a) ((((uint16_t) (a) << 8) & 0xff00) | (((uint16_t) (a) >> 8) & 0xff))
+#if defined(ESP_PLATFORM) && !defined(NATIVE_TEST)
+#include <esp_system.h>
+#include <esp_rom_crc.h>
 #endif
-
-#ifndef bswap_32
-#define bswap_32(a) ((((uint32_t) (a) << 24) & 0xff000000) | \
-		     (((uint32_t) (a) << 8) & 0xff0000) | \
-     		     (((uint32_t) (a) >> 8) & 0xff00) | \
-     		     (((uint32_t) (a) >> 24) & 0xff))
-#endif
-
-uint32_t swab32(uint32_t v) {
-    return bswap_32(v);
-}
 
 uint8_t hex(char ch) {
     uint8_t r = (ch > 57) ? (ch - 55) : (ch - 48);
@@ -52,32 +42,6 @@ int to_byte_array(const char *in, size_t in_size, uint8_t *out) {
             count++;
         }
         return count;
-    }
-}
-
-void swap_endian_words(const char * hex_words, uint8_t * output) {
-    size_t hex_length = strlen(hex_words);
-    if (hex_length % 8 != 0) {
-        fprintf(stderr, "Must be 4-byte word aligned\n");
-        exit(EXIT_FAILURE);
-    }
-
-    size_t binary_length = hex_length / 2;
-
-    for (size_t i = 0; i < binary_length; i += 4) {
-        for (int j = 0; j < 4; j++) {
-            unsigned int byte_val;
-            sscanf(hex_words + (i + j) * 2, "%2x", &byte_val);
-            output[i + (3 - j)] = byte_val;
-        }
-    }
-}
-
-void reverse_bytes(uint8_t * data, size_t len) {
-    for (int i = 0; i < len / 2; ++i) {
-        uint8_t temp = data[i];
-        data[i] = data[len - 1 - i];
-        data[len - 1 - i] = temp;
     }
 }
 
@@ -170,46 +134,13 @@ bool checkValid(const unsigned char* hash, const char* nbitsHex) {
   return valid;
 }
 
-/**
- * get random extranonce2
-*/
-void getRandomExtranonce2(int extranonce2_size, char *extranonce2) {
-  uint8_t b0, b1, b2, b3;
-
-  b0 = rand() % 256;
-  b1 = rand() % 256;
-  b2 = rand() % 256;
-  b3 = rand() % 256;
-
-  unsigned long extranonce2_number = b3 << 24 | b2 <<  16 | b1 << 8 | b0;
-
-  char format[] = "%00x";
-
-  sprintf(&format[1], "%02dx", extranonce2_size * 2);
-  sprintf(extranonce2, format, extranonce2_number);
-}
-
-/**
- * get linear extranonce2
-*/
-void getNextExtranonce2(int extranonce2_size, char *extranonce2) {
-  unsigned long extranonce2_number = strtoul(extranonce2, NULL, 10);
-
-  extranonce2_number++;
-
-  char format[] = "%00x";
-
-  sprintf(&format[1], "%02dx", extranonce2_size * 2);
-  sprintf(extranonce2, format, extranonce2_number);
-}
-
 miner_data init_miner_data(void){
   
   miner_data newMinerData = {}; // valid = false until calculateMiningData is done
   return newMinerData;
 }
 
-miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
+miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob){
 
   miner_data mMiner = init_miner_data();
 
@@ -230,6 +161,14 @@ miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
             Serial.printf("    extranonce2_size %d: job not prepared\n", size);
             return mMiner;
         }
+        #if defined(ESP_PLATFORM) && !defined(NATIVE_TEST)
+        static bool s_extranonce2_seeded = false;
+        if (!s_extranonce2_seeded)
+        {
+            s_extranonce2 = esp_random();
+            s_extranonce2_seeded = true;
+        }
+        #endif
         char en2[2 * MAX_EXTRANONCE2_SIZE + 1];
         uint32_t v = ++s_extranonce2;
         for (int i = 2 * size - 1; i >= 0; --i, v >>= 4)
@@ -239,16 +178,16 @@ miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
     }
 
     //get coinbase - coinbase_hash_bin = hashlib.sha256(hashlib.sha256(binascii.unhexlify(coinbase)).digest()).digest()
-    // Static buffer for the usual sizes; a bigger coinbase (pools with several
+    // Stack buffer for the usual sizes; a bigger coinbase (pools with several
     // payout outputs) gets a heap one. The fixed 512 digits used to cut it
     // silently: wrong merkle root, every share rejected.
-    static char coinbase_static[512];
+    unsigned char coinbase_stack[512];
     const size_t coinbase_hex = mJob.coinb1.length() + mWorker.extranonce1.length() +
                                 mWorker.extranonce2.length() + mJob.coinb2.length();
     char *coinbase_heap = nullptr;
-    char *coinbase_buffer = coinbase_static;
-    size_t coinbase_size = sizeof(coinbase_static);
-    if (coinbase_hex + 1 > sizeof(coinbase_static))
+    char *coinbase_buffer = (char *)coinbase_stack;
+    size_t coinbase_size = sizeof(coinbase_stack);
+    if (coinbase_hex + 1 > sizeof(coinbase_stack))
     {
         coinbase_heap = (char *)malloc(coinbase_hex + 1);
         if (coinbase_heap)
@@ -266,7 +205,9 @@ miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
     snprintf(coinbase_buffer, coinbase_size, "%s%s%s%s",
              mJob.coinb1.c_str(), mWorker.extranonce1.c_str(),
              mWorker.extranonce2.c_str(), mJob.coinb2.c_str());
+    #ifdef DEBUG_MINING
     Serial.print("    coinbase: "); Serial.println(coinbase_buffer);
+    #endif
     size_t str_len = strlen(coinbase_buffer)/2;
     // Decoded in place (each byte is written behind the two digits it comes
     // from): no second buffer on the stratum task's stack.
@@ -350,15 +291,15 @@ miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
         #endif
     }
     // merkle root from merkle_result
-    
-    Serial.print("    merkle sha         : ");
     char merkle_root[65];
     for (int i = 0; i < 32; i++) {
-      Serial.printf("%02x", mMiner.merkle_result[i]);
       snprintf(&merkle_root[i*2], 3, "%02x", mMiner.merkle_result[i]);
     }
     merkle_root[64] = 0; // 64 hex digits; [65] was one byte past the end
-    Serial.println("");
+    #ifdef DEBUG_MINING
+    Serial.print("    merkle sha         : ");
+    Serial.println(merkle_root);
+    #endif
 
     // calculate blockheader
     // j.block_header = ''.join([j.version, j.prevhash, merkle_root, j.ntime, j.nbits])
@@ -558,6 +499,60 @@ void suffix_string(double val, char *buf, size_t bufsiz, int sigdigits)
 
 
 
+String jsonEscape(const String &in)
+{
+    String out;
+    out.reserve(in.length() + 8);
+    for (size_t i = 0; i < in.length(); ++i)
+    {
+        const uint8_t c = (uint8_t)in[i];
+        switch (c)
+        {
+            case '\\': out += "\\\\"; break;
+            case '"':  out += "\\\""; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (c < 0x20)
+                {
+                    char u[7];
+                    snprintf(u, sizeof(u), "\\u%04x", (unsigned)c);
+                    out += u;
+                }
+                else
+                {
+                    out += (char)c;
+                }
+                break;
+        }
+    }
+    return out;
+}
+
+uint32_t crc32_reset()
+{
+    return 0xFFFFFFFF;
+}
+
+uint32_t crc32_finish(uint32_t crc32)
+{
+    return crc32 ^ 0xFFFFFFFF;
+}
+
+#if defined(ESP_PLATFORM) && !defined(NATIVE_TEST)
+
+uint32_t crc32_add(uint32_t crc32, const void* data, size_t size)
+{
+    if (!data || size == 0)
+        return crc32;
+    return ~esp_rom_crc32_le(~crc32, (const uint8_t *)data, (uint32_t)size);
+}
+
+#else
+
 static const uint32_t s_crc32_table[256] =
 {
     0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA,
@@ -626,11 +621,6 @@ static const uint32_t s_crc32_table[256] =
     0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D
 };
 
-uint32_t crc32_reset()
-{
-    return 0xFFFFFFFF;
-}
-
 uint32_t crc32_add(uint32_t crc32, const void* data, size_t size)
 {
     for (size_t n = 0; n < size; ++n)
@@ -638,8 +628,5 @@ uint32_t crc32_add(uint32_t crc32, const void* data, size_t size)
     return crc32;
 }
 
-uint32_t crc32_finish(uint32_t crc32)
-{
-    return crc32 ^ 0xFFFFFFFF;
-}
+#endif
 

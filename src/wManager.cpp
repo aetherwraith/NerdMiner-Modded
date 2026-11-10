@@ -4,6 +4,7 @@
 //#include ".h"
 
 #include <WiFi.h>
+#include <ESPmDNS.h>
 
 #include <WiFiManager.h>
 
@@ -16,6 +17,7 @@
 #include "drivers/storage/storage.h"
 #include "mining.h"
 #include "timeconst.h"
+#include "version.h"
 
 #include <ArduinoJson.h>
 #include <esp_flash.h>
@@ -64,7 +66,7 @@ String readWebflasherConfig(TSettings* settings) {
         String jsonPart = data.substring(18);
         
         StaticJsonDocument<1024> doc;
-        DeserializationError error = deserializeJson(doc, jsonPart);
+        DeserializationError error = deserializeJson(doc, jsonPart.c_str());
         
         if (error == DeserializationError::Ok) {
             Serial.println(F("DEBUG: Webflasher JSON parsed successfully"));
@@ -372,6 +374,36 @@ void init_WifiManager()
 
 //----------------- MAIN PROCESS WIFI MANAGER --------------
 int oldStatus = 0;
+static bool s_mdnsStarted = false;
+static String s_mdnsHost;
+static uint32_t s_mdnsRetryMs = 0;
+
+#ifdef FIRMWARE_VERSION
+#define NM_MDNS_VERSION FIRMWARE_VERSION
+#else
+#define NM_MDNS_VERSION CURRENT_VERSION
+#endif
+
+static void sanitizeMdnsHost(const char *in, char *out, size_t outSize) {
+    size_t j = 0;
+    for (size_t i = 0; in && in[i] != '\0' && j + 1 < outSize; ++i) {
+        unsigned char c = (unsigned char)in[i];
+        if (c >= 'A' && c <= 'Z') {
+            out[j++] = (char)(c - 'A' + 'a');
+        } else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            out[j++] = (char)c;
+        } else if ((c == '-' || c == '_' || c == ' ') && j > 0 && out[j - 1] != '-') {
+            out[j++] = '-';
+        }
+    }
+    while (j > 0 && out[j - 1] == '-') {
+        --j;
+    }
+    out[j] = '\0';
+    if (j == 0) {
+        strlcpy(out, "nerdminer", outSize);
+    }
+}
 
 void wifiManagerProcess() {
 
@@ -384,7 +416,39 @@ void wifiManagerProcess() {
         } else {
             Serial.print("[Error] - current status: ");
             Serial.println(newStatus);
+            s_mdnsStarted = false;
         }
         oldStatus = newStatus;
+    }
+
+    if (newStatus == WL_CONNECTED) {
+        char rawHost[sizeof(Settings.Hostname)];
+        {
+            std::lock_guard<std::mutex> lock(g_settingsMutex);
+            strlcpy(rawHost, Settings.Hostname, sizeof(rawHost));
+        }
+        char cleanHost[64];
+        sanitizeMdnsHost(rawHost, cleanHost, sizeof(cleanHost));
+
+        if (s_mdnsHost != cleanHost) {
+            s_mdnsRetryMs = 0;
+        }
+        if ((!s_mdnsStarted || s_mdnsHost != cleanHost) &&
+            (s_mdnsRetryMs == 0 || millis() - s_mdnsRetryMs >= 5000)) {
+            MDNS.end();
+            if (MDNS.begin(cleanHost)) {
+                MDNS.addService("http", "tcp", 80);
+                MDNS.addService("nerdminer", "tcp", 80);
+                MDNS.addServiceTxt("nerdminer", "tcp", "version", NM_MDNS_VERSION);
+                MDNS.addServiceTxt("nerdminer", "tcp", "hostname", (const char *)(rawHost[0] ? rawHost : cleanHost));
+                s_mdnsStarted = true;
+                s_mdnsHost = cleanHost;
+                s_mdnsRetryMs = 0;
+                Serial.printf("[mDNS] http://%s.local/\n", cleanHost);
+            } else {
+                s_mdnsStarted = false;
+                s_mdnsRetryMs = millis();
+            }
+        }
     }
 }

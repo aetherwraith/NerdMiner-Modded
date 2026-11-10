@@ -11,13 +11,14 @@
 // Handles load and store of user settings, except wifi credentials. Those are managed by the wifimanager.
 class nvMemory
 {
-public: 
+public:
     nvMemory();
     ~nvMemory();
     bool saveConfig(TSettings* Settings);
     bool loadConfig(TSettings* Settings);
     bool deleteConfig();
     static bool parseJsonConfig(const JsonDocument& json, TSettings* Settings);
+    static void fillConfigJson(JsonDocument& doc, const TSettings& s, bool spiffsKeys = false, bool maskSecrets = false);
 private:
     bool init();
     bool Initialized_;
