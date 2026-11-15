@@ -25,7 +25,7 @@ DEFAULT_BIN = os.path.join(BUILD_DIR, "firmware.bin")
 
 DEFAULT_FLEET_IPS = [
     "192.168.4.32",   # nm1
-    "192.168.4.108",  # nm2
+    "192.168.4.67",   # nm2
     "192.168.4.114",  # nm3
     "192.168.4.107",  # nm4
     "192.168.4.113",  # nm5
@@ -161,18 +161,20 @@ def fleet_status(hosts, auth=None):
     best_host = "-"
     online = 0
 
-    header = f"{'HOST':<8} {'IP':<15} {'VER':<9} {'RATE':>10} {'SHARES':>8} {'SESS BEST':>10} {'ALL BEST':>10} {'PING':>7} {'RSSI':>7} {'UPTIME':>9}"
+    header = f"{'HOST':<8} {'IP':<15} {'VER':<9} {'RATE':>10} {'SHARES':>7} {'REJ':>4} {'RC':>4} {'SESS BEST':>10} {'ALL BEST':>10} {'PING':>7} {'RSSI':>7} {'UPTIME':>9}"
     print(header)
     print("-" * len(header))
     for h, st, err in rows:
         if not st:
-            print(f"{'OFFLINE':<8} {h:<15} {'-':<9} {'-':>10} {'-':>8} {'-':>10} {'-':>10} {'-':>7} {'-':>7} {err}")
+            print(f"{'OFFLINE':<8} {h:<15} {'-':<9} {'-':>10} {'-':>7} {'-':>4} {'-':>4} {'-':>10} {'-':>10} {'-':>7} {'-':>7} {err}")
             continue
         online += 1
         name = st.get("hostname") or "-"
         ver = st.get("version") or "-"
         kh = float(st.get("hashrate_khs") or 0.0)
         sh = int(st.get("shares_accepted") or st.get("shares_32bit") or 0)
+        rej = int(st.get("shares_rejected") or 0)
+        rc = int(st.get("stratum_reconnects") or 0)
         sbest = float(st.get("session_best_difficulty") or st.get("best_diff") or st.get("best_difficulty") or 0.0)
         abest = float(st.get("best_diff") or st.get("best_difficulty") or 0.0)
         pool = st.get("pool") or {}
@@ -190,7 +192,7 @@ def fleet_status(hosts, auth=None):
             best_host = name
 
         print(
-            f"{name:<8} {h:<15} {ver:<9} {kh:>7.1f}KH/s {sh:>8} "
+            f"{name:<8} {h:<15} {ver:<9} {kh:>7.1f}KH/s {sh:>7} {rej:>4} {rc:>4} "
             f"{fmt_si(sbest):>10} {fmt_si(abest):>10} {ping_s:>7} {rssi_s:>7} {up:>9}"
         )
 
@@ -416,8 +418,9 @@ def main():
     parser.add_argument("--ips", help="Comma-separated list of miner IPs/hostnames (default: nm1-nm9 fleet)")
     parser.add_argument("--discover", nargs="?", const="192.168.4.", help="Scan /24 subnet prefix (e.g. 192.168.4.)")
     parser.add_argument("--status", action="store_true", help="Show live LAN fleet status table")
-    parser.add_argument("--ota", nargs="?", const=DEFAULT_BIN, help="Push firmware .bin over LAN OTA to target fleet")
-    parser.add_argument("--rolling", action="store_true", help="Sequential 1-by-1 OTA with /probe health gate (aborts on first failure)")
+    parser.add_argument("--ota", nargs="?", const=DEFAULT_BIN, help="Push firmware .bin over LAN OTA to target fleet (rolling 1-by-1 by default)")
+    parser.add_argument("--rolling", action="store_true", help="Sequential 1-by-1 OTA with /probe health gate (default for --ota)")
+    parser.add_argument("--fast-ota", action="store_true", help="Parallel OTA uploads without 1-by-1 /probe gate")
     parser.add_argument("--concurrency", type=int, default=3, help="Parallel LAN OTA uploads (default: 3)")
     parser.add_argument("--broadcast-json", help="JSON object string to POST to /api/config on all target miners")
     parser.add_argument("--identify", action="store_true", help="Trigger 10s LED + screen locator on target miners")
@@ -441,7 +444,8 @@ def main():
         if args.broadcast_json:
             fleet_broadcast(hosts, json.loads(args.broadcast_json), auth=args.auth)
         if args.ota:
-            if not fleet_ota(hosts, args.ota, concurrency=args.concurrency, auth=args.auth, rolling=args.rolling):
+            use_rolling = not args.fast_ota or args.rolling
+            if not fleet_ota(hosts, args.ota, concurrency=args.concurrency, auth=args.auth, rolling=use_rolling):
                 sys.exit(1)
         if args.status or (args.discover and not (args.ota or args.broadcast_json or args.identify)):
             fleet_status(hosts, auth=args.auth)

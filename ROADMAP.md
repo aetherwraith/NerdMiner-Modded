@@ -53,3 +53,7 @@ This document tracks major architectural enhancements, optimizations, and featur
 | **v1.10.x** | Released | Upstream v1.6.2 sync: Pulse CYD/T-Display/M5Stick UI, live `/` web monitor, MQTT HA discovery, Xtensa ASM SW miner, ckpool stats |
 | **v1.11.0** | Released | Fleet Dashboard & Broadcast, `POST /api/identify`, mDNS, two-way MQTT & UDP share celebration, `session_best_diff` / `ping_ms` / `luck_pct` / notable shares, OTA SHA lock fix, and >120 KB Flash + >20 KB IRAM + >15 KB DRAM reclaimed |
 | **v1.12.0** | Released | `TempLimit` thermal throttling & auto-dim, shared `pulseUi` with FNV-1a `uint32_t` widget cache keys across all 4 Pulse drivers, `/probe`-first Fleet polling, Temp/Pool badges, Solo Block-Odds, Wave Identify, Screens On/Off, and Fleet JSON Backup/Restore |
+
+## 🔭 Next / Backlog
+- Multi-board rolling OTA profiles (targeting mixed fleets such as `ESP32-2432S028R`, `ES3C35P`, and `TTGO-T-Display` by board/chip type).
+- Pool latency & stale/rejected share trend graphing in the web dashboard.

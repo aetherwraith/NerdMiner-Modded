@@ -1,6 +1,20 @@
+import os
 import subprocess
+import sys
 
 Import("env")
+
+
+def run_mutex_lock_check():
+    script = os.path.join(env.subst("$PROJECT_DIR"), "tools", "check_mutex_locks.py")
+    if os.path.isfile(script):
+        ret = subprocess.run([sys.executable, script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if ret.returncode != 0:
+            print(ret.stdout)
+            env.Exit(1)
+
+
+run_mutex_lock_check()
 
 
 def get_firmware_specifier_build_flag():
