@@ -984,7 +984,8 @@ void runStratumWorker(void *name) {
       {
         std::lock_guard<std::mutex> lock(g_settingsMutex);
         strlcpy(mWorker.wName, Settings.BtcWallet, sizeof(mWorker.wName));
-        strlcpy(mWorker.wPass, activePoolPassword().c_str(), sizeof(mWorker.wPass));
+        const String &pw = s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolPassword : Settings.PoolPassword;
+        strlcpy(mWorker.wPass, pw.c_str(), sizeof(mWorker.wPass));
       }
       // STEP 2: Pool authorize work
       s_authorized = -1;
