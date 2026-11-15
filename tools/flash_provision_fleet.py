@@ -232,12 +232,54 @@ def upload_ota_one(host, bin_bytes, filename="firmware.bin", auth=None, timeout=
         conn.close()
 
 
-def fleet_ota(hosts, bin_path, concurrency=3, auth=None):
+def _verify_probe_after_ota(host, auth=None, wait_s=35.0):
+    """Poll /probe until the rebooted miner responds and reports positive hashrate."""
+    deadline = time.time() + wait_s
+    last_probe = None
+    while time.time() < deadline:
+        try:
+            p = http_json(host, "/probe", timeout=2.5, auth=auth)
+            last_probe = p
+            if isinstance(p, dict) and p.get("nerdminer") is True and (p.get("hr", 0) > 0 or p.get("ut", 0) >= 8):
+                return p
+        except Exception:
+            pass
+        time.sleep(2.0)
+    return last_probe
+
+
+def fleet_ota(hosts, bin_path, concurrency=3, auth=None, rolling=False):
     if not os.path.isfile(bin_path):
         print(f"Firmware binary not found: {bin_path}")
         return False
     with open(bin_path, "rb") as f:
         bin_bytes = f.read()
+
+    if rolling:
+        print(f"Loaded {bin_path} ({len(bin_bytes):,} bytes). Rolling OTA across {len(hosts)} device(s) (1-by-1 with /probe gate)...")
+        for idx, h in enumerate(hosts, start=1):
+            print(f"[{idx}/{len(hosts)}] {h}: uploading...")
+            t0 = time.time()
+            try:
+                code, text = upload_ota_one(h, bin_bytes, os.path.basename(bin_path), auth=auth)
+            except Exception as exc:
+                print(f"  [ABORT] {h:<15} upload error: {exc}")
+                return False
+            if not (200 <= code < 300):
+                print(f"  [ABORT] {h:<15} HTTP {code}: {text[:120]}")
+                return False
+            print(f"  [OK]    {h:<15} HTTP {code} in {time.time() - t0:.1f}s; waiting for reboot & /probe...")
+            time.sleep(6.0)
+            p = _verify_probe_after_ota(h, auth=auth, wait_s=35.0)
+            if not p or p.get("nerdminer") is not True:
+                print(f"  [ABORT] {h:<15} failed /probe verification after OTA; stopping rollout!")
+                return False
+            hname = p.get("host") or p.get("hostname") or "?"
+            ver = p.get("ver") or p.get("version") or "?"
+            hr_khs = (p.get("hr", 0) or 0) / 1000.0
+            print(f"  [BOOT]  {h:<15} -> {hname} running {ver} ({hr_khs:.1f} KH/s)")
+        return True
+
     print(f"Loaded {bin_path} ({len(bin_bytes):,} bytes). Flashing {len(hosts)} device(s) (concurrency={concurrency})...")
 
     ok_hosts = []
@@ -375,6 +417,7 @@ def main():
     parser.add_argument("--discover", nargs="?", const="192.168.4.", help="Scan /24 subnet prefix (e.g. 192.168.4.)")
     parser.add_argument("--status", action="store_true", help="Show live LAN fleet status table")
     parser.add_argument("--ota", nargs="?", const=DEFAULT_BIN, help="Push firmware .bin over LAN OTA to target fleet")
+    parser.add_argument("--rolling", action="store_true", help="Sequential 1-by-1 OTA with /probe health gate (aborts on first failure)")
     parser.add_argument("--concurrency", type=int, default=3, help="Parallel LAN OTA uploads (default: 3)")
     parser.add_argument("--broadcast-json", help="JSON object string to POST to /api/config on all target miners")
     parser.add_argument("--identify", action="store_true", help="Trigger 10s LED + screen locator on target miners")
@@ -398,7 +441,7 @@ def main():
         if args.broadcast_json:
             fleet_broadcast(hosts, json.loads(args.broadcast_json), auth=args.auth)
         if args.ota:
-            if not fleet_ota(hosts, args.ota, concurrency=args.concurrency, auth=args.auth):
+            if not fleet_ota(hosts, args.ota, concurrency=args.concurrency, auth=args.auth, rolling=args.rolling):
                 sys.exit(1)
         if args.status or (args.discover and not (args.ota or args.broadcast_json or args.identify)):
             fleet_status(hosts, auth=args.auth)

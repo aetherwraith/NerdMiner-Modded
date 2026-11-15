@@ -1238,6 +1238,7 @@ static void handleProbe()
 
   double khs = getHashrateKhs();
   uint32_t hr_hs = (uint32_t)(khs * 1000.0);
+  const MinerStatus st = getMinerStatus();
   String host;
   {
     std::lock_guard<std::mutex> lock(g_settingsMutex);
@@ -1245,12 +1246,15 @@ static void handleProbe()
   }
 
   String json;
-  json.reserve(192);
+  json.reserve(224);
   json += "{\"hr\":" + String(hr_hs);
   json += ",\"ut\":" + String((unsigned long)getUpTime());
   json += ",\"ebd\":\"" + String(best_diff_str) + "\"";
   json += ",\"sbd\":\"" + String(sess_diff_str) + "\"";
   json += ",\"temp\":" + String(temperatureRead(), 1);
+  json += ",\"acc\":" + String(st.accepted);
+  json += ",\"rej\":" + String(st.rejected);
+  json += ",\"rc\":" + String(getStratumReconnects());
   json += ",\"nerdminer\":true";
   json += ",\"host\":\"" + jsonEscape(host) + "\"";
   json += ",\"ver\":\"" + String(CURRENT_VERSION) + "\"";
@@ -1301,6 +1305,7 @@ static void handleStatus()
   json += ",\"network_difficulty\":" + String(getNetworkDifficulty(), 2);
   const uint32_t discMs = getPoolDisconnectedSinceMs();
   json += ",\"pool_disconnected_s\":" + String(discMs ? (unsigned long)((millis() - discMs) / 1000UL) : 0UL);
+  json += ",\"stratum_reconnects\":" + String(getStratumReconnects());
   json += ",\"thermal_throttled\":" + String(getThermalThrottled() ? "true" : "false");
   json += ",\"frequency\":" + String(getCpuFrequencyMhz());
   json += ",\"macAddr\":\"" + WiFi.macAddress() + "\"";
@@ -1377,6 +1382,7 @@ void fillMinerStatusJson(JsonDocument &doc)
   doc["blocks_found"] = valids;
   doc["shares_accepted"] = st.accepted; // since boot
   doc["shares_rejected"] = st.rejected;
+  doc["stratum_reconnects"] = getStratumReconnects();
   doc["identifying"] = isIdentifying();
 
   JsonObject pool = doc.createNestedObject("pool");

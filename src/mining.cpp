@@ -320,6 +320,21 @@ const char* getResetReasonStr(void)
   }
 }
 
+static String activePoolAddressLocked(void)
+{
+  return s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolAddress : Settings.PoolAddress;
+}
+
+static int activePoolPortLocked(void)
+{
+  return s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolPort : Settings.PoolPort;
+}
+
+static String activePoolPasswordLocked(void)
+{
+  return String(s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolPassword : Settings.PoolPassword);
+}
+
 static bool backupPoolSet(void)
 {
   std::lock_guard<std::mutex> lock(g_settingsMutex);
@@ -334,19 +349,19 @@ bool onBackupPool(void)
 String activePoolAddress(void)
 {
   std::lock_guard<std::mutex> lock(g_settingsMutex);
-  return s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolAddress : Settings.PoolAddress;
+  return activePoolAddressLocked();
 }
 
 int activePoolPort(void)
 {
   std::lock_guard<std::mutex> lock(g_settingsMutex);
-  return s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolPort : Settings.PoolPort;
+  return activePoolPortLocked();
 }
 
 static String activePoolPassword(void)
 {
   std::lock_guard<std::mutex> lock(g_settingsMutex);
-  return String(s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolPassword : Settings.PoolPassword);
+  return activePoolPasswordLocked();
 }
 
 // While on the backup: does the main pool take a connection again?
@@ -631,6 +646,14 @@ int saveIntervals[7] = {5 * 60, 15 * 60, 30 * 60, 1 * 3600, 3 * 3600, 6 * 3600, 
 int saveIntervalsSize = sizeof(saveIntervals)/sizeof(saveIntervals[0]);
 int currentIntervalIndex = 0;
 
+static std::atomic<uint32_t> s_stratumConnectCount{0};
+
+uint32_t getStratumReconnects(void)
+{
+  const uint32_t c = s_stratumConnectCount.load(std::memory_order_relaxed);
+  return c > 1 ? (c - 1) : 0;
+}
+
 bool checkPoolConnection(void) {
   if (client.connected()) {
     s_stratumConnected = true;
@@ -669,6 +692,7 @@ bool checkPoolConnection(void) {
 
   s_stratumConnected = true;
   s_poolDisconnectedSinceMs.store(0, std::memory_order_relaxed);
+  s_stratumConnectCount.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
 
@@ -984,8 +1008,7 @@ void runStratumWorker(void *name) {
       {
         std::lock_guard<std::mutex> lock(g_settingsMutex);
         strlcpy(mWorker.wName, Settings.BtcWallet, sizeof(mWorker.wName));
-        const String &pw = s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolPassword : Settings.PoolPassword;
-        strlcpy(mWorker.wPass, pw.c_str(), sizeof(mWorker.wPass));
+        strlcpy(mWorker.wPass, activePoolPasswordLocked().c_str(), sizeof(mWorker.wPass));
       }
       // STEP 2: Pool authorize work
       s_authorized = -1;

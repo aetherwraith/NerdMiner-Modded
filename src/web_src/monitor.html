@@ -769,9 +769,16 @@ function renderPeerRow(p,crownPeer){
   tr.cells[3].textContent=on?(hh[0]+' '+hh[1]):'Offline';
 
   // Cell 4: Shares
-  var s32=j.shares_32bit||0,acc=j.shares_accepted||0;
+  var s32=j.shares_32bit||0,acc=j.shares_accepted||0,rej=j.shares_rejected||0;
   tr.cells[4].dataset.value=String(on?(s32*1e6+acc):-1);
-  tr.cells[4].textContent=on?(nf.format(s32)+' 32b · '+nf.format(acc)+' acc'):'–';
+  var c4=tr.cells[4];c4.textContent='';
+  if(on){
+    c4.appendChild(document.createTextNode(nf.format(s32)+' 32b · '+nf.format(acc)+' acc'));
+    if(rej>0){
+      var rj=document.createElement('span');rj.className='tag warn';rj.style.marginLeft='5px';rj.textContent=nf.format(rej)+' rej';
+      c4.appendChild(rj);
+    }
+  }else c4.textContent='–';
 
   // Cell 5: Session / All-Time Best
   var bd=j.best_diff||0,sbd=j.session_best_difficulty!=null?j.session_best_difficulty:bd;
@@ -790,6 +797,12 @@ function renderPeerRow(p,crownPeer){
       pb.style.marginLeft='6px';
       pb.textContent=(pDisc>=120?'Stuck ':'Disc ')+dur(pDisc);
       c6.appendChild(pb);
+    }else if((j.stratum_reconnects||0)>0){
+      var rb=document.createElement('span');
+      rb.className='tag warn';
+      rb.style.marginLeft='6px';
+      rb.textContent='rc '+j.stratum_reconnects;
+      c6.appendChild(rb);
     }
   }else c6.textContent='–';
 

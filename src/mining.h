@@ -148,6 +148,7 @@ double getSessionBestDiff();
 void saveStat();   // write the stats to NVS now (before a planned restart / power off)
 const char* getResetReasonStr();
 uint32_t getPoolDisconnectedSinceMs();
+uint32_t getStratumReconnects();
 bool getThermalThrottled();
 
 extern volatile uint32_t shares;
