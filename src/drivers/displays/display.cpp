@@ -160,6 +160,7 @@ bool isCelebrating(void)
 
 #ifdef HAS_BACKLIGHT_CONTROL
 #include "../storage/storage.h"
+#include "../../mining.h"
 #include "../../monitor.h"
 #include "../../sunTimes.h"
 extern TSettings Settings;
@@ -179,11 +180,20 @@ static bool nightDimLocationSet()
 static int targetBacklightLevel(bool sync)
 {
   const int day = Settings.Brightness;
+  int level = day;
   time_t utc;
-  if (!Settings.nightDim || !nightDimLocationSet() || !getUtcTime(utc, sync))
-    return day;
-  const float night = sunNightFraction(utc, Settings.Latitude, Settings.Longitude, Settings.NightFade, NULL, NULL);
-  return (int)(day + (Settings.NightBrightness - day) * night + 0.5f);
+  if (Settings.nightDim && nightDimLocationSet() && getUtcTime(utc, sync))
+  {
+    const float night = sunNightFraction(utc, Settings.Latitude, Settings.Longitude, Settings.NightFade, NULL, NULL);
+    level = (int)(day + (Settings.NightBrightness - day) * night + 0.5f);
+  }
+  if (getThermalThrottled())
+  {
+    const int thermalCap = Settings.NightBrightness > 0 ? min(day, Settings.NightBrightness) : min(day, 40);
+    if (level > thermalCap)
+      level = thermalCap;
+  }
+  return level;
 }
 
 int backlightLevel()
@@ -204,6 +214,18 @@ bool wakeScreen()
   if (ledcRead(0) > 0)
     return false;
   int duty = backlightLevel();
+  if (getThermalThrottled())
+  {
+    const int thermalCap = Settings.NightBrightness > 0 ? min(Settings.Brightness, Settings.NightBrightness) : min(Settings.Brightness, 40);
+    if (duty > thermalCap || duty <= 0)
+      duty = thermalCap;
+  }
+  else if (Settings.autoBrightness)
+  {
+    // Let the display driver's LDR auto-brightness adjust from a safe lit level
+    if (duty <= 0)
+      duty = 128;
+  }
   if (duty <= 0)
     duty = 250;
   ledcWrite(0, duty);
@@ -232,12 +254,13 @@ void backlightTick()
   // dimming. A screen that has been switched off stays off; one that is
   // only dark because the level was 0 follows the new level.
   // When LDR auto-brightness is active, the display driver manages duty cycle.
+  const bool throttled = getThermalThrottled();
   const int level = targetBacklightLevel(true);
   if (level != s_backlightLevel)
   {
     const bool lit = ledcRead(0) > 0 || s_backlightLevel == 0;
     s_backlightLevel = level;
-    if (lit && !Settings.autoBrightness)
+    if (lit && (!Settings.autoBrightness || throttled))
       ledcWrite(0, level);
   }
 
@@ -259,7 +282,7 @@ String nightDimStatus()
   if (!nightDimLocationSet())
     return F("Pick a city or enter your latitude and longitude to use night dimming.");
   time_t utc;
-  if (!getUtcTime(utc))
+  if (!getUtcTime(utc, false))
     return F("Waiting for the clock to be set from the network.");
   int sunrise, sunset;
   const float night = sunNightFraction(utc, Settings.Latitude, Settings.Longitude, Settings.NightFade, &sunrise, &sunset);

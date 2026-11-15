@@ -67,6 +67,8 @@ canvas{width:100%;height:100%;display:block}
 .tag{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 6px;border-radius:999px;letter-spacing:.3px;border:1px solid var(--line);color:var(--mut)}
 .tag.b32{color:var(--ok);border-color:var(--ok)}
 .tag.blk{color:#000;background:var(--acc);border-color:var(--acc)}
+.tag.warn{color:var(--warn);border-color:var(--warn)}
+.tag.bad{color:var(--bad);border-color:var(--bad)}
 
 /* Fleet Toolbar, Responsive & Sortable Table */
 .flt-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
@@ -114,8 +116,9 @@ canvas{width:100%;height:100%;display:block}
   .flt-tbl td:nth-child(6)::before{content:var(--l5,"Best") ": "}
   .flt-tbl td:nth-child(7)::before{content:var(--l6,"Pool / Ping") ": "}
   .flt-tbl td:nth-child(8)::before{content:var(--l7,"RSSI") ": "}
-  .flt-tbl td:nth-child(9)::before{content:var(--l8,"Uptime") ": "}
-  .flt-tbl td:nth-child(10)::before{content:var(--l9,"Actions") ": "}
+  .flt-tbl td:nth-child(9)::before{content:var(--l8,"Temp") ": "}
+  .flt-tbl td:nth-child(10)::before{content:var(--l9,"Uptime") ": "}
+  .flt-tbl td:nth-child(11)::before{content:var(--l10,"Actions") ": "}
 }
 
 /* Native Modal Dialogs (web_guides.md) */
@@ -176,8 +179,8 @@ body.stale #pan-mon .card{opacity:.5;transition:opacity .3s}
 
     <div class="grid">
       <div class="card"><div class="lbl" data-i="s32">32-bit shares</div><div class="val ok" id="s32">&ndash;</div><div class="sub"><span class="ok" data-i="accepted">accepted</span> &middot; <span class="bad" id="s32r">&ndash;</span></div></div>
-      <div class="card"><div class="lbl" data-i="best">Best difficulty</div><div class="val" id="bd">&ndash;</div><div class="sub"><span data-i="alltime">all time</span> &middot; <span data-i="session">session</span>: <b id="sbd">&ndash;</b> &middot; <span data-i="luck">luck</span> <b id="luck">&ndash;</b></div></div>
-      <div class="card"><div class="lbl" data-i="blocks">Blocks found</div><div class="val" id="blk">&ndash;</div><div class="sub">&#127920; <span data-i="oneday">maybe one day</span></div></div>
+      <div class="card"><div class="lbl" data-i="best">Best difficulty</div><div class="val" id="bd">&ndash;</div><div class="sub"><span data-i="alltime">all time</span> &middot; <span data-i="session">session</span>: <b id="sbd">&ndash;</b> &middot; <span data-i="luck">luck</span> <b id="luck">&ndash;</b></div><div class="sub" id="ndiff"></div></div>
+      <div class="card"><div class="lbl" data-i="blocks">Blocks found</div><div class="val" id="blk">&ndash;</div><div class="sub">&#127920; <span data-i="oneday">maybe one day</span></div><div class="sub" id="odds"></div></div>
       <div class="card"><div class="lbl" data-i="pshares">Pool shares (low diff)</div><div class="val" id="acc">&ndash;</div><div class="sub"><span data-i="accepted">accepted</span> &middot; <span id="rej">&ndash;</span></div></div>
       <div class="card"><div class="lbl" data-i="mtime">Mining time</div><div class="val" id="mt">&ndash;</div><div class="sub"><span data-i="templates">templates</span>: <span id="tpl">&ndash;</span></div></div>
     </div>
@@ -205,7 +208,7 @@ body.stale #pan-mon .card{opacity:.5;transition:opacity .3s}
   <div>
     <div class="grid">
       <div class="card"><div class="lbl">Combined Hashrate</div><div class="val acc" id="f-hr">&ndash;</div><div class="sub" id="f-avg">avg &ndash;</div></div>
-      <div class="card"><div class="lbl">Miners Online</div><div class="val ok" id="f-on">0 / 0</div><div class="sub" id="f-sub">Polling every 3s</div></div>
+      <div class="card"><div class="lbl">Miners Online</div><div class="val ok" id="f-on">0 / 0</div><div class="sub" id="f-sub">Probe 3s &middot; Status 15s</div></div>
       <div class="card"><div class="lbl">Total Fleet Shares</div><div class="val" id="f-sh">0</div><div class="sub" id="f-shs">0 accepted &middot; 0 blocks</div></div>
       <div class="card"><div class="lbl">Fleet Crown Best</div><div class="val" id="f-bd">&ndash;</div><div class="sub" id="f-crown">&#128081; &ndash;</div></div>
     </div>
@@ -214,7 +217,13 @@ body.stale #pan-mon .card{opacity:.5;transition:opacity .3s}
       <input type="text" id="peer-in" class="flt-in" placeholder="Add IP, host, or range (e.g. 192.168.1.51-59, nm2.local)" aria-label="Add miner IP or hostname">
       <button type="button" class="btn" id="btn-add">+ Add Peer</button>
       <button type="button" class="btn" id="btn-scan">&#128269; Auto-Scan /24</button>
+      <button type="button" class="btn" id="btn-wave" title="Staggered 300ms locate wave">&#127754; Wave Identify</button>
+      <button type="button" class="btn" id="btn-scr-on" title="Turn all fleet screens on">&#128161; Screens On</button>
+      <button type="button" class="btn" id="btn-scr-off" title="Turn all fleet screens off">&#127769; Screens Off</button>
       <span class="sp"></span>
+      <button type="button" class="btn" id="btn-fexp">&#128190; Export JSON</button>
+      <button type="button" class="btn" id="btn-fimp">&#128229; Restore JSON</button>
+      <input type="file" id="fimp-file" accept=".json,application/json" hidden>
       <button type="button" class="btn" id="btn-bcast" command="show-modal" commandfor="dlg-bcast">&#128225; Broadcast Settings</button>
       <button type="button" class="btn pri" id="btn-fota" command="show-modal" commandfor="dlg-ota">&#9889; Rolling Fleet OTA</button>
     </div>
@@ -222,7 +231,7 @@ body.stale #pan-mon .card{opacity:.5;transition:opacity .3s}
     <div id="flt-sort-st" role="status" class="sr-only"></div>
 
     <div tabindex="0" role="region" aria-labelledby="flt-cap" class="table-wrapper">
-      <table class="flt-tbl" id="flt-tbl" style="--l1:'IP';--l2:'Version';--l3:'Hashrate';--l4:'Shares';--l5:'Best (Sess/All)';--l6:'Pool &amp; Ping';--l7:'RSSI';--l8:'Uptime';--l9:'Actions'">
+      <table class="flt-tbl" id="flt-tbl" style="--l1:'IP';--l2:'Version';--l3:'Hashrate';--l4:'Shares';--l5:'Best (Sess/All)';--l6:'Pool &amp; Ping';--l7:'RSSI';--l8:'Temp';--l9:'Uptime';--l10:'Actions'">
         <caption id="flt-cap">NerdMiner LAN Fleet Overview</caption>
         <thead>
           <tr>
@@ -234,7 +243,8 @@ body.stale #pan-mon .card{opacity:.5;transition:opacity .3s}
             <th scope="col" data-type="number"><button type="button" data-col="5">Session / All-Time <span class="sico" aria-hidden="true"></span></button></th>
             <th scope="col" data-type="number"><button type="button" data-col="6">Pool &amp; Ping <span class="sico" aria-hidden="true"></span></button></th>
             <th scope="col" data-type="number"><button type="button" data-col="7">RSSI <span class="sico" aria-hidden="true"></span></button></th>
-            <th scope="col" data-type="number"><button type="button" data-col="8">Uptime <span class="sico" aria-hidden="true"></span></button></th>
+            <th scope="col" data-type="number"><button type="button" data-col="8">Temp <span class="sico" aria-hidden="true"></span></button></th>
+            <th scope="col" data-type="number"><button type="button" data-col="9">Uptime <span class="sico" aria-hidden="true"></span></button></th>
             <th scope="col">Actions</th>
           </tr>
         </thead>
@@ -445,7 +455,19 @@ function update(j){
   set('bd',diff(j.best_diff));
   set('sbd',diff(j.session_best_difficulty!=null?j.session_best_difficulty:j.best_diff));
   set('luck',j.luck_pct>0?j.luck_pct.toFixed(1)+'%':'–');
+  var netDiff=j.network_difficulty||0;
+  if(netDiff>0&&j.best_diff>0){
+    var pct=(j.best_diff/netDiff)*100;
+    set('ndiff',(pct>=0.01?pct.toFixed(2):pct.toExponential(2))+'% of net diff');
+  }else set('ndiff','');
   set('blk',nf.format(j.blocks_found||0));
+  if(netDiff>0&&(j.hashrate_khs||0)>0){
+    var hPerDay=(j.hashrate_khs*1000)*86400;
+    var expHashes=netDiff*4294967296;
+    var days=expHashes/hPerDay;
+    var yrs=days/365.25;
+    set('odds','1 in '+(yrs>=1000?diff(yrs)+' yr':yrs>=2?yrs.toFixed(1)+' yr':diff(days)+' d')+' / day');
+  }else set('odds','');
   set('acc',nf.format(j.shares_accepted||0));set('rej',nf.format(j.shares_rejected||0)+' '+t('rejected'));
   set('mt',dur(j.mining_time_s));set('tpl',nf.format(j.templates||0));
   var b=j.btc||{};set('px',b.price?(b.prefix||'')+nf.format(b.price):'–');set('bh',b.block_height?nf.format(b.block_height):'–');
@@ -494,9 +516,16 @@ function getJSON(url,ms){
     .then(function(r){clearTimeout(tm);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()},
           function(e){clearTimeout(tm);throw e})}
 
+function encodeBasicAuth(pw){
+  var bytes=new TextEncoder().encode('admin:'+pw);
+  var bin='';
+  for(var i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);
+  return 'Basic '+btoa(bin);
+}
+
 function authHeaders(pw){
   var h={'Content-Type':'application/json'};
-  if(pw)h['Authorization']='Basic '+btoa('admin:'+pw);
+  if(pw)h['Authorization']=encodeBasicAuth(pw);
   return h;
 }
 
@@ -671,8 +700,8 @@ function ensureRow(p){
   var tr=document.createElement('tr');
   tr.dataset.peer=p;
   var th=document.createElement('th');th.scope='row';tr.appendChild(th);
-  for(var i=0;i<9;i++)tr.appendChild(document.createElement('td'));
-  var actTd=tr.cells[9];
+  for(var i=0;i<10;i++)tr.appendChild(document.createElement('td'));
+  var actTd=tr.cells[10];
   var grp=document.createElement('div');grp.className='act-grp';
 
   var bLoc=document.createElement('button');bLoc.type='button';bLoc.className='ibtn';bLoc.title='Locate miner (10s)';bLoc.textContent='🎯';
@@ -749,23 +778,44 @@ function renderPeerRow(p,crownPeer){
   tr.cells[5].dataset.value=String(on?bd:-1);
   tr.cells[5].textContent=on?(diff(sbd)+' / '+diff(bd)):'–';
 
-  // Cell 6: Pool & Ping
+  // Cell 6: Pool & Ping + Disconnected/Stuck badge
   var po=j.pool||{},ping=(po.ping_ms!=null&&po.ping_ms>=0)?po.ping_ms:999999;
-  tr.cells[6].dataset.value=String(on?ping:9999999);
-  tr.cells[6].textContent=on?((po.address||'–')+(po.ping_ms!=null&&po.ping_ms>=0?' ('+po.ping_ms+' ms)':'')):'–';
+  var pDisc=j.pool_disconnected_s||0;
+  var c6=tr.cells[6];c6.dataset.value=String(on?ping:9999999);c6.textContent='';
+  if(on){
+    c6.appendChild(document.createTextNode((po.address||'–')+(po.ping_ms!=null&&po.ping_ms>=0?' ('+po.ping_ms+' ms)':'')));
+    if(pDisc>0){
+      var pb=document.createElement('span');
+      pb.className='tag '+(pDisc>=120?'bad':'warn');
+      pb.style.marginLeft='6px';
+      pb.textContent=(pDisc>=120?'Stuck ':'Disc ')+dur(pDisc);
+      c6.appendChild(pb);
+    }
+  }else c6.textContent='–';
 
   // Cell 7: RSSI
   var rssi=(j.wifi&&j.wifi.rssi)||-999;
   tr.cells[7].dataset.value=String(on?rssi:-999);
   tr.cells[7].textContent=(on&&j.wifi&&j.wifi.rssi)?(j.wifi.rssi+' dBm'):'–';
 
-  // Cell 8: Uptime
+  // Cell 8: Temp
+  var tmp=(j.temp!=null&&j.temp>-100)?j.temp:-999;
+  var c8=tr.cells[8];c8.dataset.value=String(on?tmp:-999);c8.textContent='';
+  if(on&&tmp>-100){
+    c8.appendChild(document.createTextNode(tmp.toFixed(1)+'°C'));
+    if(j.thermal_throttled){
+      var tb=document.createElement('span');tb.className='tag bad';tb.style.marginLeft='5px';tb.textContent='HOT';
+      c8.appendChild(tb);
+    }
+  }else c8.textContent='–';
+
+  // Cell 9: Uptime
   var up=j.uptime_s||0;
-  tr.cells[8].dataset.value=String(on?up:-1);
-  tr.cells[8].textContent=on?dur(up):'–';
+  tr.cells[9].dataset.value=String(on?up:-1);
+  tr.cells[9].textContent=on?dur(up):'–';
 
   // Locate highlight
-  var bLoc=tr.cells[9].querySelector('.ibtn');
+  var bLoc=tr.cells[10].querySelector('.ibtn');
   if(bLoc)bLoc.classList.toggle('loc-on',!!(on&&j.identifying));
 }
 
@@ -838,11 +888,21 @@ function updateFleetSummary(){
 function pollFleet(){
   clearTimeout(fleetTimer);
   if(document.hidden||activeTab!=='flt')return;
+  var now=Date.now();
   Promise.all(fleetPeers.map(function(p){
-    return getJSON(peerBaseUrl(p)+'/api/status',2600).then(function(j){
-      peerData[p]={online:true,status:j,lastHost:j.hostname||(peerData[p]&&peerData[p].lastHost)||p};
+    var rec=peerData[p]||{};
+    var needFull=!rec.online||!rec.status||!rec.lastStatusAt||(now-rec.lastStatusAt>=15000);
+    var url=peerBaseUrl(p)+(needFull?'/api/status':'/probe');
+    return getJSON(url,2600).then(function(j){
+      var merged=needFull?j:Object.assign({},rec.status||{},j);
+      peerData[p]={
+        online:true,
+        status:merged,
+        lastHost:merged.hostname||rec.lastHost||p,
+        lastStatusAt:needFull?now:rec.lastStatusAt
+      };
     },function(){
-      peerData[p]={online:false,status:null,lastHost:(peerData[p]&&peerData[p].lastHost)||p};
+      peerData[p]={online:false,status:null,lastHost:rec.lastHost||p,lastStatusAt:0};
     });
   })).then(function(){
     updateFleetSummary();
@@ -922,10 +982,13 @@ $('btn-bcast-go').addEventListener('click',async function(){
     payload.ledBrightness=parseInt($('bc-ledbr').value,10)||200;
   }
   if($('bc-disp-en').checked){
-    payload.brightness=parseInt($('bc-br').value,10)||250;
-    payload.screenTimeout=parseInt($('bc-to').value,10)||0;
+    var brVal=parseInt($('bc-br').value,10);
+    payload.brightness=(!isNaN(brVal)&&brVal!==undefined&&brVal!==null)?brVal:250;
+    var toVal=parseInt($('bc-to').value,10);
+    payload.screenTimeout=(!isNaN(toVal)&&toVal!==undefined&&toVal!==null)?toVal:0;
     payload.nightDim=$('bc-nd').value==='1';
-    payload.nightBrightness=parseInt($('bc-nbr').value,10)||40;
+    var nbrVal=parseInt($('bc-nbr').value,10);
+    payload.nightBrightness=(!isNaN(nbrVal)&&nbrVal!==undefined&&nbrVal!==null)?nbrVal:40;
   }
   if($('bc-loc-en').checked){
     if($('bc-tz').value.trim())payload.timezone=$('bc-tz').value.trim();
@@ -985,7 +1048,7 @@ function uploadFirmwareToPeer(peer,file,pw,stEl){
   return new Promise(function(resolve){
     var xhr=new XMLHttpRequest();
     xhr.open('POST',peerBaseUrl(peer)+'/update',true);
-    if(pw)xhr.setRequestHeader('Authorization','Basic '+btoa('admin:'+pw));
+    if(pw)xhr.setRequestHeader('Authorization',encodeBasicAuth(pw));
     xhr.upload.onprogress=function(e){
       if(e.lengthComputable&&stEl)stEl.textContent='Uploading '+Math.round((e.loaded/e.total)*100)+'%';
     };
@@ -1025,6 +1088,92 @@ $('btn-fota-go').addEventListener('click',async function(){
   await Promise.all([worker(),worker()]);
   $('btn-fota-go').disabled=false;
   setTimeout(pollFleet,5000);
+});
+
+$('btn-wave').addEventListener('click',function(){
+  var peers=onlinePeers();
+  if(!peers.length){set('scan-msg','No online miners in fleet.');return}
+  set('scan-msg','Wave Identify triggered across '+peers.length+' miner(s) (300ms stagger)…');
+  peers.forEach(function(p,idx){
+    setTimeout(function(){
+      fetch(peerBaseUrl(p)+'/api/identify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({durationMs:10000})}).catch(function(){});
+    },idx*300);
+  });
+  setTimeout(pollFleet,peers.length*300+250);
+});
+
+function setFleetScreens(mode){
+  var peers=onlinePeers();
+  if(!peers.length){set('scan-msg','No online miners in fleet.');return}
+  set('scan-msg','Turning screens '+mode+' on '+peers.length+' miner(s)…');
+  Promise.all(peers.map(function(p){
+    return fetch(peerBaseUrl(p)+'/api/display',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({screen:mode})})
+      .then(function(r){return r.ok?1:0},function(){return 0});
+  })).then(function(res){
+    var ok=res.reduce(function(a,b){return a+b},0);
+    set('scan-msg','Screens '+mode+': '+ok+' / '+peers.length+' miner(s) updated.');
+  });
+}
+$('btn-scr-on').addEventListener('click',function(){setFleetScreens('on')});
+$('btn-scr-off').addEventListener('click',function(){setFleetScreens('off')});
+
+$('btn-fexp').addEventListener('click',async function(){
+  var peers=onlinePeers();
+  if(!peers.length){set('scan-msg','No online miners to export.');return}
+  set('scan-msg','Exporting fleet configs from '+peers.length+' miner(s)…');
+  var pw=$('bc-auth')?$('bc-auth').value:'';
+  var hdrs=authHeaders(pw);
+  var configs=[];
+  for(var i=0;i<peers.length;i++){
+    var p=peers[i];
+    var host=(peerData[p]&&peerData[p].status&&peerData[p].status.hostname)||p;
+    try{
+      var r=await fetch(peerBaseUrl(p)+'/api/config',{headers:hdrs,cache:'no-store'});
+      if(r.ok){
+        var cfg=await r.json();
+        configs.push({peer:p,hostname:host,config:cfg});
+      }
+    }catch(e){}
+  }
+  if(!configs.length){set('scan-msg','Export failed — check admin password in Broadcast modal if set.');return}
+  var bundle={version:1,exportedAt:new Date().toISOString(),peers:fleetPeers.slice(),configs:configs};
+  var blob=new Blob([JSON.stringify(bundle,null,2)],{type:'application/json'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url;a.download='nerdminer-fleet-backup-'+new Date().toISOString().slice(0,10)+'.json';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  setTimeout(function(){URL.revokeObjectURL(url)},1000);
+  set('scan-msg','Exported '+configs.length+' miner config(s) to JSON backup.');
+});
+
+$('btn-fimp').addEventListener('click',function(){$('fimp-file').value='';$('fimp-file').click()});
+$('fimp-file').addEventListener('change',async function(ev){
+  var f=ev.target.files&&ev.target.files[0];
+  if(!f)return;
+  var bundle;
+  try{bundle=JSON.parse(await f.text())}catch(e){set('scan-msg','Invalid JSON backup file.');return}
+  if(!bundle||!Array.isArray(bundle.configs)||!bundle.configs.length){set('scan-msg','No miner configs found in backup JSON.');return}
+  var pw=$('bc-auth')?$('bc-auth').value:'';
+  var hdrs=authHeaders(pw);
+  var ok=0,skip=0,fail=0;
+  set('scan-msg','Restoring '+bundle.configs.length+' config(s) to matching fleet nodes…');
+  for(var i=0;i<bundle.configs.length;i++){
+    var entry=bundle.configs[i];
+    if(!entry||!entry.config)continue;
+    var target=fleetPeers.indexOf(entry.peer)>=0?entry.peer:null;
+    if(!target&&entry.hostname){
+      target=fleetPeers.find(function(p){
+        return peerData[p]&&peerData[p].status&&peerData[p].status.hostname===entry.hostname;
+      })||null;
+    }
+    if(!target){skip++;continue}
+    try{
+      var r=await fetch(peerBaseUrl(target)+'/api/config',{method:'POST',headers:hdrs,body:JSON.stringify(entry.config)});
+      if(r.ok)ok++;else fail++;
+    }catch(e){fail++}
+  }
+  set('scan-msg','Fleet restore complete: '+ok+' applied, '+fail+' failed, '+skip+' unmatched.');
+  pollFleet();
 });
 
 document.addEventListener('visibilitychange',function(){

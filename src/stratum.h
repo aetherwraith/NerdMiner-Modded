@@ -10,10 +10,7 @@
 #define MAX_MERKLE_BRANCHES 32
 #define MAX_EXTRANONCE2_SIZE 16 // bytes; calculateMiningData writes up to 2x that many hex digits
 #define HASH_SIZE 32
-#define COINBASE_SIZE 100
-#define COINBASE2_SIZE 128
 
-#define BUFFER_JSON_DOC 4096
 #define BUFFER 1024
 // Longest mining.notify accepted (its JSON document is sized from the line):
 // pools with many payout outputs send coinbases of several KB.
@@ -26,6 +23,8 @@ typedef struct {
     int extranonce2_size;
     char wName[80];  // same size as Settings.BtcWallet
     char wPass[80];  // same size as Settings.PoolPassword (20 overflowed with a long password)
+    bool version_rolling_enabled;
+    uint32_t version_rolling_mask;
 } mining_subscribe;
 
 typedef struct {
@@ -62,14 +61,15 @@ bool tx_mining_auth(WiFiClient& client, const char * user, const char * pass, un
 stratum_method parse_mining_method(const String& line, unsigned long *idOut = nullptr, bool *resultOut = nullptr);
 bool parse_mining_notify(const String& line, mining_job& mJob);
 
+// Method Mining.configure (BIP-320 version rolling)
+bool tx_mining_configure(WiFiClient& client, unsigned long &cfg_id);
+bool parse_mining_configure(const String& line, uint32_t& maskOut);
+
 // Method Mining.submit
-bool tx_mining_submit(WiFiClient& client, const mining_subscribe& mWorker, const mining_job& mJob, unsigned long nonce, unsigned long &submit_id);
+bool tx_mining_submit(WiFiClient& client, const mining_subscribe& mWorker, const mining_job& mJob, unsigned long nonce, unsigned long &submit_id, uint32_t versionBits = 0, bool useVersionBits = false);
 
 // Difficulty Methods
 bool tx_suggest_difficulty(WiFiClient& client, double difficulty);
 bool parse_mining_set_difficulty(const String& line, double& difficulty);
-
-unsigned long parse_extract_id(const String &line);
-bool parse_extract_result(const String &line);
 
 #endif // STRATUM_API_H

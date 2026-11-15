@@ -28,7 +28,6 @@ extern double best_diff;
 extern volatile uint32_t shares;
 extern volatile uint32_t valids;
 extern volatile uint32_t rejects;
-extern uint64_t upTime;
 
 // Basic HTTP auth for the LAN settings page. The password starts as the setup
 // AP's (DEFAULT_WIFIPW, "MineYourCoins") and can be changed on the page
@@ -96,8 +95,10 @@ static bool isLanOriginAllowed()
 {
   String origin = webCfgServer.header("Origin");
   origin.trim();
-  if (origin.isEmpty() || origin.equalsIgnoreCase("null"))
+  if (origin.isEmpty())
     return true;
+  if (origin.equalsIgnoreCase("null"))
+    return false;
 
   const String hostHdr = webCfgServer.hostHeader();
   if (hostHdr.length() > 0)
@@ -226,29 +227,109 @@ TSettings currentSettings()
   return s;
 }
 
+struct ChunkedWriter
+{
+  char buf[512];
+  size_t pos = 0;
+
+  void flush()
+  {
+    if (pos > 0)
+    {
+      buf[pos] = '\0';
+      webCfgServer.sendContent(buf);
+      pos = 0;
+    }
+  }
+  void write(const char *s, size_t len)
+  {
+    while (len > 0)
+    {
+      if (pos == sizeof(buf) - 1)
+        flush();
+      size_t space = (sizeof(buf) - 1) - pos;
+      size_t n = (len < space) ? len : space;
+      memcpy(buf + pos, s, n);
+      pos += n;
+      s += n;
+      len -= n;
+    }
+  }
+  void write(const char *s) { if (s) write(s, strlen(s)); }
+  void write(const String &s) { write(s.c_str(), s.length()); }
+  void writeF(const __FlashStringHelper *fs)
+  {
+    const char *p = reinterpret_cast<const char *>(fs);
+    write(p, strlen_P(p));
+  }
+  void writePrintf(const char *fmt, ...)
+  {
+    char tmp[160];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n > 0)
+      write(tmp, (size_t)min(n, (int)sizeof(tmp) - 1));
+  }
+  void writeHtmlEscaped(const char *s)
+  {
+    if (!s) return;
+    for (; *s; ++s)
+    {
+      switch (*s)
+      {
+        case '&': write("&amp;", 5); break;
+        case '"': write("&quot;", 6); break;
+        case '<': write("&lt;", 4); break;
+        case '>': write("&gt;", 4); break;
+        case '\'': write("&#39;", 5); break;
+        default: write(s, 1); break;
+      }
+    }
+  }
+  void writeJsonEscaped(const char *s)
+  {
+    if (!s) return;
+    for (; *s; ++s)
+    {
+      unsigned char c = (unsigned char)*s;
+      if (c == '"') write("\\\"", 2);
+      else if (c == '\\') write("\\\\", 2);
+      else if (c == '\b') write("\\b", 2);
+      else if (c == '\f') write("\\f", 2);
+      else if (c == '\n') write("\\n", 2);
+      else if (c == '\r') write("\\r", 2);
+      else if (c == '\t') write("\\t", 2);
+      else if (c < 0x20)
+      {
+        char esc[7];
+        snprintf(esc, sizeof(esc), "\\u%04x", c);
+        write(esc, 6);
+      }
+      else
+      {
+        write(s, 1);
+      }
+    }
+  }
+  void finish()
+  {
+    flush();
+    webCfgServer.sendContent("");
+  }
+};
+
 static void handleRoot()
 {
   if (!checkAuth())
     return;
 
   const TSettings Settings = currentSettings(); // shadows the global on purpose
-  String page;
-  page.reserve(4096);
-  // Sent in parts (chunked), so the whole page with its city list never has
-  // to sit in one String.
-  bool started = false;
-  auto flush = [&]() {
-    if (!started)
-    {
-      webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-      webCfgServer.send(200, "text/html", page);
-      started = true;
-    }
-    else
-      webCfgServer.sendContent(page);
-    page = "";
-  };
-  page += F("<!DOCTYPE html><html><head><meta charset='utf-8'>"
+  webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webCfgServer.send(200, "text/html", "");
+  ChunkedWriter w;
+  w.writeF(F("<!DOCTYPE html><html><head><meta charset='utf-8'>"
              "<meta name='viewport' content='width=device-width, initial-scale=1'>"
              "<title>NerdMiner Settings</title>"
              "<style>body{font-family:sans-serif;max-width:480px;margin:2em auto;padding:0 1em}"
@@ -273,165 +354,285 @@ static void handleRoot()
              "}"
              "});"
              "</script></head><body>"
-             "<h2>NerdMiner Settings</h2>");
+             "<h2>NerdMiner Settings</h2>"));
   if (Settings.WebPassword == DEFAULT_WEBPASSWORD)
-    page += F("<p style='background:#fff3cd;color:#664d03;padding:.6em;border-radius:4px'>"
-              "This page still uses the default password, the same on every NerdMiner: "
-              "set your own at the bottom of the page.</p>");
-  page += F("<form method='POST' action='/save'>");
+    w.writeF(F("<p style='background:#fff3cd;color:#664d03;padding:.6em;border-radius:4px'>"
+               "This page still uses the default password, the same on every NerdMiner: "
+               "set your own at the bottom of the page.</p>"));
+  w.writeF(F("<form method='POST' action='/save'>"));
 
-  page += "<label>Pool URL</label><input type='text' name='pool' value='" + htmlEscape(Settings.PoolAddress) + "'>";
-  page += "<label>Pool Port</label><input type='number' name='port' value='" + String(Settings.PoolPort) + "'>";
-  page += "<label>Pool Password (optional)</label><input type='text' name='poolpass' value='" + htmlEscape(String(Settings.PoolPassword)) + "'>";
-  page += "<label>BTC Address</label><input type='text' name='wallet' value='" + htmlEscape(String(Settings.BtcWallet)) + "'>";
-  page += "<label>Hostname</label><input type='text' name='hostname' maxlength='31' value='" + htmlEscape(String(Settings.Hostname)) + "'>";
-  page += "<label>Backup pool URL (optional)</label><input type='text' name='bpool' value='" + htmlEscape(Settings.BackupPoolAddress) + "'>";
-  page += "<label>Backup pool port</label><input type='number' name='bport' value='" + String(Settings.BackupPoolPort) + "'>";
-  page += "<label>Backup pool password (optional)</label><input type='text' name='bpoolpass' value='" + htmlEscape(String(Settings.BackupPoolPassword)) + "'>";
-  page += "<small>Mined with the same BTC address after " + String(POOL_FAILOVER_TRIES) +
-          " failed attempts in a row on the pool above; back to that pool once it answers again (checked every " +
-          String(POOL_FAILBACK_ms / 60000) + " minutes). Now mining on the " + (onBackupPool() ? "<b>backup</b>" : "main") + " pool.</small>";
-  page += F("<label>Time Zone</label>"
-            "<input type='text' id='tz_search' placeholder='Search time zone (e.g. London, New York)...' oninput='filterTZ()' autocomplete='off'>"
-            "<select name='tz' id='tz_select' size='6' style='margin-top:4px;'>");
+  w.write("<label>Pool URL</label><input type='text' name='pool' value='");
+  w.writeHtmlEscaped(Settings.PoolAddress.c_str());
+  w.write("'><label>Pool Port</label><input type='number' name='port' value='");
+  w.writePrintf("%d", Settings.PoolPort);
+  w.write("'><label>Pool Password (optional)</label><input type='text' name='poolpass' value='");
+  w.writeHtmlEscaped(Settings.PoolPassword);
+  w.write("'><label>BTC Address</label><input type='text' name='wallet' value='");
+  w.writeHtmlEscaped(Settings.BtcWallet);
+  w.write("'><label>Hostname</label><input type='text' name='hostname' maxlength='31' value='");
+  w.writeHtmlEscaped(Settings.Hostname);
+  w.write("'><label>Backup pool URL (optional)</label><input type='text' name='bpool' value='");
+  w.writeHtmlEscaped(Settings.BackupPoolAddress.c_str());
+  w.write("'><label>Backup pool port</label><input type='number' name='bport' value='");
+  w.writePrintf("%d", Settings.BackupPoolPort);
+  w.write("'><label>Backup pool password (optional)</label><input type='text' name='bpoolpass' value='");
+  w.writeHtmlEscaped(Settings.BackupPoolPassword);
+  w.write("'>");
+  w.writePrintf("<small>Mined with the same BTC address after %d failed attempts in a row on the pool above; "
+                "back to that pool once it answers again (checked every %lu minutes). Now mining on the %s pool.</small>",
+                POOL_FAILOVER_TRIES, (unsigned long)(POOL_FAILBACK_ms / 60000),
+                onBackupPool() ? "<b>backup</b>" : "main");
+  w.writeF(F("<label>Time Zone</label>"
+             "<input type='text' id='tz_search' placeholder='Search time zone (e.g. London, New York)...' oninput='filterTZ()' autocomplete='off'>"
+             "<select name='tz' id='tz_select' size='6' style='margin-top:4px;'>"));
 
   bool tzMatched = false;
   for (int i = 0; i < kTimeZoneCount; i++)
   {
     bool sel = !tzMatched && (Settings.Timezone.equalsIgnoreCase(kTimeZones[i].id) || Settings.Timezone.equalsIgnoreCase(kTimeZones[i].posix));
     if (sel) tzMatched = true;
-    page += "<option value='";
-    page += kTimeZones[i].id;
-    page += sel ? "' selected>" : "'>";
-    page += kTimeZones[i].label;
-    page += "</option>";
+    w.write("<option value='");
+    w.write(kTimeZones[i].id);
+    w.write(sel ? "' selected>" : "'>");
+    w.write(kTimeZones[i].label);
+    w.write("</option>");
   }
   if (!tzMatched && Settings.Timezone.length() > 0)
   {
-    page += "<option value='" + htmlEscape(Settings.Timezone) + "' selected>Custom: " + htmlEscape(Settings.Timezone) + "</option>";
+    w.write("<option value='");
+    w.writeHtmlEscaped(Settings.Timezone.c_str());
+    w.write("' selected>Custom: ");
+    w.writeHtmlEscaped(Settings.Timezone.c_str());
+    w.write("</option>");
   }
-  page += "</select>";
-  flush();
-  page += "<label>BTC price currency</label><select name='currency'>";
+  w.write("</select>");
+  w.write("<label>BTC price currency</label><select name='currency'>");
   for (int i = 0; i < kCurrencyCount; i++)
   {
-    page += "<option value='" + String(kCurrencies[i].code) + "'";
+    w.write("<option value='");
+    w.write(kCurrencies[i].code);
+    w.write("'");
     if (Settings.Currency.equalsIgnoreCase(kCurrencies[i].code))
-      page += " selected";
-    page += ">" + String(kCurrencies[i].label) + "</option>";
+      w.write(" selected");
+    w.write(">");
+    w.write(kCurrencies[i].label);
+    w.write("</option>");
   }
-  page += "</select>";
-  page += "<label><input type='checkbox' name='savestats' " + String(Settings.saveStats ? "checked" : "") + "> Save mining statistics to flash</label>";
+  w.write("</select>");
+  w.writePrintf("<label><input type='checkbox' name='savestats' %s> Save mining statistics to flash</label>",
+                Settings.saveStats ? "checked" : "");
 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-  page += "<label><input type='checkbox' name='invert' " + String(Settings.invertColors ? "checked" : "") + "> Invert display colors</label>";
+  w.writePrintf("<label><input type='checkbox' name='invert' %s> Invert display colors</label>",
+                Settings.invertColors ? "checked" : "");
 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-  page += "<label><input type='checkbox' name='flip' " + String(Settings.flipDisplay ? "checked" : "") + "> Flip display (USB on the left)</label>";
-  page += "<label><input type='checkbox' name='autobrightness' " + String(Settings.autoBrightness ? "checked" : "") + "> Auto brightness (LDR light sensor)</label>";
+  w.writePrintf("<label><input type='checkbox' name='flip' %s> Flip display (USB on the left)</label>",
+                Settings.flipDisplay ? "checked" : "");
+  w.writePrintf("<label><input type='checkbox' name='autobrightness' %s> Auto brightness (LDR light sensor)</label>",
+                Settings.autoBrightness ? "checked" : "");
 #else
-  page += "<label><input type='checkbox' name='flip' " + String(Settings.flipDisplay ? "checked" : "") + "> Flip display (rotate 180 degrees)</label>";
+  w.writePrintf("<label><input type='checkbox' name='flip' %s> Flip display (rotate 180 degrees)</label>",
+                Settings.flipDisplay ? "checked" : "");
 #endif
-  page += "<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='" + String(Settings.Brightness) + "'>";
+  w.writePrintf("<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='%d'>",
+                Settings.Brightness);
 #endif
 #ifdef TDISPLAY_PULSE
 #ifdef M5STICK_C_PLUS2
-  page += "<label><input type='checkbox' name='flip' " + String(Settings.flipDisplay ? "checked" : "") + "> Flip display (rotate 180 degrees)</label>";
+  w.writePrintf("<label><input type='checkbox' name='flip' %s> Flip display (rotate 180 degrees)</label>",
+                Settings.flipDisplay ? "checked" : "");
 #else
-  page += "<label><input type='checkbox' name='flip' " + String(Settings.flipDisplay ? "checked" : "") + "> Flip display (USB on the left)</label>";
+  w.writePrintf("<label><input type='checkbox' name='flip' %s> Flip display (USB on the left)</label>",
+                Settings.flipDisplay ? "checked" : "");
 #endif
-  page += "<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='" + String(Settings.Brightness) + "'>";
+  w.writePrintf("<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='%d'>",
+                Settings.Brightness);
 #endif
 #if defined(M5STICK_C_PLUS2) && PLUS2_BACKLIGHT_PWM && !defined(TDISPLAY_PULSE)
-  page += "<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='" + String(Settings.Brightness) + "'>";
+  w.writePrintf("<label>Screen brightness (0-255)</label><input type='number' name='brightness' min='0' max='255' value='%d'>",
+                Settings.Brightness);
 #endif
 #ifdef HAS_BACKLIGHT_CONTROL
-  page += "<label>Screen off after (minutes without a touch or button press, 0 = never)</label><input type='number' name='screenoff' min='0' max='1440' value='" + String(Settings.ScreenTimeout) + "'>";
-  page += "<label><input type='checkbox' name='nightdim' " + String(Settings.nightDim ? "checked" : "") + "> Dim the screen at night</label>";
-  page += "<small>Fades from the brightness above to the night brightness around sunset, and back at sunrise. " + nightDimStatus() + "</small>";
-  page += "<label>Night brightness (1-255)</label><input type='number' name='nightbright' min='1' max='255' value='" + String(Settings.NightBrightness) + "'>";
-  page += "<label>Fade length (minutes)</label><input type='number' name='nightfade' min='1' max='240' value='" + String(Settings.NightFade) + "'>";
-  page += F("<small>The fade is centred on sunset and sunrise, half before and half after: 60 minutes starts dimming "
-            "30 minutes before sunset and reaches the night brightness 30 minutes after it.</small>");
-  // Location for sunrise and sunset: a city fills in the two fields below
-  // (also without JavaScript: /save takes the city's coordinates when one is
-  // selected); typing in them goes back to "Custom".
-  flush();
-  page += F("<label>Nearest city</label><select name='city'><option value=''>Custom (latitude and longitude below)</option>");
+  w.writePrintf("<label>Screen off after (minutes without a touch or button press, 0 = never)</label><input type='number' name='screenoff' min='0' max='1440' value='%d'>",
+                Settings.ScreenTimeout);
+  w.writePrintf("<label><input type='checkbox' name='nightdim' %s> Dim the screen at night</label>",
+                Settings.nightDim ? "checked" : "");
+  w.write("<small>Fades from the brightness above to the night brightness around sunset, and back at sunrise. ");
+  w.write(nightDimStatus());
+  w.write("</small>");
+  w.writePrintf("<label>Night brightness (1-255)</label><input type='number' name='nightbright' min='1' max='255' value='%d'>",
+                Settings.NightBrightness);
+  w.writePrintf("<label>Fade length (minutes)</label><input type='number' name='nightfade' min='1' max='240' value='%d'>",
+                Settings.NightFade);
+  w.writeF(F("<small>The fade is centred on sunset and sunrise, half before and half after: 60 minutes starts dimming "
+             "30 minutes before sunset and reaches the night brightness 30 minutes after it.</small>"));
+  w.writeF(F("<label>Nearest city</label><select name='city'><option value=''>Custom (latitude and longitude below)</option>"));
   for (int i = 0; i < kCityCount; i++)
   {
-    page += "<option value='" + String(kCities[i].latitude, 2) + "," + String(kCities[i].longitude, 2) + "'";
-    if (fabsf(Settings.Latitude - kCities[i].latitude) < 0.005f && fabsf(Settings.Longitude - kCities[i].longitude) < 0.005f)
-      page += " selected";
-    page += ">" + String(kCities[i].name) + "</option>";
+    w.writePrintf("<option value='%.2f,%.2f'%s>%s</option>",
+                  kCities[i].latitude, kCities[i].longitude,
+                  (fabsf(Settings.Latitude - kCities[i].latitude) < 0.005f && fabsf(Settings.Longitude - kCities[i].longitude) < 0.005f) ? " selected" : "",
+                  kCities[i].name);
   }
-  page += F("</select>");
-  flush();
-  page += "<label>Latitude (decimal degrees, south negative)</label><input type='number' name='lat' min='-90' max='90' step='any' value='" + String(Settings.Latitude, 4) + "'>";
-  page += "<label>Longitude (decimal degrees, west negative)</label><input type='number' name='lon' min='-180' max='180' step='any' value='" + String(Settings.Longitude, 4) + "'>";
+  w.writeF(F("</select>"));
+  w.writePrintf("<label>Latitude (decimal degrees, south negative)</label><input type='number' name='lat' min='-90' max='90' step='any' value='%.4f'>",
+                Settings.Latitude);
+  w.writePrintf("<label>Longitude (decimal degrees, west negative)</label><input type='number' name='lon' min='-180' max='180' step='any' value='%.4f'>",
+                Settings.Longitude);
 #endif
 #ifdef NO_DISPLAY
-  page += "<label><input type='checkbox' name='led' " + String(Settings.statusLed ? "checked" : "") + "> Status LED (blinks while mining)</label>";
+  w.writePrintf("<label><input type='checkbox' name='led' %s> Status LED (blinks while mining)</label>",
+                Settings.statusLed ? "checked" : "");
 #endif
 #ifdef HAS_RGB_LED
   {
     static const char *const kLedModes[] = {"Off", "Status (red starting up, blue connecting, blinks the colour below while mining)", "Always on in the colour below"};
-    page += F("<label>LED on the back</label><select name='ledmode'>");
+    w.writeF(F("<label>LED on the back</label><select name='ledmode'>"));
     for (int i = LED_MODE_OFF; i <= LED_MODE_STEADY; i++)
     {
-      page += "<option value='" + String(i) + "'";
-      if (Settings.ledMode == i)
-        page += " selected";
-      page += ">" + String(kLedModes[i]) + "</option>";
+      w.writePrintf("<option value='%d'%s>%s</option>", i, Settings.ledMode == i ? " selected" : "", kLedModes[i]);
     }
-    page += F("</select>");
-    char color[8];
-    snprintf(color, sizeof(color), "#%06lx", (unsigned long)(Settings.ledColor & 0xFFFFFF));
-    page += "<label>LED colour</label><input type='color' name='ledcolor' value='" + String(color) + "'>";
-    page += "<label>LED brightness (1-255)</label><input type='number' name='ledbright' min='1' max='255' value='" + String(Settings.ledBrightness) + "'>";
-    page += "<label><input type='checkbox' name='ledscreen' " + String(Settings.ledScreenOff ? "checked" : "") + "> LED off while the screen is off</label>";
+    w.writeF(F("</select>"));
+    w.writePrintf("<label>LED colour</label><input type='color' name='ledcolor' value='#%06lx'>",
+                  (unsigned long)(Settings.ledColor & 0xFFFFFF));
+    w.writePrintf("<label>LED brightness (1-255)</label><input type='number' name='ledbright' min='1' max='255' value='%d'>",
+                  Settings.ledBrightness);
+    w.writePrintf("<label><input type='checkbox' name='ledscreen' %s> LED off while the screen is off</label>",
+                  Settings.ledScreenOff ? "checked" : "");
   }
 #endif
-  flush();
 #ifndef NO_MQTT
-  page += F("<h3>MQTT (Home Assistant)</h3>");
-  page += "<label><input type='checkbox' name='mqtt' " + String(Settings.MqttEnabled ? "checked" : "") +
-          "> Publish the miner's state to an MQTT broker</label>";
-  page += "<label>Broker address (IP or name)</label><input type='text' name='mqhost' maxlength='64' value='" + htmlEscape(Settings.MqttHost) + "'>";
-  page += "<label>Broker port</label><input type='number' name='mqport' min='1' max='65535' value='" + String(Settings.MqttPort) + "'>";
-  page += "<label>User (optional)</label><input type='text' name='mquser' maxlength='64' autocomplete='off' value='" + htmlEscape(Settings.MqttUser) + "'>";
-  // The saved password is never sent back to the browser: empty keeps it.
-  page += String("<label>Password (optional)</label><input type='password' name='mqpass' maxlength='64' autocomplete='new-password' placeholder='") +
-          (Settings.MqttPass.length() ? "saved, leave empty to keep it" : "none") + "'>";
+  w.writeF(F("<h3>MQTT (Home Assistant)</h3>"));
+  w.writePrintf("<label><input type='checkbox' name='mqtt' %s> Publish the miner's state to an MQTT broker</label>",
+                Settings.MqttEnabled ? "checked" : "");
+  w.write("<label>Broker address (IP or name)</label><input type='text' name='mqhost' maxlength='64' value='");
+  w.writeHtmlEscaped(Settings.MqttHost.c_str());
+  w.writePrintf("'><label>Broker port</label><input type='number' name='mqport' min='1' max='65535' value='%d'>",
+                Settings.MqttPort);
+  w.write("<label>User (optional)</label><input type='text' name='mquser' maxlength='64' autocomplete='off' value='");
+  w.writeHtmlEscaped(Settings.MqttUser.c_str());
+  w.writePrintf("'><label>Password (optional)</label><input type='password' name='mqpass' maxlength='64' autocomplete='new-password' placeholder='%s'>",
+                Settings.MqttPass.length() ? "saved, leave empty to keep it" : "none");
   if (Settings.MqttPass.length())
-    page += F("<label><input type='checkbox' name='mqpassclear'> Remove the saved password</label>");
-  page += "<label>Topic (empty: nerdminer/ and the end of the MAC address)</label><input type='text' name='mqtopic' maxlength='64' value='" + htmlEscape(Settings.MqttTopic) + "'>";
-  page += String("<p><small>") + (mqttConnected() ? "Connected to the broker." : Settings.MqttEnabled ? "Not connected to the broker." : "Off.") +
-          " Home Assistant finds the sensors by itself (MQTT discovery). Plain MQTT only (usually port 1883), no TLS.</small></p>";
+    w.writeF(F("<label><input type='checkbox' name='mqpassclear'> Remove the saved password</label>"));
+  w.write("<label>Topic (empty: nerdminer/ and the end of the MAC address)</label><input type='text' name='mqtopic' maxlength='64' value='");
+  w.writeHtmlEscaped(Settings.MqttTopic.c_str());
+  w.writePrintf("'><p><small>%s Home Assistant finds the sensors by itself (MQTT discovery). Plain MQTT only (usually port 1883), no TLS.</small></p>",
+                mqttConnected() ? "Connected to the broker." : Settings.MqttEnabled ? "Not connected to the broker." : "Off.");
 #endif
-  page += F("<label>New password for this page (leave empty to keep it)</label>"
-            "<input type='password' name='webpass' maxlength='63' autocomplete='new-password'>"
-            "<label>New password again</label>"
-            "<input type='password' name='webpass2' maxlength='63' autocomplete='new-password'>");
-  page += F("<input type='submit' value='Save'>");
+  w.writeF(F("<label>New password for this page (leave empty to keep it)</label>"
+             "<input type='password' name='webpass' maxlength='63' autocomplete='new-password'>"
+             "<label>New password again</label>"
+             "<input type='password' name='webpass2' maxlength='63' autocomplete='new-password'>"));
+  w.writeF(F("<input type='submit' value='Save'>"));
 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-  page += F("<p><small>Settings apply straight away. Changing invert or flip restarts the device.</small></p>");
+  w.writeF(F("<p><small>Settings apply straight away. Changing invert or flip restarts the device.</small></p>"));
 #elif defined(TDISPLAY_PULSE)
-  page += F("<p><small>Settings apply straight away. Changing flip restarts the device.</small></p>");
+  w.writeF(F("<p><small>Settings apply straight away. Changing flip restarts the device.</small></p>"));
 #else
-  page += F("<p><small>Settings apply straight away, no restart.</small></p>");
+  w.writeF(F("<p><small>Settings apply straight away, no restart.</small></p>"));
 #endif
-  page += F("</form><p><small><a href='/'>Live monitor</a> (no login needed) &middot; status as JSON: <a href='/api/status'>/api/status</a></small></p>");
-  page += F("<hr style='margin-top:1.5em;border:0;border-top:1px solid #ddd'><div style='text-align:center;margin:1em 0'><a href='/update' style='color:#f59e0b;font-weight:bold;text-decoration:none'>⚡ Firmware Updates (OTA) &rarr;</a></div>");
+  w.writeF(F("</form><p><small><a href='/'>Live monitor</a> (no login needed) &middot; status as JSON: <a href='/api/status'>/api/status</a></small></p>"));
+  w.writeF(F("<hr style='margin-top:1.5em;border:0;border-top:1px solid #ddd'><div style='text-align:center;margin:1em 0'><a href='/update' style='color:#f59e0b;font-weight:bold;text-decoration:none'>⚡ Firmware Updates (OTA) &rarr;</a></div>"));
 #ifdef HAS_BACKLIGHT_CONTROL
-  page += F("<script>var f=document.forms[0],c=f.city,a=f.lat,o=f.lon;"
-            "c.onchange=function(){if(c.value){var p=c.value.split(',');a.value=p[0];o.value=p[1]}};"
-            "a.oninput=o.oninput=function(){c.value=''};</script>");
+  w.writeF(F("<script>var f=document.forms[0],c=f.city,a=f.lat,o=f.lon;"
+             "c.onchange=function(){if(c.value){var p=c.value.split(',');a.value=p[0];o.value=p[1]}};"
+             "a.oninput=o.oninput=function(){c.value=''};</script>"));
 #endif
-  page += F("</body></html>");
-  flush();
-  webCfgServer.sendContent(""); // ends the chunked response
+  w.writeF(F("</body></html>"));
+  w.finish();
 }
 
 bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut);
+
+static bool applySettingsFromRequest(bool isHtmlForm, const String &webPass,
+                                       bool &poolChangedOut, bool &restartOut, bool &passChangedOut)
+{
+  const TSettings before = currentSettings();
+  TSettings next = before;
+
+  DynamicJsonDocument doc(1536);
+  DeserializationError err = DeserializationError::EmptyInput;
+  if (!isHtmlForm && webCfgServer.hasArg("plain"))
+  {
+    String body = webCfgServer.arg("plain");
+    err = deserializeJson(doc, body.c_str());
+  }
+
+  if (err)
+  {
+    const bool cityHasCoords = isHtmlForm && webCfgServer.arg("city").indexOf(',') > 0;
+    for (int i = 0; i < webCfgServer.args(); i++)
+    {
+      const String k = webCfgServer.argName(i);
+      if (k == "plain")
+        continue;
+      if (isHtmlForm)
+      {
+        if (k == "webpass" || k == "webpass2" || k == "mqpass" || k == "mqpassclear")
+          continue;
+        if (cityHasCoords && (k == "lat" || k == "lon"))
+          continue;
+      }
+      String v = webCfgServer.arg(i);
+      if (isHtmlForm)
+      {
+        if (k == "hostname")
+        {
+          v.trim();
+          if (v.isEmpty())
+            continue;
+        }
+        if (k == "city" && v.isEmpty())
+          continue;
+        if (k == "mquser" || k == "mqtopic" || k == "mqhost")
+          v = v.substring(0, 64);
+      }
+      doc[k.c_str()] = v.c_str();
+    }
+  }
+
+  nvMemory::parseJsonConfig(doc, &next);
+
+  if (isHtmlForm)
+  {
+    // HTML checkboxes omit the form parameter when unchecked
+    next.saveStats = webCfgServer.hasArg("savestats");
+#ifndef NO_MQTT
+    next.MqttEnabled = webCfgServer.hasArg("mqtt");
+    if (webCfgServer.hasArg("mqhost"))
+      next.MqttHost = mqttCleanHost(webCfgServer.arg("mqhost").substring(0, 64), next.MqttPort);
+    if (webCfgServer.hasArg("mqpassclear"))
+      next.MqttPass = "";
+    else if (webCfgServer.arg("mqpass").length() > 0)
+      next.MqttPass = webCfgServer.arg("mqpass").substring(0, 64);
+#endif
+#if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
+    next.invertColors = webCfgServer.hasArg("invert");
+    next.flipDisplay = webCfgServer.hasArg("flip");
+#if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
+    next.autoBrightness = webCfgServer.hasArg("autobrightness");
+#endif
+#endif
+#ifdef TDISPLAY_PULSE
+    next.flipDisplay = webCfgServer.hasArg("flip");
+#endif
+#ifdef HAS_BACKLIGHT_CONTROL
+    next.nightDim = webCfgServer.hasArg("nightdim");
+#endif
+#ifdef NO_DISPLAY
+    next.statusLed = webCfgServer.hasArg("led");
+#endif
+#ifdef HAS_RGB_LED
+    next.ledScreenOff = webCfgServer.hasArg("ledscreen");
+#endif
+    if (!webPass.isEmpty())
+      next.WebPassword = webPass;
+  }
+
+  passChangedOut = next.WebPassword != before.WebPassword;
+  restartOut = applyLiveSettings(before, next, poolChangedOut);
+  return true;
+}
 
 static void handleSave()
 {
@@ -461,69 +662,8 @@ static void handleSave()
     }
   }
 
-  const TSettings before = currentSettings();
-  TSettings next = before;
-
-  const bool cityHasCoords = webCfgServer.arg("city").indexOf(',') > 0;
-  DynamicJsonDocument doc(1536);
-  for (int i = 0; i < webCfgServer.args(); i++)
-  {
-    const String k = webCfgServer.argName(i);
-    if (k == "plain" || k == "webpass" || k == "webpass2" || k == "mqpass" || k == "mqpassclear")
-      continue;
-    if (cityHasCoords && (k == "lat" || k == "lon"))
-      continue;
-    String v = webCfgServer.arg(i);
-    if (k == "hostname")
-    {
-      v.trim();
-      if (v.isEmpty())
-        continue;
-    }
-    if (k == "city" && v.isEmpty())
-      continue;
-    if (k == "mquser" || k == "mqtopic" || k == "mqhost")
-      v = v.substring(0, 64);
-    doc[k.c_str()] = v.c_str();
-  }
-  nvMemory::parseJsonConfig(doc, &next);
-
-  // HTML checkboxes omit the form parameter when unchecked
-  next.saveStats = webCfgServer.hasArg("savestats");
-#ifndef NO_MQTT
-  next.MqttEnabled = webCfgServer.hasArg("mqtt");
-  if (webCfgServer.hasArg("mqhost"))
-    next.MqttHost = mqttCleanHost(webCfgServer.arg("mqhost").substring(0, 64), next.MqttPort);
-  if (webCfgServer.hasArg("mqpassclear"))
-    next.MqttPass = "";
-  else if (webCfgServer.arg("mqpass").length() > 0)
-    next.MqttPass = webCfgServer.arg("mqpass").substring(0, 64);
-#endif
-#if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-  next.invertColors = webCfgServer.hasArg("invert");
-  next.flipDisplay = webCfgServer.hasArg("flip");
-#if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-  next.autoBrightness = webCfgServer.hasArg("autobrightness");
-#endif
-#endif
-#ifdef TDISPLAY_PULSE
-  next.flipDisplay = webCfgServer.hasArg("flip");
-#endif
-#ifdef HAS_BACKLIGHT_CONTROL
-  next.nightDim = webCfgServer.hasArg("nightdim");
-#endif
-#ifdef NO_DISPLAY
-  next.statusLed = webCfgServer.hasArg("led");
-#endif
-#ifdef HAS_RGB_LED
-  next.ledScreenOff = webCfgServer.hasArg("ledscreen");
-#endif
-  if (!webPass.isEmpty())
-    next.WebPassword = webPass;
-
-  const bool passChanged = next.WebPassword != before.WebPassword;
-  bool poolChanged = false;
-  bool restart = applyLiveSettings(before, next, poolChanged);
+  bool poolChanged = false, restart = false, passChanged = false;
+  applySettingsFromRequest(true, webPass, poolChanged, restart, passChanged);
 
   if (!restart)
   {
@@ -563,12 +703,9 @@ bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poo
   const bool wifiChanged = (next.WifiSSID != before.WifiSSID || next.WifiPW != before.WifiPW) && next.WifiSSID.length() > 0;
   if (wifiChanged)
   {
-    {
-      std::lock_guard<std::mutex> lock(g_settingsMutex);
-      Settings.WifiSSID = next.WifiSSID;
-      Settings.WifiPW = next.WifiPW;
-    }
-    WiFi.begin(next.WifiSSID.c_str(), next.WifiPW.c_str());
+    std::lock_guard<std::mutex> lock(g_settingsMutex);
+    Settings.WifiSSID = next.WifiSSID;
+    Settings.WifiPW = next.WifiPW;
   }
 
   const bool restart = next.invertColors != before.invertColors || next.flipDisplay != before.flipDisplay || wifiChanged;
@@ -651,20 +788,40 @@ bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poo
   return true; // restart needed
 }
 
-static void sendCorsJson(int code, const String &json)
+void sendCorsJson(int code, const String &json)
 {
   ensureCorsHeaders();
   webCfgServer.send(code, "application/json", json);
   s_corsAdded = false;
 }
 
-static bool handleCorsOptions()
+bool handleCorsOptions(void)
 {
   if (webCfgServer.method() != HTTP_OPTIONS)
     return false;
   ensureCorsHeaders();
   webCfgServer.send(204);
   s_corsAdded = false;
+  return true;
+}
+
+template <typename MutateFn>
+static bool dispatchRestEndpoint(MutateFn onMutate)
+{
+  if (handleCorsOptions())
+    return false;
+  HTTPMethod m = webCfgServer.method();
+  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT)
+  {
+    if (!checkWebApiMutationAllowed())
+      return false;
+    return onMutate();
+  }
+  if (m != HTTP_GET)
+  {
+    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
+    return false;
+  }
   return true;
 }
 
@@ -755,11 +912,7 @@ static void handleGetConfig()
 
 static void handleTimezoneEndpoint()
 {
-  if (handleCorsOptions()) return;
-
-  HTTPMethod m = webCfgServer.method();
-  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
-    if (!checkWebApiMutationAllowed()) return;
+  bool ok = dispatchRestEndpoint([]() {
     String newTz = "";
     if (webCfgServer.hasArg("plain")) {
       String body = webCfgServer.arg("plain");
@@ -780,10 +933,9 @@ static void handleTimezoneEndpoint()
       bool poolChanged = false;
       applyLiveSettings(before, next, poolChanged);
     }
-  } else if (m != HTTP_GET) {
-    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
-    return;
-  }
+    return true;
+  });
+  if (!ok) return;
 
   const TSettings s = currentSettings();
   String label, posix, localTime;
@@ -806,125 +958,84 @@ static void handleTimezoneEndpoint()
 static void handleTimezonesList()
 {
   if (handleCorsOptions()) return;
-  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-
+  ensureCorsHeaders();
   webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  webCfgServer.send(200, "application/json", "[");
+  webCfgServer.send(200, "application/json", "");
+  s_corsAdded = false;
+
+  ChunkedWriter w;
+  w.write("[", 1);
   for (int i = 0; i < kTimeZoneCount; i++) {
-    String entry;
-    entry.reserve(160);
-    if (i > 0) entry += ",";
-    entry += "{\"id\":\"";
-    entry += jsonEscape(String(kTimeZones[i].id));
-    entry += "\",\"label\":\"";
-    entry += jsonEscape(String(kTimeZones[i].label));
-    entry += "\",\"posix\":\"";
-    entry += jsonEscape(String(kTimeZones[i].posix));
-    entry += "\"}";
-    webCfgServer.sendContent(entry);
+    if (i > 0) w.write(",", 1);
+    w.write("{\"id\":\"");
+    w.writeJsonEscaped(kTimeZones[i].id);
+    w.write("\",\"label\":\"");
+    w.writeJsonEscaped(kTimeZones[i].label);
+    w.write("\",\"posix\":\"");
+    w.writeJsonEscaped(kTimeZones[i].posix);
+    w.write("\"}");
   }
-  webCfgServer.sendContent("]");
-  webCfgServer.sendContent("");
+  w.write("]", 1);
+  w.finish();
 }
 
 static void handleCitiesList()
 {
   if (handleCorsOptions()) return;
-  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-
+  ensureCorsHeaders();
   webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  webCfgServer.send(200, "application/json", "[");
+  webCfgServer.send(200, "application/json", "");
+  s_corsAdded = false;
+
+  ChunkedWriter w;
+  w.write("[", 1);
   for (int i = 0; i < kCityCount; i++) {
-    String entry;
-    entry.reserve(96);
-    if (i > 0) entry += ",";
-    entry += "{\"name\":\"";
-    entry += jsonEscape(String(kCities[i].name));
-    entry += "\",\"latitude\":";
-    entry += String(kCities[i].latitude, 2);
-    entry += ",\"longitude\":";
-    entry += String(kCities[i].longitude, 2);
-    entry += "}";
-    webCfgServer.sendContent(entry);
+    if (i > 0) w.write(",", 1);
+    w.write("{\"name\":\"");
+    w.writeJsonEscaped(kCities[i].name);
+    w.writePrintf("\",\"latitude\":%.2f,\"longitude\":%.2f}", kCities[i].latitude, kCities[i].longitude);
   }
-  webCfgServer.sendContent("]");
-  webCfgServer.sendContent("");
+  w.write("]", 1);
+  w.finish();
 }
 
 static bool applyRequestConfig(bool &poolChangedOut, bool &restartOut)
 {
-  const TSettings before = currentSettings();
-  TSettings next = before;
-
-  DynamicJsonDocument doc(1536);
-  DeserializationError err = DeserializationError::EmptyInput;
-  if (webCfgServer.hasArg("plain")) {
-    String body = webCfgServer.arg("plain");
-    err = deserializeJson(doc, body.c_str());
-  }
-
-  if (err) {
-    for (int i = 0; i < webCfgServer.args(); i++) {
-      String name = webCfgServer.argName(i);
-      if (name != "plain") {
-        doc[name.c_str()] = webCfgServer.arg(i).c_str();
-      }
-    }
-  }
-
-  nvMemory::parseJsonConfig(doc, &next);
-  restartOut = applyLiveSettings(before, next, poolChangedOut);
-  return true;
-}
-
-static void handlePostConfig()
-{
-  if (!checkWebApiMutationAllowed()) return;
-
-  bool poolChanged = false;
-  bool restart = false;
-  applyRequestConfig(poolChanged, restart);
-
-  if (restart) {
-    sendCorsJson(200, "{\"success\":true,\"message\":\"Settings saved. Restarting device for changes...\",\"rebootRequired\":true}");
-    saveStat();
-    delay(1000);
-    ESP.restart();
-  } else {
-    String resp = "{\"success\":true,\"message\":\"Settings saved and applied live.\",\"rebootRequired\":false";
-    if (poolChanged) resp += ",\"poolChanged\":true";
-    resp += "}";
-    sendCorsJson(200, resp);
-  }
+  bool passChanged = false;
+  return applySettingsFromRequest(false, "", poolChangedOut, restartOut, passChanged);
 }
 
 static void handleConfigRoute()
 {
-  if (handleCorsOptions()) return;
-  HTTPMethod m = webCfgServer.method();
-  if (m == HTTP_GET) {
+  bool ok = dispatchRestEndpoint([]() {
+    bool poolChanged = false, restart = false;
+    applyRequestConfig(poolChanged, restart);
+    if (restart) {
+      sendCorsJson(200, "{\"success\":true,\"message\":\"Settings saved. Restarting device for changes...\",\"rebootRequired\":true}");
+      saveStat();
+      delay(1000);
+      ESP.restart();
+    } else {
+      String resp = "{\"success\":true,\"message\":\"Settings saved and applied live.\",\"rebootRequired\":false";
+      if (poolChanged) resp += ",\"poolChanged\":true";
+      resp += "}";
+      sendCorsJson(200, resp);
+    }
+    return false;
+  });
+  if (ok) {
     handleGetConfig();
-    return;
   }
-  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
-    handlePostConfig();
-    return;
-  }
-  sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
 }
 
 static void handleLedEndpoint()
 {
-  if (handleCorsOptions()) return;
-  HTTPMethod m = webCfgServer.method();
-  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
-    if (!checkWebApiMutationAllowed()) return;
+  bool ok = dispatchRestEndpoint([]() {
     bool poolChanged = false, restart = false;
     applyRequestConfig(poolChanged, restart);
-  } else if (m != HTTP_GET) {
-    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
-    return;
-  }
+    return true;
+  });
+  if (!ok) return;
 
   const TSettings s = currentSettings();
   String json;
@@ -948,11 +1059,7 @@ static void handleLedEndpoint()
 
 static void handleDisplayEndpoint()
 {
-  if (handleCorsOptions()) return;
-  HTTPMethod m = webCfgServer.method();
-  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
-    if (!checkWebApiMutationAllowed()) return;
-
+  bool ok = dispatchRestEndpoint([]() {
     String screenAction = "";
     bool hasConfigKeys = false;
     if (webCfgServer.hasArg("plain")) {
@@ -1005,13 +1112,12 @@ static void handleDisplayEndpoint()
         saveStat();
         delay(1000);
         ESP.restart();
-        return;
+        return false;
       }
     }
-  } else if (m != HTTP_GET) {
-    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
-    return;
-  }
+    return true;
+  });
+  if (!ok) return;
 
   const TSettings s = currentSettings();
   String json;
@@ -1037,16 +1143,12 @@ static void handleDisplayEndpoint()
 
 static void handlePoolEndpoint()
 {
-  if (handleCorsOptions()) return;
-  HTTPMethod m = webCfgServer.method();
-  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
-    if (!checkWebApiMutationAllowed()) return;
+  bool ok = dispatchRestEndpoint([]() {
     bool poolChanged = false, restart = false;
     applyRequestConfig(poolChanged, restart);
-  } else if (m != HTTP_GET) {
-    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
-    return;
-  }
+    return true;
+  });
+  if (!ok) return;
 
   const TSettings s = currentSettings();
   String json;
@@ -1067,16 +1169,12 @@ static void handlePoolEndpoint()
 
 static void handleMqttEndpoint()
 {
-  if (handleCorsOptions()) return;
-  HTTPMethod m = webCfgServer.method();
-  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT) {
-    if (!checkWebApiMutationAllowed()) return;
+  bool ok = dispatchRestEndpoint([]() {
     bool poolChanged = false, restart = false;
     applyRequestConfig(poolChanged, restart);
-  } else if (m != HTTP_GET) {
-    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
-    return;
-  }
+    return true;
+  });
+  if (!ok) return;
 
   const TSettings s = currentSettings();
   String json;
@@ -1149,7 +1247,7 @@ static void handleProbe()
   String json;
   json.reserve(192);
   json += "{\"hr\":" + String(hr_hs);
-  json += ",\"ut\":" + String((unsigned long)upTime);
+  json += ",\"ut\":" + String((unsigned long)getUpTime());
   json += ",\"ebd\":\"" + String(best_diff_str) + "\"";
   json += ",\"sbd\":\"" + String(sess_diff_str) + "\"";
   json += ",\"temp\":" + String(temperatureRead(), 1);
@@ -1190,7 +1288,7 @@ static void handleStatus()
   json += ",\"blockFound\":" + String(valids > 0 ? "true" : "false");
   json += ",\"bestDiff\":\"" + String(best_diff_str) + "\"";
   json += ",\"bestSessionDiff\":\"" + String(sess_diff_str) + "\"";
-  json += ",\"uptime\":" + String((unsigned long)upTime);
+  json += ",\"uptime\":" + String((unsigned long)getUpTime());
   json += ",\"poolDiff\":" + String(m.poolDifficulty);
   if (m.pingMs >= 0)
     json += ",\"pingMs\":" + String((long)m.pingMs);
@@ -1199,8 +1297,12 @@ static void handleStatus()
   json += ",\"stratumUser\":\"" + jsonEscape(String(s.BtcWallet)) + "\"";
   json += ",\"onBackupPool\":" + String(onBackupPool() ? "true" : "false");
   json += ",\"temp\":" + String(temp, 1);
-  json += ",\"power\":1.5";
-  json += ",\"frequency\":240";
+  json += ",\"reset_reason\":\"" + jsonEscape(String(getResetReasonStr())) + "\"";
+  json += ",\"network_difficulty\":" + String(getNetworkDifficulty(), 2);
+  const uint32_t discMs = getPoolDisconnectedSinceMs();
+  json += ",\"pool_disconnected_s\":" + String(discMs ? (unsigned long)((millis() - discMs) / 1000UL) : 0UL);
+  json += ",\"thermal_throttled\":" + String(getThermalThrottled() ? "true" : "false");
+  json += ",\"frequency\":" + String(getCpuFrequencyMhz());
   json += ",\"macAddr\":\"" + WiFi.macAddress() + "\"";
   json += ",\"freeHeap\":" + String(ESP.getFreeHeap());
   json += ",\"gitRepo\":\"aetherwraith/NerdMiner-Modded\"";
@@ -1213,7 +1315,6 @@ static void handleStatus()
   json += ",\"changelogUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
   json += ",\"releaseNotesUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
   json += ",\"releaseName\":\"NerdMiner Modded " + String(CURRENT_VERSION) + "\"";
-  json += ",\"releaseDate\":\"2026-10-06\"";
   json += ",\"isNativeHardwareStatus\":true}";
   json += "}";
 
@@ -1239,7 +1340,6 @@ static void handleSystemRestart()
 // it is read-only and holds nothing the screen doesn't show, and no wallet
 // address or passwords.
 extern uint32_t templates;
-extern uint64_t upTime;
 extern volatile uint32_t shares, valids;
 extern double best_diff;
 extern monitor_data mMonitor;
@@ -1262,7 +1362,7 @@ void fillMinerStatusJson(JsonDocument &doc)
   doc["hashrate_avg_khs"] = round(st.avgHashrateKHs * 10.0) / 10.0; // since boot
   doc["total_mhashes"] = (uint32_t)(totalHashes / 1000000ULL); // also kept across restarts when stats are saved
   doc["session_hashes"] = st.sessionHashes;
-  doc["mining_time_s"] = (uint32_t)upTime;
+  doc["mining_time_s"] = (uint32_t)getUpTime();
   doc["templates"] = templates;
   doc["best_diff"] = st.bestDiff;
   doc["session_best_difficulty"] = st.sessionBestDiff;
@@ -1295,6 +1395,12 @@ void fillMinerStatusJson(JsonDocument &doc)
   wifi["rssi"] = WiFi.RSSI();
   wifi["ip"] = WiFi.localIP().toString();
   doc["free_heap"] = ESP.getFreeHeap();
+  doc["temp"] = round(temperatureRead() * 10.0) / 10.0;
+  doc["reset_reason"] = getResetReasonStr();
+  doc["network_difficulty"] = getNetworkDifficulty();
+  const uint32_t discMs = getPoolDisconnectedSinceMs();
+  doc["pool_disconnected_s"] = discMs ? (uint32_t)((millis() - discMs) / 1000UL) : 0U;
+  doc["thermal_throttled"] = getThermalThrottled();
 
   NotableShare ns[NOTABLE_SHARES_MAX];
   const size_t nShares = getNotableShares(ns, NOTABLE_SHARES_MAX);

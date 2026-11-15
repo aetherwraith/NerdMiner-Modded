@@ -31,6 +31,14 @@ This document tracks major architectural enhancements, optimizations, and featur
   - Moved cold `nerd_sha256d_baked` out of IRAM on `NERD_SW_ASM` targets (`20.7 KB` IRAM saved) and gzipped static web pages.
   - Lock-free/double-buffered `ActiveJob` dispatch, immediate multi-share submission, persistent Stratum TCP line framing, screen-off TFT/HTTPS skip across all backlight-controlled boards, and `mempool.space` TLS connection reuse + streamed JSON filter.
 
+### 5. Thermal Guardrails, Shared Pulse UI & Fleet Ergonomics (`v1.12.0`)
+- **Thermal Guardrail & Auto-Dim (`TempLimit`)**: Configurable `TempLimit` (°C) with automatic duty throttling and backlight auto-dimming in `wakeScreen()` / `backlightTick()` (respecting CYD `autoBrightness`) until temperature recovers, plus `thermal_throttled`, `temp`, `reset_reason`, `network_difficulty`, and `pool_disconnected_s` telemetry on `/api/status` and `/status`.
+- **Shared Pulse UI & Zero-Heap Widget Cache (`pulseUi.h/.cpp`)**: Extracted shared Pulse formatting, RGB565 color/bar/badge helpers, and FNV-1a `uint32_t` widget cache keys across all 4 Pulse display drivers (`ESP32-2432S028R`, `ES3C35P`, `T-Display Pulse`, `ESP32 4" ST7796`), eliminating heap `String` key churn and unifying `isIdentifying()`, `isCelebrating()`, and wrap-safe `shareFlashUntil` timing.
+- **Non-Blocking Clock Status & Fleet Web UI Enhancements**:
+  - `nightDimStatus()` uses `getUtcTime(utc, false)` to avoid blocking SNTP syncs.
+  - Fleet tab polls `/probe` every 3s with slower 15s `/api/status` refreshes, displays Temp (`°C`), `HOT` thermal throttle, and Pool Disconnected/Stuck badges, and adds Solo Block-Odds & Network Diff % context.
+  - Added Wave Identify (300ms staggered), All Screens On/Off bulk toggle, 1-click Fleet Backup Export/Restore JSON, UTF-8 `authHeaders`, and `bc-br` `0`-brightness falsy fix.
+
 ---
 
 ## 📅 Version Milestones
@@ -44,3 +52,4 @@ This document tracks major architectural enhancements, optimizations, and featur
 | **v1.9.0** | Released | Web OTA (`/update`), GitHub Releases automated OTA with dual-partition safety, and REST update API |
 | **v1.10.x** | Released | Upstream v1.6.2 sync: Pulse CYD/T-Display/M5Stick UI, live `/` web monitor, MQTT HA discovery, Xtensa ASM SW miner, ckpool stats |
 | **v1.11.0** | Released | Fleet Dashboard & Broadcast, `POST /api/identify`, mDNS, two-way MQTT & UDP share celebration, `session_best_diff` / `ping_ms` / `luck_pct` / notable shares, OTA SHA lock fix, and >120 KB Flash + >20 KB IRAM + >15 KB DRAM reclaimed |
+| **v1.12.0** | Released | `TempLimit` thermal throttling & auto-dim, shared `pulseUi` with FNV-1a `uint32_t` widget cache keys across all 4 Pulse drivers, `/probe`-first Fleet polling, Temp/Pool badges, Solo Block-Odds, Wave Identify, Screens On/Off, and Fleet JSON Backup/Restore |

@@ -19,9 +19,7 @@
 #endif
 
 extern uint32_t templates;
-extern uint64_t totalKHashes;
 extern uint32_t elapsedKHs;
-extern uint64_t upTime;
 
 extern volatile uint32_t shares; // increase if blockhash has 32 bits of zeroes
 extern volatile uint32_t valids; // increased if blockhash <= targethalfshares
@@ -58,6 +56,9 @@ int poolApiStyle = POOL_API_PUBLICPOOL;
 // keeps a reader from seeing a half-finished answer (it used to see the
 // public-pool default and ask the wrong pool for stats).
 static std::mutex s_poolApiMutex;
+static std::mutex s_httpFetchMutex;
+static std::mutex s_networkDiffMutex;
+static double s_networkDifficulty = 0.0;
 
 // Changes from the LAN settings page that applyPendingSettings() applies on
 // this task (see monitor.h).
@@ -68,10 +69,15 @@ static std::atomic<bool> s_poolChanged{false};
 
 void setup_monitor(void){
     /******** TIME ZONE SETTING *****/
-    String posixTz = getPosixTz(Settings.Timezone);
-    Serial.printf("Configuring timezone: %s (POSIX: %s)\n", Settings.Timezone.c_str(), posixTz.c_str());
+    String tz;
+    {
+        std::lock_guard<std::mutex> lock(g_settingsMutex);
+        tz = Settings.Timezone;
+    }
+    String posixTz = getPosixTz(tz);
+    Serial.printf("Configuring timezone: %s (POSIX: %s)\n", tz.c_str(), posixTz.c_str());
     configTzTime(posixTz.c_str(), "pool.ntp.org", "time.nist.gov", "europe.pool.ntp.org");
-    s_appliedTimezone = Settings.Timezone;
+    s_appliedTimezone = tz;
 
     Serial.println("Timezone setup done");
 #ifdef SCREEN_WORKERS_ENABLE
@@ -107,12 +113,19 @@ static bool fetchDue(unsigned long lastOk, unsigned long &lastTry, unsigned long
 static unsigned long mGlobalTry = 0;
 static unsigned long mHeightTry = 0;
 static unsigned long mBTCTry = 0;
+static unsigned long mPoolTry = 0;
 
 static const char *kGlobalHash1mUrl = "https://mempool.space/api/v1/mining/hashrate/1m";
+
+double getNetworkDifficulty(void) {
+    std::lock_guard<std::mutex> lock(s_networkDiffMutex);
+    return s_networkDifficulty;
+}
 
 void updateGlobalData(void){
     
     if(fetchDue(mGlobalUpdate, mGlobalTry, UPDATE_Global_min * 60 * 1000)){
+        std::lock_guard<std::mutex> fetchLock(s_httpFetchMutex);
         // Reuse one TLS session across both mempool.space requests so mbedTLS
         // only performs a single handshake (halving HW SHA pause and heap churn).
         WiFiClientSecure client;
@@ -123,7 +136,7 @@ void updateGlobalData(void){
         try {
         http.begin(client, kGlobalHash1mUrl);
         int httpCode;
-        { HW_SHA_REQUEST(); std::lock_guard<std::mutex> shaLock(g_hwShaMutex); httpCode = http.GET(); }
+        { HW_SHA_REQUEST(); TlsPauseGuard tlsGuard; httpCode = http.GET(); }
 
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
@@ -141,6 +154,10 @@ void updateGlobalData(void){
                 }
                 double curDiff = doc["currentDifficulty"] | 0.0;
                 if (curDiff > 0.0) {
+                    {
+                        std::lock_guard<std::mutex> dlock(s_networkDiffMutex);
+                        s_networkDifficulty = curDiff;
+                    }
                     char diff_str[24] = {0};
                     suffix_string(curDiff, diff_str, sizeof(diff_str), 2);
                     gData.difficulty = diff_str;
@@ -153,7 +170,7 @@ void updateGlobalData(void){
 
         // Second API call on the same mempool.space connection: recommended fees
         http.begin(client, getFees);
-        { HW_SHA_REQUEST(); std::lock_guard<std::mutex> shaLock(g_hwShaMutex); httpCode = http.GET(); }
+        { HW_SHA_REQUEST(); TlsPauseGuard tlsGuard; httpCode = http.GET(); }
 
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
@@ -190,21 +207,30 @@ static volatile uint32_t s_blockHeight = 0; // numeric copy, safe to read from a
 String getBlockHeight(void){
     
     if(fetchDue(mHeightUpdate, mHeightTry, UPDATE_Height_min * 60 * 1000)){
-            
+        std::lock_guard<std::mutex> fetchLock(s_httpFetchMutex);
         HTTPClient http;
         http.setTimeout(FETCH_TIMEOUT_ms);
         try {
         http.begin(getHeightAPI);
         int httpCode;
-        { HW_SHA_REQUEST(); std::lock_guard<std::mutex> shaLock(g_hwShaMutex); httpCode = http.GET(); }
+        { HW_SHA_REQUEST(); TlsPauseGuard tlsGuard; httpCode = http.GET(); }
 
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
             payload.trim();
-            current_block = payload;
-            s_blockHeight = (uint32_t)payload.toInt();
-
-            mHeightUpdate = millis();
+            bool allDigits = !payload.isEmpty();
+            for (size_t i = 0; i < payload.length(); ++i) {
+                if (!isdigit((unsigned char)payload[i])) {
+                    allDigits = false;
+                    break;
+                }
+            }
+            uint32_t height = allDigits ? (uint32_t)strtoul(payload.c_str(), nullptr, 10) : 0;
+            if (height > 0) {
+                current_block = payload;
+                s_blockHeight = height;
+                mHeightUpdate = millis();
+            }
         }        
         http.end();
         } catch(...) {
@@ -219,38 +245,50 @@ String getBlockHeight(void){
 unsigned long mBTCUpdate = 0;
 
 static String formatCachedBTCprice(void){
-    const CurrencyInfo &cur = currencyFor(Settings.Currency);
+    String curCode;
+    {
+        std::lock_guard<std::mutex> lock(g_settingsMutex);
+        curCode = Settings.Currency;
+    }
+    const CurrencyInfo &cur = currencyFor(curCode);
     char price_buffer[24];
     snprintf(price_buffer, sizeof(price_buffer), "%s%u", cur.prefix, bitcoin_price);
     return String(price_buffer);
 }
 
 String getBTCprice(void){
-    const CurrencyInfo &cur = currencyFor(Settings.Currency);
+    String curCode;
+    {
+        std::lock_guard<std::mutex> lock(g_settingsMutex);
+        curCode = Settings.Currency;
+    }
+    const CurrencyInfo &cur = currencyFor(curCode);
 
     if(fetchDue(mBTCUpdate, mBTCTry, UPDATE_BTC_min * 60 * 1000)){
-
+        std::lock_guard<std::mutex> fetchLock(s_httpFetchMutex);
         HTTPClient http;
         http.setTimeout(FETCH_TIMEOUT_ms);
 
         try {
         http.begin(String(getBTCAPI) + cur.code);
         int httpCode;
-        { HW_SHA_REQUEST(); std::lock_guard<std::mutex> shaLock(g_hwShaMutex); httpCode = http.GET(); }
+        { HW_SHA_REQUEST(); TlsPauseGuard tlsGuard; httpCode = http.GET(); }
 
         if (httpCode == HTTP_CODE_OK) {
             String payload = http.getString();
 
             StaticJsonDocument<512> doc;
-            deserializeJson(doc, payload.c_str());
+            DeserializationError err = deserializeJson(doc, payload.c_str());
           
-            if (doc.containsKey("bitcoin") && doc["bitcoin"].containsKey(cur.code)) {
-                bitcoin_price = doc["bitcoin"][cur.code];
+            if (!err && doc.containsKey("bitcoin") && doc["bitcoin"].containsKey(cur.code)) {
+                unsigned int price = doc["bitcoin"][cur.code] | 0U;
+                if (price > 0) {
+                    bitcoin_price = price;
+                    mBTCUpdate = millis();
+                }
             }
 
             doc.clear();
-
-            mBTCUpdate = millis();
         }
         
         http.end();
@@ -438,8 +476,9 @@ double getHashrateKhs(void)
   const float khs = getMinerStatus().hashrateKHs;
   if (khs > 0.0f)
     return (double)khs;
-  if (upTime > 0)
-    return (double)totalKHashes / (double)upTime;
+  const uint64_t ut = getUpTime();
+  if (ut > 0)
+    return (double)getTotalKHashes() / (double)ut;
   return 0.0;
 }
 
@@ -489,7 +528,7 @@ mining_data getMiningData(unsigned long mElapsed)
   suffix_string(getBestDiff(), best_diff_string, 16, 0);
 
   char timeMining[24] = {0}; // [15] overflowed from 10000 days
-  uint64_t tm = upTime;
+  uint64_t tm = getUpTime();
   int secs = tm % 60;
   tm /= 60;
   int mins = tm % 60;
@@ -500,7 +539,7 @@ mining_data getMiningData(unsigned long mElapsed)
 
   data.completedShares = shares;
   data.totalMHashes = String((unsigned long)(getTotalHashes() / 1000000));
-  data.totalKHashes = String((unsigned long long)totalKHashes);
+  data.totalKHashes = String((unsigned long long)getTotalKHashes());
   data.currentHashRate = getCurrentHashRate(mElapsed);
   data.templates = templates;
   data.bestDiff = best_diff_string;
@@ -518,7 +557,7 @@ clock_data getClockData(unsigned long mElapsed)
   const bool lit = screenLit();
 
   data.completedShares = shares;
-  data.totalKHashes = String((unsigned long long)totalKHashes);
+  data.totalKHashes = String((unsigned long long)getTotalKHashes());
   data.currentHashRate = getCurrentHashRate(mElapsed);
   data.btcPrice = lit ? getBTCprice() : formatCachedBTCprice();
   data.blockHeight = lit ? getBlockHeight() : current_block;
@@ -548,7 +587,7 @@ coin_data getCoinData(unsigned long mElapsed)
     updateGlobalData(); // Update gData vars asking mempool APIs
 
   data.completedShares = shares;
-  data.totalKHashes = String((unsigned long long)totalKHashes);
+  data.totalKHashes = String((unsigned long long)getTotalKHashes());
   data.currentHashRate = getCurrentHashRate(mElapsed);
   data.btcPrice = lit ? getBTCprice() : formatCachedBTCprice();
   data.currentTime = getTime();
@@ -745,9 +784,8 @@ String getPoolAPIUrl(void) {
 }
 
 pool_data getPoolData(void){
-    //pool_data pData;    
-    if((mPoolUpdate == 0) || (millis() - mPoolUpdate > UPDATE_POOL_min * 60 * 1000)){      
-        if (WiFi.status() != WL_CONNECTED) return pData;
+    if(fetchDue(mPoolUpdate, mPoolTry, UPDATE_POOL_min * 60 * 1000)){
+        std::lock_guard<std::mutex> fetchLock(s_httpFetchMutex);
         //Make first API call to get global hash and current difficulty
         // Explicit, freshly-constructed WiFiClientSecure per call (rather
         // than letting HTTPClient manage an internal one implicitly) --
@@ -761,7 +799,11 @@ pool_data getPoolData(void){
         HTTPClient http;
         http.setTimeout(FETCH_TIMEOUT_ms);
         try {
-          String btcWallet = Settings.BtcWallet;
+          String btcWallet;
+          {
+              std::lock_guard<std::mutex> lock(g_settingsMutex);
+              btcWallet = Settings.BtcWallet;
+          }
           // Serial.println(btcWallet);
           if (btcWallet.indexOf(".")>0) btcWallet = btcWallet.substring(0,btcWallet.indexOf("."));
           int apiStyle = POOL_API_PUBLICPOOL;
@@ -791,13 +833,12 @@ pool_data getPoolData(void){
           // acceleration (SHA384/512), which does NOT block against mining's
           // esp_sha_lock_engine(SHA2_256) -- confirmed via a crash backtrace
           // showing abort() inside sha_hal_read_digest() when both ran
-          // concurrently. g_hwShaMutex closes that gap; see mining.h.
+          // concurrently. TlsPauseGuard + g_hwShaMutex closes that gap; see mining.h.
           int httpCode;
           {
             HW_SHA_REQUEST();
-            g_hwShaMutex.lock();
+            TlsPauseGuard tlsGuard;
             httpCode = http.GET();
-            g_hwShaMutex.unlock();
           }
           if (httpCode == HTTP_CODE_OK) {
               String payload = http.getString();
@@ -887,8 +928,10 @@ pool_data getPoolData(void){
               }
               mPoolUpdate = millis();
 #ifdef SCREEN_WORKERS_ENABLE
-              if (heliosPool && heliosJudgeAnswer(httpCode, pData.workersCount))
+              if (heliosPool && heliosJudgeAnswer(httpCode, pData.workersCount)) {
                   mPoolUpdate = millis() - (UPDATE_POOL_min * 60 * 1000 - HELIOS_RETRY_ms);
+                  mPoolTry = millis() - (FETCH_RETRY_ms - HELIOS_RETRY_ms);
+              }
 #endif
               Serial.println("\n####### Pool Data OK!");
           } else {
@@ -896,14 +939,13 @@ pool_data getPoolData(void){
               Serial.println(httpCode);
               String payload = http.getString();
               Serial.println(payload);
-              // Must still back off on failure, or a persistently-failing
-              // pool API gets hammered every ~2s instead of once a minute —
-              // enough to trip some pools' WAF/anti-abuse rate limiting and
-              // turn a transient failure into a permanent one.
-              mPoolUpdate = millis();
+              // fetchDue() already set mPoolTry = now, giving a 60s retry
+              // backoff without resetting mPoolUpdate to 15 minutes.
 #ifdef SCREEN_WORKERS_ENABLE
-              if (heliosPool && heliosJudgeAnswer(httpCode, 0))
+              if (heliosPool && heliosJudgeAnswer(httpCode, 0)) {
                   mPoolUpdate = millis() - (UPDATE_POOL_min * 60 * 1000 - HELIOS_RETRY_ms);
+                  mPoolTry = millis() - (FETCH_RETRY_ms - HELIOS_RETRY_ms);
+              }
 #endif
               pData.bestDifficulty = "P";
               pData.workersHash = "E";
@@ -916,7 +958,6 @@ pool_data getPoolData(void){
           client.stop();
         } catch(...) {
           Serial.println("####### Pool Error!");
-          mPoolUpdate = millis();
           pData.bestDifficulty = "P";
           pData.workersHash = "Error";
           pData.workersCount = 0;
@@ -943,12 +984,17 @@ void poolSettingsChanged(void) {
 }
 
 void applyPendingSettings(void) {
-    if (Settings.Timezone != s_appliedTimezone) {
-        String posixTz = getPosixTz(Settings.Timezone);
+    String tz;
+    {
+        std::lock_guard<std::mutex> lock(g_settingsMutex);
+        tz = Settings.Timezone;
+    }
+    if (tz != s_appliedTimezone) {
+        String posixTz = getPosixTz(tz);
         setenv("TZ", posixTz.c_str(), 1);
         tzset();
-        s_appliedTimezone = Settings.Timezone;
-        Serial.printf("Applied updated timezone: %s (POSIX: %s)\n", Settings.Timezone.c_str(), posixTz.c_str());
+        s_appliedTimezone = tz;
+        Serial.printf("Applied updated timezone: %s (POSIX: %s)\n", tz.c_str(), posixTz.c_str());
     }
 
     bool currencyChanged = false;
@@ -980,6 +1026,7 @@ void applyPendingSettings(void) {
         heliosMisses = 0;
         pData = pool_data();
         mPoolUpdate = 0;
+        mPoolTry = 0;
     }
 }
 

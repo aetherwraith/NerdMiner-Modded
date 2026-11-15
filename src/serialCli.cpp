@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <initializer_list>
 #include <vector>
+#include <atomic>
 
 #include "drivers/storage/storage.h"
 #include "drivers/storage/nvMemory.h"
@@ -28,7 +29,15 @@ extern volatile uint32_t rejects;
 extern uint64_t upTime;
 
 static TaskHandle_t s_cliTaskHandle = nullptr;
-static volatile bool s_cliLoopMode = false;
+static std::atomic<bool> s_cliLoopMode{false};
+static bool s_cliRestartScheduled = false;
+static uint32_t s_cliRestartAt = 0;
+
+static void scheduleCliRestart(uint32_t delayMs)
+{
+  s_cliRestartScheduled = true;
+  s_cliRestartAt = millis() + delayMs;
+}
 static char s_lineBuf[1024];
 static size_t s_lineLen = 0;
 static bool s_prevCharWasCr = false;
@@ -219,7 +228,7 @@ static void printConfig(void)
 
 static void handleConfigJson(const String &jsonStr)
 {
-  DynamicJsonDocument doc(1536);
+  DynamicJsonDocument doc(3072);
   DeserializationError err = deserializeJson(doc, jsonStr.c_str());
   if (err) {
     Serial.printf("[ERROR] Failed to parse JSON: %s\n", err.c_str());
@@ -236,8 +245,7 @@ static void handleConfigJson(const String &jsonStr)
   if (restart) {
     Serial.println(F("{\"success\":true,\"message\":\"Settings applied. Restarting device for changes...\",\"rebootRequired\":true}"));
     saveStat();
-    delay(1000);
-    ESP.restart();
+    scheduleCliRestart(1000);
   } else {
     Serial.println(F("{\"success\":true,\"message\":\"Settings applied live successfully.\",\"rebootRequired\":false}"));
   }
@@ -282,7 +290,8 @@ static bool isSupportedSetKey(const String &key)
     "ledbright", "ledbrightness", "ledscreen", "ledscreenoff",
     "mqtt", "mqttenabled", "mqtthost", "mqhost", "mqttport", "mqport",
     "mqttuser", "mquser", "mqttpass", "mqpass", "mqtttopic", "mqtopic",
-    "webpass", "webpassword", "invert", "invertcolors", "flip", "flipdisplay"
+    "webpass", "webpassword", "invert", "invertcolors", "flip", "flipdisplay",
+    "templimit"
   };
   for (const char *k : kValidKeys) {
     if (key == k) return true;
@@ -315,8 +324,7 @@ static void cmdSetKey(const std::vector<String> &args)
     applyLiveSettings(before, next, poolChanged);
     Serial.printf("[OK] WiFi configured for '%s'. Restarting in 1s to associate...\n", next.WifiSSID.c_str());
     saveStat();
-    delay(1000);
-    ESP.restart();
+    scheduleCliRestart(1000);
     return;
   }
 
@@ -325,8 +333,9 @@ static void cmdSetKey(const std::vector<String> &args)
     return;
   }
 
-  if ((key == "port" || key == "poolport") && args[2].toInt() <= 0) {
-    Serial.println(F("[ERROR] Invalid port number"));
+  if ((key == "port" || key == "poolport" || key == "bport" || key == "backupport" || key == "mqttport" || key == "mqport") &&
+      (args[2].toInt() <= 0 || args[2].toInt() > 65535)) {
+    Serial.println(F("[ERROR] Invalid port number (must be 1-65535)"));
     return;
   }
 
@@ -348,8 +357,7 @@ static void cmdSetKey(const std::vector<String> &args)
   if (restart) {
     Serial.printf("[OK] Setting '%s' saved. Restarting in 1s to apply...\n", key.c_str());
     saveStat();
-    delay(1000);
-    ESP.restart();
+    scheduleCliRestart(1000);
     return;
   }
 
@@ -427,8 +435,7 @@ static void executeCommand(const String &rawLine)
   else if (cmd == "restart" || cmd == "reboot") {
     Serial.println(F("[REBOOT] Restarting device..."));
     saveStat();
-    delay(500);
-    ESP.restart();
+    scheduleCliRestart(500);
   }
   else if (cmd == "ota") {
     String subcmd = (args.size() >= 2) ? args[1] : "status";
@@ -498,6 +505,11 @@ static void executeCommand(const String &rawLine)
 
 void serialCliProcess(void)
 {
+  if (s_cliRestartScheduled && (int32_t)(millis() - s_cliRestartAt) >= 0) {
+    s_cliRestartScheduled = false;
+    ESP.restart();
+  }
+
   while (Serial.available()) {
     int c = Serial.read();
     if (c < 0) break;
@@ -558,5 +570,8 @@ void setup_serialCli(void)
 
 void serialCliEnterLoopMode(void)
 {
-  s_cliLoopMode = true;
+  s_cliLoopMode.store(true, std::memory_order_release);
+  for (int i = 0; i < 6 && s_cliTaskHandle != nullptr; ++i) {
+    delay(10);
+  }
 }

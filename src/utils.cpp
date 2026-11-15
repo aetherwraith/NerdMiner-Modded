@@ -19,30 +19,21 @@ uint8_t hex(char ch) {
 }
 
 int to_byte_array(const char *in, size_t in_size, uint8_t *out) {
+    if (!in || !out) return 0;
     int count = 0;
-    if (in_size % 2) {
-        while (*in && out) {
-            *out = hex(*in++);
-            if (!*in)
-                return count;
-            *out = (*out << 4) | hex(*in++);
-            out++;
-            count++;
-        }
-        return count;
-    } else {
-        while (*in && out) {
-            // two statements: in "hex(*in++) << 4 | hex(*in++)" the order of the
-            // two reads is unspecified, the compiler was free to swap the nibbles
-            const uint8_t hi = hex(*in++);
-            if (!*in)
-                return count; // odd number of digits: drop the last one
-            const uint8_t lo = hex(*in++);
-            *out++ = (hi << 4) | lo;
-            count++;
-        }
-        return count;
+    size_t i = 0;
+    if (in_size & 1) {
+        if (in[0] == '\0')
+            return 0;
+        out[count++] = hex(in[0]);
+        i = 1;
     }
+    for (; i + 1 < in_size && in[i] != '\0' && in[i + 1] != '\0'; i += 2) {
+        const uint8_t hi = hex(in[i]);
+        const uint8_t lo = hex(in[i + 1]);
+        out[count++] = (hi << 4) | lo;
+    }
+    return count;
 }
 
 static const double truediffone = 26959535291011309493156476344723991336010898738574164086137773096960.0;
@@ -290,28 +281,18 @@ miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob
         Serial.println("");
         #endif
     }
-    // merkle root from merkle_result
-    char merkle_root[65];
-    for (int i = 0; i < 32; i++) {
-      snprintf(&merkle_root[i*2], 3, "%02x", mMiner.merkle_result[i]);
-    }
-    merkle_root[64] = 0; // 64 hex digits; [65] was one byte past the end
+    // Assemble the 80-byte block header directly in binary without a hex-string round-trip
+    to_byte_array(mJob.version.c_str(), 8, mMiner.bytearray_blockheader);
+    to_byte_array(mJob.prev_block_hash.c_str(), 64, mMiner.bytearray_blockheader + 4);
+    memcpy(mMiner.bytearray_blockheader + 36, mMiner.merkle_result, 32);
+    to_byte_array(mJob.ntime.c_str(), 8, mMiner.bytearray_blockheader + 68);
+    to_byte_array(mJob.nbits.c_str(), 8, mMiner.bytearray_blockheader + 72);
+    memset(mMiner.bytearray_blockheader + 76, 0, 4);
     #ifdef DEBUG_MINING
     Serial.print("    merkle sha         : ");
-    Serial.println(merkle_root);
-    #endif
-
-    // calculate blockheader
-    // j.block_header = ''.join([j.version, j.prevhash, merkle_root, j.ntime, j.nbits])
-    String blockheader = mJob.version + mJob.prev_block_hash + String(merkle_root) + mJob.ntime + mJob.nbits + "00000000";
-    str_len = blockheader.length()/2;
-    
-    //uint8_t bytearray_blockheader[str_len];
-    res = to_byte_array(blockheader.c_str(), str_len*2, mMiner.bytearray_blockheader);
-
-    #ifdef DEBUG_MINING
-    Serial.println("    blockheader: "); Serial.print(blockheader);
-    Serial.println("    blockheader bytes "); Serial.print(str_len); Serial.print(" -> ");
+    for (size_t i = 0; i < 32; i++)
+        Serial.printf("%02x", mMiner.merkle_result[i]);
+    Serial.println("");
     #endif
 
     // reverse version
@@ -401,7 +382,7 @@ miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob
         Serial.printf("%02x", mMiner.bytearray_blockheader[i]);
     Serial.println("");
     Serial.println("bytearray_blockheader: ");
-    for (size_t i = 0; i < str_len; i++) {
+    for (size_t i = 0; i < 80; i++) {
       Serial.printf("%02x", mMiner.bytearray_blockheader[i]);
     }
     Serial.println("");
@@ -492,6 +473,8 @@ void suffix_string(double val, char *buf, size_t bufsiz, int sigdigits)
 		/* Always show sigdigits + 1, padded on right with zeroes
 		 * followed by suffix */
 		int ndigits = sigdigits - 1 - (dval > 0.0 ? floor(log10(dval)) : 0);
+		if (ndigits < 0)
+			ndigits = 0;
 
 		snprintf(buf, bufsiz, "%*.*f%s", sigdigits + 1, ndigits, dval, suffix);
 	}

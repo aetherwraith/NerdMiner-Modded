@@ -17,6 +17,8 @@
 
 extern bool checkWebApiMutationAllowed();
 extern bool isWebApiMutationPermitted();
+extern void sendCorsJson(int code, const String &json);
+extern bool handleCorsOptions(void);
 
 #ifndef PIOENV_NAME
 #if defined(ESP32_2432S028R)
@@ -46,6 +48,8 @@ static String s_targetOtaUrl = "";
 static volatile bool s_otaRebootScheduled = false;
 static unsigned long s_otaRebootTime = 0;
 static bool s_uploadRejected = false;
+static uint8_t s_uploadHeaderBuf[16];
+static size_t s_uploadHeaderLen = 0;
 
 String getBoardModel(void) {
   return String(PIOENV_NAME);
@@ -138,16 +142,19 @@ static void otaWorkerTask(void *param) {
   g_otaUpdating = true;
   pauseHwMinerForTls();
 
-  WiFiClientSecure client;
-  client.setInsecure(); // Skip full root CA bundle to preserve heap
+  const bool isHttps = !url.startsWith("http://") && !url.startsWith("HTTP://");
+  WiFiClient plainClient;
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure(); // Skip full root CA bundle to preserve heap
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(20000);
   http.setUserAgent("NerdMiner-Modded-OTA/" CURRENT_VERSION);
 
-  if (!http.begin(client, url)) {
-    String msg = "Failed to initialize HTTPS connection";
+  const bool began = isHttps ? http.begin(secureClient, url) : http.begin(plainClient, url);
+  if (!began) {
+    String msg = String("Failed to initialize ") + (isHttps ? "HTTPS" : "HTTP") + " connection";
     setOtaError(msg);
     Serial.println("[OTA] Error: " + msg);
     g_otaUpdating = false;
@@ -157,9 +164,11 @@ static void otaWorkerTask(void *param) {
   }
 
   int httpCode = 0;
-  {
+  if (isHttps) {
     HW_SHA_REQUEST();
-    std::lock_guard<std::mutex> shaLock(g_hwShaMutex);
+    TlsPauseGuard tlsGuard;
+    httpCode = http.GET();
+  } else {
     httpCode = http.GET();
   }
   if (httpCode != HTTP_CODE_OK && httpCode != HTTP_CODE_FOUND && httpCode != HTTP_CODE_MOVED_PERMANENTLY) {
@@ -242,13 +251,15 @@ static void otaWorkerTask(void *param) {
   }
 
   bool writeFailed = false;
+  unsigned long lastDataMs = millis();
   // Stream remaining bytes while g_otaUpdating stays true
-  while (http.connected() && (writtenTotal < totalBytes || totalBytes == 0)) {
+  while ((http.connected() || stream->available() > 0) && (writtenTotal < totalBytes || totalBytes == 0)) {
     size_t avail = stream->available();
     if (avail > 0) {
       size_t toRead = (avail > sizeof(buffer)) ? sizeof(buffer) : avail;
       size_t bytesRead = stream->readBytes(buffer, toRead);
       if (bytesRead > 0) {
+        lastDataMs = millis();
         size_t written = Update.write(buffer, bytesRead);
         if (written != bytesRead) {
           setOtaError("Write error: " + String(Update.errorString()));
@@ -264,11 +275,40 @@ static void otaWorkerTask(void *param) {
         }
       }
     } else {
+      if ((unsigned long)(millis() - lastDataMs) > 15000UL) {
+        setOtaError("Download stalled (socket timeout)");
+        Update.abort();
+        writeFailed = true;
+        break;
+      }
       vTaskDelay(pdMS_TO_TICKS(5));
     }
   }
 
+  // Drain any trailing buffered bytes before closing the socket cleanly
+  if (!writeFailed) {
+    size_t drainLimit = 4096;
+    while (stream->available() > 0 && drainLimit > 0) {
+      size_t toRead = stream->available();
+      if (toRead > sizeof(buffer)) toRead = sizeof(buffer);
+      if (toRead > drainLimit) toRead = drainLimit;
+      size_t n = stream->readBytes(buffer, toRead);
+      if (n == 0) break;
+      drainLimit -= n;
+    }
+  }
+
   http.end();
+
+  if (!writeFailed && (writtenTotal == 0 || (totalBytes > 0 && writtenTotal < totalBytes))) {
+    String msg = (writtenTotal == 0)
+        ? "Empty firmware download (0 bytes)"
+        : "Truncated download (" + String((unsigned)writtenTotal) + "/" + String((unsigned)totalBytes) + " bytes)";
+    setOtaError(msg);
+    Serial.println("[OTA] Error: " + msg);
+    Update.abort();
+    writeFailed = true;
+  }
 
   if (!writeFailed) {
     if (Update.end(true)) {
@@ -297,7 +337,9 @@ static void otaWorkerTask(void *param) {
 bool startUrlOta(const String &url) {
   {
     std::lock_guard<std::mutex> lock(s_otaMutex);
-    if (s_otaStatus.state == OTA_STATE_DOWNLOADING || s_otaStatus.state == OTA_STATE_FLASHING) {
+    if (s_otaStatus.state != OTA_STATE_IDLE &&
+        s_otaStatus.state != OTA_STATE_ERROR &&
+        s_otaStatus.state != OTA_STATE_SUCCESS) {
       return false;
     }
     s_targetOtaUrl = url;
@@ -328,7 +370,7 @@ static bool fetchGitHubRelease(const char* repo, DynamicJsonDocument &doc) {
   int httpCode = 0;
   {
     HW_SHA_REQUEST();
-    std::lock_guard<std::mutex> shaLock(g_hwShaMutex);
+    TlsPauseGuard tlsGuard;
     httpCode = http.GET();
   }
   Serial.printf("[OTA] HTTP GET code: %d\n", httpCode);
@@ -363,7 +405,9 @@ static bool fetchGitHubRelease(const char* repo, DynamicJsonDocument &doc) {
 bool checkGitHubUpdate(void) {
   {
     std::lock_guard<std::mutex> lock(s_otaMutex);
-    if (s_otaStatus.state == OTA_STATE_DOWNLOADING || s_otaStatus.state == OTA_STATE_FLASHING) {
+    if (s_otaStatus.state == OTA_STATE_CHECKING ||
+        s_otaStatus.state == OTA_STATE_DOWNLOADING ||
+        s_otaStatus.state == OTA_STATE_FLASHING) {
       return false;
     }
     s_otaStatus.state = OTA_STATE_CHECKING;
@@ -457,7 +501,7 @@ bool startGitHubOta(const String &targetVersion) {
 }
 
 void otaProcess(void) {
-  if (s_otaRebootScheduled && millis() >= s_otaRebootTime) {
+  if (s_otaRebootScheduled && (int32_t)(millis() - s_otaRebootTime) >= 0) {
     s_otaRebootScheduled = false;
     Serial.println("[OTA] Saving stats and rebooting into newly updated firmware...");
     saveStat();
@@ -467,13 +511,6 @@ void otaProcess(void) {
 }
 
 // ----------------- Web UI & API Handlers -----------------
-
-static void sendOtaOptions(WebServer &server) {
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  server.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  server.send(204);
-}
 
 static void handleOtaPage(WebServer &server) {
   if (!checkWebApiMutationAllowed()) return;
@@ -501,16 +538,12 @@ static void handleApiGetUpdate(WebServer &server) {
   json += ",\"downloadUrl\":\"" + jsonEscape(st.downloadUrl) + "\"";
   json += ",\"error\":\"" + jsonEscape(st.errorMessage) + "\"}";
 
-  server.sendHeader("Access-Control-Allow-Origin", "*");
   server.sendHeader("Cache-Control", "no-store");
-  server.send(200, "application/json", json);
+  sendCorsJson(200, json);
 }
 
 static void handleApiPostUpdate(WebServer &server) {
-  if (server.method() == HTTP_OPTIONS) {
-    sendOtaOptions(server);
-    return;
-  }
+  if (handleCorsOptions()) return;
   if (!checkWebApiMutationAllowed()) return;
 
   String targetUrl = "";
@@ -537,15 +570,12 @@ static void handleApiPostUpdate(WebServer &server) {
   }
   json += "}";
 
-  // checkWebApiMutationAllowed() already added CORS headers
-  server.send(ok ? 200 : 400, "application/json", json);
+  sendCorsJson(ok ? 200 : 400, json);
 }
 
 static void handleApiCheckUpdate(WebServer &server) {
-  if (server.method() == HTTP_OPTIONS) {
-    sendOtaOptions(server);
-    return;
-  }
+  if (handleCorsOptions()) return;
+  if (!checkWebApiMutationAllowed()) return;
 
   bool ok = checkGitHubUpdate();
   OtaStatus st = getOtaStatus();
@@ -564,13 +594,12 @@ static void handleApiCheckUpdate(WebServer &server) {
   }
   json += "}";
 
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.send(ok ? 200 : 500, "application/json", json);
+  sendCorsJson(ok ? 200 : 500, json);
 }
 
 void setup_ota(WebServer &server) {
-  server.on("/update", HTTP_OPTIONS, [&server]() {
-    sendOtaOptions(server);
+  server.on("/update", HTTP_OPTIONS, []() {
+    handleCorsOptions();
   });
 
   server.on("/update", HTTP_GET, [&server]() {
@@ -606,6 +635,7 @@ void setup_ota(WebServer &server) {
         return;
       }
       s_uploadRejected = false;
+      s_uploadHeaderLen = 0;
       Serial.printf("[OTA] Starting upload: %s\n", upload.filename.c_str());
       {
         std::lock_guard<std::mutex> lock(s_otaMutex);
@@ -639,37 +669,57 @@ void setup_ota(WebServer &server) {
     else if (upload.status == UPLOAD_FILE_WRITE) {
       if (s_uploadRejected) return;
       if (Update.isRunning()) {
-        size_t writtenSoFar = 0;
-        {
-          std::lock_guard<std::mutex> lock(s_otaMutex);
-          writtenSoFar = s_otaStatus.bytesWritten;
-        }
-        if (writtenSoFar == 0 && upload.currentSize >= 16) {
-          String valErr;
-          if (!validateFirmwareHeader(upload.buf, upload.currentSize, valErr)) {
-            setOtaError(valErr);
-            Serial.println("[OTA] Validation failed: " + valErr);
-            Update.abort();
-            g_otaUpdating = false;
-            return;
+        const uint8_t *writePtr = upload.buf;
+        size_t writeLen = upload.currentSize;
+        if (s_uploadHeaderLen < 16) {
+          size_t take = 16 - s_uploadHeaderLen;
+          if (take > writeLen) take = writeLen;
+          memcpy(s_uploadHeaderBuf + s_uploadHeaderLen, writePtr, take);
+          s_uploadHeaderLen += take;
+          writePtr += take;
+          writeLen -= take;
+          if (s_uploadHeaderLen == 16) {
+            String valErr;
+            if (!validateFirmwareHeader(s_uploadHeaderBuf, 16, valErr)) {
+              setOtaError(valErr);
+              Serial.println("[OTA] Validation failed: " + valErr);
+              Update.abort();
+              g_otaUpdating = false;
+              return;
+            }
+            if (Update.write(s_uploadHeaderBuf, 16) != 16) {
+              String msg = "Write failed: " + String(Update.errorString());
+              setOtaError(msg);
+              Serial.println("[OTA] Error: " + msg);
+              Update.abort();
+              g_otaUpdating = false;
+              return;
+            }
+            std::lock_guard<std::mutex> lock(s_otaMutex);
+            s_otaStatus.bytesWritten += 16;
           }
         }
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-          String msg = "Write failed: " + String(Update.errorString());
-          setOtaError(msg);
-          Serial.println("[OTA] Error: " + msg);
-          Update.abort();
-          g_otaUpdating = false;
-        } else {
-          std::lock_guard<std::mutex> lock(s_otaMutex);
-          s_otaStatus.bytesWritten += upload.currentSize;
+        if (writeLen > 0 && s_uploadHeaderLen == 16) {
+          if (Update.write(const_cast<uint8_t*>(writePtr), writeLen) != writeLen) {
+            String msg = "Write failed: " + String(Update.errorString());
+            setOtaError(msg);
+            Serial.println("[OTA] Error: " + msg);
+            Update.abort();
+            g_otaUpdating = false;
+          } else {
+            std::lock_guard<std::mutex> lock(s_otaMutex);
+            s_otaStatus.bytesWritten += writeLen;
+          }
         }
       }
     }
     else if (upload.status == UPLOAD_FILE_END) {
       if (s_uploadRejected) return;
       if (Update.isRunning()) {
-        if (Update.end(true)) {
+        if (s_uploadHeaderLen < 16) {
+          setOtaError("Firmware image too small (< 16 bytes)");
+          Update.abort();
+        } else if (Update.end(true)) {
           {
             std::lock_guard<std::mutex> lock(s_otaMutex);
             s_otaStatus.state = OTA_STATE_SUCCESS;
@@ -693,8 +743,8 @@ void setup_ota(WebServer &server) {
     }
   });
 
-  server.on("/api/system/update", HTTP_OPTIONS, [&server]() {
-    sendOtaOptions(server);
+  server.on("/api/system/update", HTTP_OPTIONS, []() {
+    handleCorsOptions();
   });
 
   server.on("/api/system/update", HTTP_GET, [&server]() {
@@ -705,8 +755,8 @@ void setup_ota(WebServer &server) {
     handleApiPostUpdate(server);
   });
 
-  server.on("/api/system/update/check", HTTP_OPTIONS, [&server]() {
-    sendOtaOptions(server);
+  server.on("/api/system/update/check", HTTP_OPTIONS, []() {
+    handleCorsOptions();
   });
 
   server.on("/api/system/update/check", HTTP_POST, [&server]() {

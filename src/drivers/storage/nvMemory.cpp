@@ -89,6 +89,7 @@ void nvMemory::fillConfigJson(JsonDocument &doc, const TSettings &s, bool spiffs
         doc[JSON_SPIFFS_KEY_LATITUDE] = s.Latitude;
         doc[JSON_SPIFFS_KEY_LONGITUDE] = s.Longitude;
         doc[JSON_SPIFFS_KEY_HOSTNAME] = s.Hostname;
+        doc[JSON_SPIFFS_KEY_TEMPLIMIT] = s.TempLimit;
 #ifdef NO_DISPLAY
         doc[JSON_SPIFFS_KEY_STATUSLED] = s.statusLed;
 #endif
@@ -143,6 +144,7 @@ void nvMemory::fillConfigJson(JsonDocument &doc, const TSettings &s, bool spiffs
     doc["mqttUser"] = s.MqttUser;
     doc["mqttPass"] = maskSecrets ? (s.MqttPass.length() > 0 ? "********" : "") : s.MqttPass.c_str();
     doc["mqttTopic"] = s.MqttTopic;
+    doc["tempLimit"] = s.TempLimit;
 }
 
 /// @brief Save settings to config file on SPIFFS
@@ -284,20 +286,25 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     }
     if (pw.length() > 0 && !isMaskedSecret(pw)) Settings->WifiPW = pw;
 
+    auto parsePoolStr = [](String raw, int &portOut) -> String {
+        raw.trim();
+        if (raw.startsWith("stratum+tcp://")) raw = raw.substring(14);
+        else if (raw.startsWith("stratum://")) raw = raw.substring(10);
+        else if (raw.startsWith("tcp://")) raw = raw.substring(6);
+        int colonIdx = raw.lastIndexOf(':');
+        if (colonIdx > 0) {
+            int parsedPort = raw.substring(colonIdx + 1).toInt();
+            if (parsedPort > 0) portOut = parsedPort;
+            raw = raw.substring(0, colonIdx);
+        }
+        return raw;
+    };
+
     // Pool connection (supports "stratum+tcp://host:port" or "host" + "port")
     String pool = getJsonString(json, {JSON_SPIFFS_KEY_POOLURL, JSON_KEY_POOLURL, "pool", "poolUrl", "poolurl", "stratum", "stratumURL", "PrimaryPool"});
     pool.trim();
     if (pool.length() > 0) {
-        if (pool.startsWith("stratum+tcp://")) pool = pool.substring(14);
-        else if (pool.startsWith("stratum://")) pool = pool.substring(10);
-        else if (pool.startsWith("tcp://")) pool = pool.substring(6);
-        int colonIdx = pool.lastIndexOf(':');
-        if (colonIdx > 0) {
-            int parsedPort = pool.substring(colonIdx + 1).toInt();
-            if (parsedPort > 0) Settings->PoolPort = parsedPort;
-            pool = pool.substring(0, colonIdx);
-        }
-        Settings->PoolAddress = pool;
+        Settings->PoolAddress = parsePoolStr(pool, Settings->PoolPort);
     }
 
     Settings->PoolPort = constrain(getJsonInt(json, Settings->PoolPort, {JSON_SPIFFS_KEY_POOLPORT, JSON_KEY_POOLPORT, "port", "poolPort", "poolport", "stratumPort"}), 0, 65535);
@@ -323,18 +330,7 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     // Backup Pool
     const char* bpoolKey = nullptr;
     if (hasAnyKey(json, {JSON_SPIFFS_KEY_BACKUPPOOLURL, "backupPool", "backuppool", "bpool", "fallbackStratumURL", "SecondaryPool"}, &bpoolKey)) {
-        String bpool = json[bpoolKey].as<String>();
-        bpool.trim();
-        if (bpool.startsWith("stratum+tcp://")) bpool = bpool.substring(14);
-        else if (bpool.startsWith("stratum://")) bpool = bpool.substring(10);
-        else if (bpool.startsWith("tcp://")) bpool = bpool.substring(6);
-        int colonIdx = bpool.lastIndexOf(':');
-        if (colonIdx > 0) {
-            int parsedPort = bpool.substring(colonIdx + 1).toInt();
-            if (parsedPort > 0) Settings->BackupPoolPort = parsedPort;
-            bpool = bpool.substring(0, colonIdx);
-        }
-        Settings->BackupPoolAddress = bpool;
+        Settings->BackupPoolAddress = parsePoolStr(json[bpoolKey].as<String>(), Settings->BackupPoolPort);
     }
     Settings->BackupPoolPort = constrain(getJsonInt(json, Settings->BackupPoolPort, {JSON_SPIFFS_KEY_BACKUPPOOLPORT, "backupPort", "backupport", "bport", "fallbackStratumPort", "SecondaryPort"}), 0, 65535);
 
@@ -502,6 +498,7 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     }
     Settings->ledBrightness = constrain(getJsonInt(json, Settings->ledBrightness, {JSON_SPIFFS_KEY_LEDBRIGHTNESS, "ledbright", "ledbrightness", "led_brightness"}), 1, 255);
     Settings->ledScreenOff = getJsonBool(json, Settings->ledScreenOff, {JSON_SPIFFS_KEY_LEDSCREENOFF, "ledscreen", "ledscreenoff", "led_screen_off"});
+    Settings->TempLimit = constrain(getJsonInt(json, Settings->TempLimit, {JSON_SPIFFS_KEY_TEMPLIMIT, "tempLimit", "templimit", "temp_limit"}), 0, 95);
 
     return true;
 }

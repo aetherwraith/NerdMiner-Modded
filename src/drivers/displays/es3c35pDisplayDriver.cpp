@@ -32,6 +32,7 @@
 #include "drivers/storage/nvMemory.h"
 #include "drivers/storage/storage.h"
 #include "currency.h"
+#include "pulseUi.h"
 
 extern nvMemory nvMem;
 extern monitor_data mMonitor;
@@ -382,47 +383,13 @@ static bool touchGetXY(int &x, int &y)
 
 // ---------------------------------------------------------------- palette --
 
-#define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
-
-static const uint16_t C_BG = RGB565(5, 7, 13);      // near-black ink
-static const uint16_t C_PANEL = RGB565(13, 18, 30); // raised surface
-static const uint16_t C_EDGE = RGB565(30, 41, 62);  // hairlines
-static const uint16_t C_TRACK = RGB565(22, 30, 46); // unlit gauge / bar tracks
-static const uint16_t C_TEXT = RGB565(232, 238, 248);
-static const uint16_t C_DIM = RGB565(112, 128, 156);
-static const uint16_t C_GOOD = RGB565(61, 255, 176);
-static const uint16_t C_WARN = RGB565(255, 176, 40);
-static const uint16_t C_GOLD = RGB565(255, 206, 64);
-
-struct Accent
-{
-  uint16_t main; // hot end of gradients, wordmark, dots
-  uint16_t alt;  // cool end of gradients
-};
-
-static const Accent ACCENTS[] = {
-    {RGB565(34, 225, 255), RGB565(140, 92, 255)}, // ice / violet
-    {RGB565(61, 255, 176), RGB565(38, 148, 255)}, // mint / azure
-    {RGB565(255, 176, 40), RGB565(255, 72, 112)}, // amber / rose
-    {RGB565(255, 84, 190), RGB565(122, 92, 255)}, // magenta / indigo
-    {RGB565(190, 255, 60), RGB565(30, 208, 160)}, // lime / teal
-};
-#define ACCENT_COUNT (sizeof(ACCENTS) / sizeof(ACCENTS[0]))
+#define ACCENT_COUNT PULSE_ACCENT_COUNT
 
 static int accentIdx = 0;
-static uint16_t cAcc = ACCENTS[0].main;
-static uint16_t cAlt = ACCENTS[0].alt;
+static uint16_t cAcc = PULSE_ACCENTS[0].main;
+static uint16_t cAlt = PULSE_ACCENTS[0].alt;
 
-// t = 0..255 blends a -> b
-static uint16_t mix565(uint16_t a, uint16_t b, uint8_t t)
-{
-  int ar = (a >> 11) & 0x1F, ag = (a >> 5) & 0x3F, ab = a & 0x1F;
-  int br = (b >> 11) & 0x1F, bg = (b >> 5) & 0x3F, bb = b & 0x1F;
-  int r = ar + ((br - ar) * t) / 255;
-  int g = ag + ((bg - ag) * t) / 255;
-  int bl = ab + ((bb - ab) * t) / 255;
-  return (uint16_t)((r << 11) | (g << 5) | bl);
-}
+#define mix565 pulseMix565
 
 // --------------------------------------------------------------- geometry --
 
@@ -453,6 +420,16 @@ static float gaugeShown = 0;
 static uint8_t segLvl[G_SEGS];
 static unsigned long shareFlashUntil = 0;
 static uint32_t lastShares = 0;
+static bool s_showingIdentify = false;
+static int s_lastIdentifySec = -1;
+static uint32_t s_identifyStaticKey = 0;
+static bool s_wasCelebrating = false;
+static bool s_lastRingFlash = false;
+
+static bool isShareFlashing()
+{
+  return pulseIsShareFlashing(shareFlashUntil);
+}
 
 // history of hashrate for the CLOCK screen
 #define HIST_N 48
@@ -492,15 +469,11 @@ enum WidgetId
   W_CHART,
   W_COUNT
 };
-static String wkey[W_COUNT];
+static uint32_t wkey[W_COUNT];
 
-static bool need(int id, const String &k) { return wkey[id] != k; }
-static void done(int id, const String &k) { wkey[id] = k; }
-static void resetWidgets()
-{
-  for (int i = 0; i < W_COUNT; i++)
-    wkey[i] = "\x01";
-}
+static bool need(int id, uint32_t k) { return pulseNeed(wkey, id, k); }
+static void done(int id, uint32_t k) { pulseDone(wkey, id, k); }
+static void resetWidgets() { pulseResetWidgets(wkey, W_COUNT); }
 
 // ---------------------------------------------------------- output target --
 // Widgets are drawn into a scratch sprite, copied into the frame buffer and
@@ -559,101 +532,18 @@ static void textPair(TFT_eSPI &d, int cx, int y, const char *val, const char *un
   text(d, unit, x0 + wv + 5, y + (size - usz), usz, cu, bg);
 }
 
-// rounded card: 1px edge, AA corners
-static void panel(TFT_eSPI &d, int x, int y, int w, int h, int r, uint16_t fill, uint16_t edge, uint16_t behind)
-{
-  d.fillSmoothRoundRect(x, y, w, h, r, edge, behind);
-  d.fillSmoothRoundRect(x + 1, y + 1, w - 2, h - 2, r - 1, fill, edge);
-}
-
-// horizontal gradient bar (alt -> accent) with softly rounded ends
+#define panel pulsePanel
 static void gradBar(TFT_eSPI &d, int x, int y, int w, int h)
 {
-  for (int i = 0; i < w; i++)
-  {
-    int inset = 0;
-    int e = i < w - 1 - i ? i : w - 1 - i; // distance to nearest end
-    if (h >= 6)
-      inset = e < 1 ? 2 : (e < 3 ? 1 : 0);
-    uint16_t c = mix565(cAlt, cAcc, (uint8_t)(w > 1 ? i * 255 / (w - 1) : 255));
-    d.drawFastVLine(x + i, y + inset, h - 2 * inset, c);
-  }
+  pulseGradBar(d, x, y, w, h, cAlt, cAcc);
 }
 
-static String commas(const String &s)
-{
-  int n = s.length();
-  for (int i = 0; i < n; i++)
-    if (!isDigit(s[i]))
-      return s;
-  String o;
-  for (int i = 0; i < n; i++)
-  {
-    o += s[i];
-    int rem = n - 1 - i;
-    if (rem > 0 && rem % 3 == 0)
-      o += ',';
-  }
-  return o;
-}
-
-static String fmtPrice(const String &s)
-{
-  // btcPrice is "<ascii prefix><digits>"; swap the prefix for the real symbol
-  // (the embedded Pulse font carries the glyphs for all of them)
-  int i = 0;
-  while (i < (int)s.length() && !isdigit((unsigned char)s[i]))
-    i++;
-  String digits = s.substring(i);
-  if (digits.toInt() <= 0)
-    return "--";
-  return String(currencyFor(Settings.Currency).symbol) + commas(digits);
-}
-
-static String btcPairLabel()
-{
-  String c = currencyFor(Settings.Currency).code;
-  c.toUpperCase();
-  return "BTC / " + c;
-}
-
-static String fmtUptime(const String &s)
-{
-  int d = 0, h = 0, m = 0, sec = 0;
-  sscanf(s.c_str(), "%d %d:%d:%d", &d, &h, &m, &sec);
-  char b[16];
-  if (d > 0)
-    snprintf(b, sizeof(b), "%dd %02dh", d, h);
-  else
-    snprintf(b, sizeof(b), "%02d:%02d:%02d", h, m, sec);
-  return String(b);
-}
-
-static String fmtDate(const String &s)
-{
-  static const char *mon[] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
-  static const char *wd[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
-  static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-  int d = 0, m = 0, y = 0;
-  if (sscanf(s.c_str(), "%d/%d/%d", &d, &m, &y) != 3 || m < 1 || m > 12)
-    return "";
-  int yy = y - (m < 3 ? 1 : 0);
-  int dow = (yy + yy / 4 - yy / 100 + yy / 400 + t[m - 1] + d) % 7;
-  char b[32];
-  snprintf(b, sizeof(b), "%s  %d %s %d", wd[dow], d, mon[m - 1], y);
-  return String(b);
-}
-
-static int wifiBars()
-{
-  if (WiFi.status() != WL_CONNECTED)
-    return 0;
-  int r = WiFi.RSSI();
-  return r > -55 ? 4 : r > -65 ? 3
-                   : r > -75   ? 2
-                   : r > -85   ? 1
-                               : 0;
-}
+#define commas pulseCommas
+static String fmtPrice(const String &s) { return pulseFmtPrice(s, Settings.Currency); }
+static String btcPairLabel() { return pulseBtcPairLabel(Settings.Currency); }
+#define fmtUptime pulseFmtUptime
+#define fmtDate pulseFmtDate
+#define wifiBars pulseWifiBars
 
 static float lastKh = 0;
 
@@ -731,8 +621,7 @@ struct HdrV
 
 static void drawHeader(const HdrV &h)
 {
-  char k[64];
-  snprintf(k, sizeof(k), "%s|%s|%d|%d|%d", h.time.c_str(), h.ip.c_str(), h.bars, h.status, accentIdx);
+  const uint32_t k = PulseKey().add(h.time).add(h.ip).add(h.bars).add(h.status).add(accentIdx).value();
   if (!need(W_HDR, k))
     return;
   const int X0 = 32, W = SCR_W - X0;
@@ -820,7 +709,7 @@ static void drawStrip(const StripV &s)
 {
   for (int i = 0; i < 4; i++)
   {
-    String k = s.l[i] + "|" + s.v[i] + "|" + accentIdx;
+    const uint32_t k = PulseKey().add(s.l[i]).add(s.v[i]).add(accentIdx).value();
     if (!need(W_P0 + i, k))
       continue;
     if (!wBegin(104, 40, C_PANEL))
@@ -843,8 +732,7 @@ static void chromeStripCells(TFT_eSPI &d)
 static void drawTile(int id, int x, int y, int w, int h, const char *label, const char *value,
                      uint16_t stripe, uint16_t valCol, uint16_t edge)
 {
-  char k[64];
-  snprintf(k, sizeof(k), "%s|%s|%u|%u|%u", label, value, stripe, valCol, edge);
+  const uint32_t k = PulseKey().add(label).add(value).add(stripe).add(valCol).add(edge).value();
   if (!need(id, k))
     return;
   if (!wBegin(w, h, C_BG))
@@ -883,7 +771,7 @@ static void paintMine(const MineV &m)
   drawHeader(m.hdr);
 
   // hero readout inside the ring
-  String k = m.hash + "|" + accentIdx;
+  uint32_t k = PulseKey().add(m.hash).add(accentIdx).value();
   if (need(W_HERO, k))
   {
     if (wBegin(140, 100, C_BG))
@@ -898,7 +786,7 @@ static void paintMine(const MineV &m)
   }
 
   // lifetime hashes, in the gap at the bottom of the ring
-  k = m.total + "|" + accentIdx;
+  k = PulseKey().add(m.total).add(accentIdx).value();
   if (need(W_TOTAL, k))
   {
     if (wBegin(160, 22, C_BG))
@@ -944,7 +832,7 @@ static void paintMarket(const MarketV &m)
 {
   drawHeader(m.hdr);
 
-  String k = m.price + "|" + accentIdx;
+  uint32_t k = PulseKey().add(m.price).add(accentIdx).value();
   if (need(W_PRICE, k) && wBegin(264, 62, C_PANEL))
   {
     const unsigned len = m.price.length();
@@ -953,7 +841,7 @@ static void paintMarket(const MarketV &m)
     done(W_PRICE, k);
   }
 
-  k = m.block + "|" + accentIdx;
+  k = PulseKey().add(m.block).add(accentIdx).value();
   if (need(W_BLOCK, k) && wBegin(164, 62, C_PANEL))
   {
     text(wgt, m.block.c_str(), 160, 22, 30, cAcc, C_PANEL, Align::TopRight);
@@ -966,8 +854,7 @@ static void paintMarket(const MarketV &m)
   drawTile(W_M1, 166, y, w, h, "DIFFICULTY", m.diff.c_str(), cAlt, C_TEXT, C_EDGE);
   drawTile(W_M2, 322, y, w, h, "NETWORK RATE", m.net.c_str(), C_DIM, C_TEXT, C_EDGE);
 
-  char kb[48];
-  snprintf(kb, sizeof(kb), "%d|%s|%d", m.pct, m.remaining.c_str(), accentIdx);
+  const uint32_t kb = PulseKey().add(m.pct).add(m.remaining).add(accentIdx).value();
   if (need(W_HALV, kb) && wBegin(436, 40, C_PANEL))
   {
     text(wgt, "NEXT HALVING", 4, 2, 12, C_DIM, C_PANEL);
@@ -1006,8 +893,7 @@ static void chromeClock(TFT_eSPI &d)
 
 static void drawChart()
 {
-  char k[24];
-  snprintf(k, sizeof(k), "%lu|%u|%d", (unsigned long)histEpoch, histCount, accentIdx);
+  const uint32_t k = PulseKey().add(histEpoch).add(histCount).add(accentIdx).value();
   if (!need(W_CHART, k))
     return;
   const int W = 432, H = 38;
@@ -1044,21 +930,21 @@ static void paintClock(const ClockV &c)
 
   // Glyph boxes start well above the digits (ascender space), so draw the
   // text above the widget: the digits then fill it.
-  String k = c.hh + "|" + accentIdx;
+  uint32_t k = PulseKey().add(c.hh).add(accentIdx).value();
   if (need(W_HH, k) && wBegin(168, 94, C_BG))
   {
     text(wgt, c.hh.c_str(), 166, -42, 124, C_TEXT, C_BG, Align::TopRight);
     wEnd(52, 40);
     done(W_HH, k);
   }
-  k = c.mm + "|" + accentIdx;
+  k = PulseKey().add(c.mm).add(accentIdx).value();
   if (need(W_MM, k) && wBegin(168, 94, C_BG))
   {
     text(wgt, c.mm.c_str(), 2, -42, 124, cAcc, C_BG, Align::TopLeft);
     wEnd(260, 40);
     done(W_MM, k);
   }
-  k = String(c.colon) + "|" + accentIdx;
+  k = PulseKey().add(c.colon).add(accentIdx).value();
   if (need(W_COLON, k) && wBegin(40, 94, C_BG))
   {
     uint16_t dot = c.colon ? C_DIM : C_BG;
@@ -1068,7 +954,7 @@ static void paintClock(const ClockV &c)
     done(W_COLON, k);
   }
 
-  k = c.date;
+  k = PulseKey().add(c.date).value();
   if (need(W_DATE, k) && wBegin(332, 24, C_BG))
   {
     text(wgt, c.date.c_str(), 166, 2, 16, C_DIM, C_BG, Align::TopCenter);
@@ -1166,8 +1052,8 @@ static void repaintCached(int scr);
 static void setAccent(int idx)
 {
   accentIdx = idx % ACCENT_COUNT;
-  cAcc = ACCENTS[accentIdx].main;
-  cAlt = ACCENTS[accentIdx].alt;
+  cAcc = PULSE_ACCENTS[accentIdx].main;
+  cAlt = PULSE_ACCENTS[accentIdx].alt;
   if (uiLive)
   {
     int s = currentDisplayDriver->current_cyclic_screen;
@@ -1212,8 +1098,8 @@ static void loadUiPrefs()
   accentIdx = p.getUChar("accent", 0) % ACCENT_COUNT;
   int page = p.getUChar("page", 0);
   p.end();
-  cAcc = ACCENTS[accentIdx].main;
-  cAlt = ACCENTS[accentIdx].alt;
+  cAcc = PULSE_ACCENTS[accentIdx].main;
+  cAlt = PULSE_ACCENTS[accentIdx].alt;
   savedAccent = accentIdx;
   savedPage = restorePage = page;
 }
@@ -1273,6 +1159,77 @@ static void logShare(const String &shares, const String &khashes, const String &
                 shares.c_str(), khashes.c_str(), rate.c_str());
 }
 
+static void paintIdentifyScreen()
+{
+  const String host = Settings.Hostname[0] ? String(Settings.Hostname) : String("nerdminer");
+  const String ip = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("No WiFi");
+  const String wallet = Settings.BtcWallet;
+  const int dot = wallet.indexOf('.');
+  const String worker = (dot >= 0 && dot + 1 < (int)wallet.length()) ? wallet.substring(dot) : String();
+
+  const uint32_t staticKey = PulseKey().add(host).add(ip).add(worker).add(accentIdx).value();
+  if (!s_showingIdentify || s_identifyStaticKey != staticKey)
+  {
+    s_showingIdentify = true;
+    s_identifyStaticKey = staticKey;
+    s_lastIdentifySec = -1;
+    uiScreen = -1;
+
+    clearScreen(fb);
+    panel(fb, 8, 8, SCR_W - 16, SCR_H - 16, 16, C_BG, cAcc, C_BG);
+    fb.drawRoundRect(11, 11, SCR_W - 22, SCR_H - 22, 13, cAcc);
+
+    const int bw = textW("LOCATE MINER", 16) + 32;
+    const uint16_t badgeBg = mix565(C_BG, cAcc, 56);
+    fb.fillSmoothRoundRect((SCR_W - bw) / 2, 24, bw, 28, 14, badgeBg, C_BG);
+    text(fb, "LOCATE MINER", SCR_W / 2, 30, 16, cAcc, badgeBg, Align::TopCenter);
+
+    panel(fb, 24, 64, SCR_W - 48, 96, 12, C_PANEL, C_EDGE, C_BG);
+    unsigned hsz = 56;
+    while (hsz > 22 && textW(host.c_str(), hsz) > SCR_W - 72)
+      hsz -= 2;
+    const int hy = 64 + (96 - (int)hsz) / 2 - 6;
+    text(fb, host.c_str(), SCR_W / 2, hy, hsz, cAcc, C_PANEL, Align::TopCenter);
+
+    if (worker.length() > 0)
+    {
+      panel(fb, 24, 174, 252, 66, 10, C_PANEL, C_EDGE, C_BG);
+      text(fb, "IP ADDRESS", 40, 183, 12, C_DIM, C_PANEL);
+      unsigned ipsz = 20;
+      while (ipsz > 12 && textW(ip.c_str(), ipsz) > 222)
+        ipsz--;
+      text(fb, ip.c_str(), 40, 203, ipsz, C_TEXT, C_PANEL);
+
+      panel(fb, 288, 174, 168, 66, 10, C_PANEL, C_EDGE, C_BG);
+      text(fb, "WORKER", 304, 183, 12, C_DIM, C_PANEL);
+      unsigned wsz = 20;
+      while (wsz > 12 && textW(worker.c_str(), wsz) > 138)
+        wsz--;
+      text(fb, worker.c_str(), 304, 203, wsz, C_GOOD, C_PANEL);
+    }
+    else
+    {
+      panel(fb, 24, 174, SCR_W - 48, 66, 10, C_PANEL, C_EDGE, C_BG);
+      text(fb, "IP ADDRESS", SCR_W / 2, 183, 12, C_DIM, C_PANEL, Align::TopCenter);
+      text(fb, ip.c_str(), SCR_W / 2, 202, 22, C_TEXT, C_PANEL, Align::TopCenter);
+    }
+    panelFlushAll();
+  }
+
+  const int secs = (int)((identifyRemainingMs() + 999U) / 1000U);
+  if (secs != s_lastIdentifySec)
+  {
+    s_lastIdentifySec = secs;
+    char cd[32];
+    snprintf(cd, sizeof(cd), "RETURNING IN %ds", secs);
+    if (wBegin(300, 34, C_BG))
+    {
+      text(wgt, cd, 150, 6, 17, C_TEXT, C_BG, Align::TopCenter);
+      wEnd((SCR_W - 300) / 2, 256);
+    }
+  }
+}
+
 void es3c35p_MinerScreen(unsigned long mElapsed)
 {
   if (restorePage > 0 && restorePage < currentDisplayDriver->num_cyclic_screens)
@@ -1285,6 +1242,13 @@ void es3c35p_MinerScreen(unsigned long mElapsed)
     return;
   }
   restorePage = 0;
+  if (isIdentifying())
+  {
+    uiLive = true;
+    paintIdentifyScreen();
+    return;
+  }
+  s_showingIdentify = false;
   mining_data data = getMiningData(mElapsed);
   refreshPool();
   uiLive = true;
@@ -1308,7 +1272,7 @@ void es3c35p_MinerScreen(unsigned long mElapsed)
   m.blocks = data.valids;
   m.total = data.totalMHashes;
   m.kh = kh;
-  m.flash = millis() < shareFlashUntil;
+  m.flash = isShareFlashing();
   m.strip.l[0] = "WORKERS";
   m.strip.v[0] = String(pData.workersCount);
   m.strip.l[1] = "POOL RATE";
@@ -1326,6 +1290,13 @@ void es3c35p_MinerScreen(unsigned long mElapsed)
 
 void es3c35p_MarketScreen(unsigned long mElapsed)
 {
+  if (isIdentifying())
+  {
+    uiLive = true;
+    paintIdentifyScreen();
+    return;
+  }
+  s_showingIdentify = false;
   coin_data data = getCoinData(mElapsed);
   refreshPool();
   uiLive = true;
@@ -1358,6 +1329,13 @@ void es3c35p_MarketScreen(unsigned long mElapsed)
 
 void es3c35p_ClockScreen(unsigned long mElapsed)
 {
+  if (isIdentifying())
+  {
+    uiLive = true;
+    paintIdentifyScreen();
+    return;
+  }
+  s_showingIdentify = false;
   clock_data data = getClockData(mElapsed);
   uiLive = true;
   ensureChrome(SCR_CLOCK);
@@ -1506,11 +1484,12 @@ void es3c35p_SetupScreen(void)
 
 void es3c35p_AnimateCurrentScreen(unsigned long frame)
 {
-  if (!uiLive || uiScreen < 0)
+  if (isIdentifying() || !uiLive || uiScreen < 0)
     return;
   drawPulse(frame);
-  if (uiScreen == SCR_MINE && fabsf(gaugeTarget - gaugeShown) > 0.002f)
+  if (uiScreen == SCR_MINE && (fabsf(gaugeTarget - gaugeShown) > 0.002f || isShareFlashing() != s_lastRingFlash))
   {
+    s_lastRingFlash = isShareFlashing();
     gaugeShown += (gaugeTarget - gaugeShown) * 0.3f; // ease toward the measured rate
     gaugeDraw(fb, gaugeShown, true);
   }
@@ -1598,6 +1577,27 @@ void es3c35p_DoLedStuff(unsigned long frame)
   {
     pendingFlip = false;
     applyFlip();
+  }
+
+  const bool celebrating = isCelebrating();
+  if (celebrating && !s_wasCelebrating)
+  {
+    shareFlashUntil = millis() + 2000;
+  }
+  s_wasCelebrating = celebrating;
+
+  if (isIdentifying())
+  {
+    if (uiLive)
+      paintIdentifyScreen();
+    return;
+  }
+  if (s_showingIdentify)
+  {
+    s_showingIdentify = false;
+    int s = currentDisplayDriver->current_cyclic_screen;
+    ensureChrome(s);
+    repaintCached(s);
   }
 
   // Screen changed by touch or the boot button: draw the new page right away

@@ -49,8 +49,11 @@
         | ((uint32_t)(b)[(i) + 3]))
 #endif
 
-//DRAM_ATTR static const uint32_t K[] = {
+#ifdef NERD_SW_ASM
+static const uint32_t K[64] = {
+#else
 DRAM_ATTR static const uint32_t K[64] = {
+#endif
         0x428A2F98L, 0x71374491L, 0xB5C0FBCFL, 0xE9B5DBA5L, 0x3956C25BL,
         0x59F111F1L, 0x923F82A4L, 0xAB1C5ED5L, 0xD807AA98L, 0x12835B01L,
         0x243185BEL, 0x550C7DC3L, 0x72BE5D74L, 0x80DEB1FEL, 0x9BDC06A7L,

@@ -30,8 +30,13 @@ static bool s_restart = true;            // (re)read the settings and (re)start
 static uint32_t s_lastPublish = 0;
 // The client keeps pointers into these while it runs
 static String s_uri, s_user, s_pass, s_clientId, s_base, s_availTopic, s_cmdTopic, s_node;
+#define MQTT_CMD_QUEUE_SLOTS 4
+#define MQTT_CMD_MAX_LEN 512
 static std::mutex s_cmdMutex;
-static String s_pendingCmd;
+static char s_cmdQueue[MQTT_CMD_QUEUE_SLOTS][MQTT_CMD_MAX_LEN + 1];
+static uint8_t s_cmdHead = 0;
+static uint8_t s_cmdTail = 0;
+static uint8_t s_cmdCount = 0;
 
 void mqttSettingsChanged(void) { s_restart = true; }
 
@@ -74,16 +79,19 @@ static void onMqttEvent(void *, esp_event_base_t, int32_t id, void *event_data)
       Serial.println("[MQTT] disconnected");
     s_connected = false;
   }
-  else if (id == MQTT_EVENT_DATA && ev && ev->topic && ev->data && ev->data_len > 0 && ev->data_len <= 512)
+  else if (id == MQTT_EVENT_DATA && ev && ev->topic && ev->data && ev->data_len > 0 && ev->data_len <= MQTT_CMD_MAX_LEN)
   {
     if ((size_t)ev->topic_len == s_cmdTopic.length() &&
         memcmp(ev->topic, s_cmdTopic.c_str(), ev->topic_len) == 0)
     {
-      char buf[513];
-      memcpy(buf, ev->data, ev->data_len);
-      buf[ev->data_len] = '\0';
       std::lock_guard<std::mutex> lock(s_cmdMutex);
-      s_pendingCmd = buf;
+      if (s_cmdCount < MQTT_CMD_QUEUE_SLOTS)
+      {
+        memcpy(s_cmdQueue[s_cmdTail], ev->data, ev->data_len);
+        s_cmdQueue[s_cmdTail][ev->data_len] = '\0';
+        s_cmdTail = (s_cmdTail + 1) % MQTT_CMD_QUEUE_SLOTS;
+        s_cmdCount++;
+      }
     }
   }
 }
@@ -120,8 +128,19 @@ static String nodeId()
 
 static void startClient()
 {
+  String mqTopic, mqHost, mqUser, mqPass;
+  int port = 1883;
+  {
+    std::lock_guard<std::mutex> lock(g_settingsMutex);
+    mqTopic = Settings.MqttTopic;
+    mqHost = Settings.MqttHost;
+    port = Settings.MqttPort;
+    mqUser = Settings.MqttUser;
+    mqPass = Settings.MqttPass;
+  }
+
   s_node = nodeId();
-  s_base = Settings.MqttTopic;
+  s_base = mqTopic;
   s_base.trim();
   while (s_base.endsWith("/"))
     s_base.remove(s_base.length() - 1);
@@ -129,11 +148,10 @@ static void startClient()
     s_base = "nerdminer/" + s_node.substring(10); // nerdminer/<last 3 MAC bytes>
   s_availTopic = s_base + "/status";
   s_cmdTopic = s_base + "/cmd";
-  int port = Settings.MqttPort;
-  const String host = mqttCleanHost(Settings.MqttHost, port); // also for a value saved before the page cleaned it
+  const String host = mqttCleanHost(mqHost, port); // also for a value saved before the page cleaned it
   s_uri = "mqtt://" + host + ":" + String(port);
-  s_user = Settings.MqttUser;
-  s_pass = Settings.MqttPass;
+  s_user = mqUser;
+  s_pass = mqPass;
   s_clientId = s_node;
 
   esp_mqtt_client_config_t cfg = {};
@@ -181,7 +199,8 @@ static void publish(const String &topic, const String &payload, bool retain)
 
 // One Home Assistant sensor reading a field of the state message.
 static void announceSensor(const char *key, const char *name, const char *tpl, const char *unit,
-                           const char *devClass, const char *stateClass, const char *icon)
+                           const char *devClass, const char *stateClass, const char *icon,
+                           const char *entityCat = nullptr)
 {
   DynamicJsonDocument d(1024);
   d["name"] = name;
@@ -196,6 +215,7 @@ static void announceSensor(const char *key, const char *name, const char *tpl, c
   if (devClass) d["dev_cla"] = devClass;
   if (stateClass) d["stat_cla"] = stateClass;
   if (icon) d["ic"] = icon;
+  if (entityCat) d["ent_cat"] = entityCat;
   JsonObject dev = d.createNestedObject("dev");
   dev.createNestedArray("ids").add(s_node);
   dev["name"] = "NerdMiner " + s_node.substring(10);
@@ -249,6 +269,8 @@ static void announce()
   announceSensor("luck", "Mining luck", "{{ value_json.luck_pct | default(0) }}", "%", nullptr, "measurement", "mdi:clover");
   announceSensor("rssi", "Wi-Fi signal", "{{ value_json.wifi.rssi }}", "dBm", "signal_strength", "measurement", nullptr);
   announceSensor("uptime", "Uptime", "{{ value_json.uptime_s }}", "s", "duration", nullptr, nullptr);
+  announceSensor("temp", "Temperature", "{{ value_json.temp }}", "°C", "temperature", "measurement", nullptr);
+  announceSensor("reset_reason", "Reset reason", "{{ value_json.reset_reason }}", nullptr, nullptr, nullptr, "mdi:restart", "diagnostic");
 #if defined(M5STICK_C_PLUS2) && defined(PIN_BATTERY_ADC)
   announceSensor("battery", "Battery", "{{ value_json.battery.percent }}", "%", "battery", "measurement", nullptr);
   announceSensor("battery_voltage", "Battery voltage", "{{ (value_json.battery.mv / 1000) | round(2) }}", "V", "voltage", "measurement", nullptr);
@@ -416,23 +438,32 @@ void mqttProcess(void)
   {
     s_restart = false;
     stopClient();
-    if (Settings.MqttEnabled && Settings.MqttHost.length() && WiFi.status() == WL_CONNECTED)
+    bool enabled = false;
+    bool hasHost = false;
+    {
+      std::lock_guard<std::mutex> lock(g_settingsMutex);
+      enabled = Settings.MqttEnabled;
+      hasHost = Settings.MqttHost.length() > 0;
+    }
+    if (enabled && hasHost && WiFi.status() == WL_CONNECTED)
       startClient();
-    else if (Settings.MqttEnabled && Settings.MqttHost.length())
+    else if (enabled && hasHost)
       s_restart = true; // try again once the Wi-Fi is up
   }
 
-  String cmd;
+  for (;;)
   {
-    std::lock_guard<std::mutex> lock(s_cmdMutex);
-    if (s_pendingCmd.length())
+    char cmdBuf[MQTT_CMD_MAX_LEN + 1];
     {
-      cmd = s_pendingCmd;
-      s_pendingCmd = String();
+      std::lock_guard<std::mutex> lock(s_cmdMutex);
+      if (s_cmdCount == 0)
+        break;
+      strlcpy(cmdBuf, s_cmdQueue[s_cmdHead], sizeof(cmdBuf));
+      s_cmdHead = (s_cmdHead + 1) % MQTT_CMD_QUEUE_SLOTS;
+      s_cmdCount--;
     }
+    handleCommand(String(cmdBuf));
   }
-  if (cmd.length())
-    handleCommand(cmd);
 
   if (!mqttConnected())
     return;

@@ -38,8 +38,6 @@
 #define S3_HW_MINER_OWNS_CORE1
 #endif
 
-//3 seconds WDT
-#define WDT_TIMEOUT 3
 //15 minutes WDT for miner task
 #define WDT_MINER_TIMEOUT 900
 
@@ -97,7 +95,6 @@ extern monitor_data mMonitor;
 
 /**********************⚡ GLOBAL Vars *******************************/
 
-unsigned long start = millis();
 const char* ntpServer = "pool.ntp.org";
 
 /********* INIT *****/

@@ -154,6 +154,7 @@ bool isTimeSynced(void);
 bool isBlockHeightKnown(void);
 unsigned int getBTCpriceValue(void); // raw price in the selected currency, 0 = unknown
 uint32_t getBlockHeightValue(void);  // last block height fetched, 0 = unknown (any task)
+double getNetworkDifficulty(void);   // last network difficulty fetched, 0.0 = unknown (any task)
 bool getLocalClock(int &hour, int &minute, int &second, int &day, int &month, int &year); // no NTP call (any task)
 long currentDstOffset(void);         // summer-time offset in force now, seconds (AUTO_DST_EU)
 

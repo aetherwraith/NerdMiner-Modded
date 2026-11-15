@@ -4,8 +4,10 @@ Import("env")
 
 
 def get_firmware_specifier_build_flag():
-    ret = subprocess.run(["git", "describe"], stdout=subprocess.PIPE, text=True)
-    build_version = ret.stdout.strip().replace("Release", "")
+    ret = subprocess.run(["git", "describe", "--tags", "--always"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    build_version = ret.stdout.strip().replace("Release", "") if ret.returncode == 0 else ""
+    if not build_version:
+        build_version = "unknown"
     print("Firmware Revision: " + build_version)
     return '-D AUTO_VERSION=\\"' + build_version + '\\"'
 
@@ -24,9 +26,9 @@ extra_flags = [
 # each target's pipelined HW loop unless explicitly overridden by the env.
 if mcu in ("esp32", "esp32s3"):
     if "ARDUINO_RUNNING_CORE" not in existing_flags_str:
-        extra_flags.extend(["-U ARDUINO_RUNNING_CORE", "-D ARDUINO_RUNNING_CORE=0"])
+        extra_flags.extend(["-UARDUINO_RUNNING_CORE", "-DARDUINO_RUNNING_CORE=0"])
     if "ARDUINO_EVENT_RUNNING_CORE" not in existing_flags_str:
-        extra_flags.extend(["-U ARDUINO_EVENT_RUNNING_CORE", "-D ARDUINO_EVENT_RUNNING_CORE=0"])
+        extra_flags.extend(["-UARDUINO_EVENT_RUNNING_CORE", "-DARDUINO_EVENT_RUNNING_CORE=0"])
 
 if mcu == "esp32" and "PIPELINED_ASM_MINING" not in existing_flags_str and "FORCE_SW_MINING" not in existing_flags_str:
     extra_flags.append("-D PIPELINED_ASM_MINING=1")
@@ -39,7 +41,7 @@ env.Append(BUILD_FLAGS=extra_flags)
 # web UI, CLI, OTA, storage) with -Os to save ~100 KB of Flash, while compiling
 # only the mining hot-path translation units with -O3 (+ -funroll-loops).
 HOT_UNROLL_FILES = {
-    "mining.cpp",
+    "mining_workers.cpp",
     "pipelined_hw_sha_classic.cpp",
     "sha_bench.cpp",
     "sha_bench_s3.cpp",

@@ -2,6 +2,7 @@
 #define MINING_API_H
 
 #include <Arduino.h>
+#include <atomic>
 #include <mutex>
 
 // Serializes classic-ESP32 (CONFIG_IDF_TARGET_ESP32) hardware SHA register
@@ -21,7 +22,15 @@ extern volatile bool g_otaUpdating;
 
 // Immediately request any in-flight hardware SHA chunk to yield so the caller
 // can acquire g_hwShaMutex without waiting up to 265-1190 ms for the chunk end.
+extern std::atomic<int> g_tlsPauseCount;
 void pauseHwMinerForTls(void);
+
+struct TlsPauseGuard {
+  TlsPauseGuard();
+  ~TlsPauseGuard();
+  TlsPauseGuard(const TlsPauseGuard&) = delete;
+  TlsPauseGuard& operator=(const TlsPauseGuard&) = delete;
+};
 
 // Bumped by the stratum task when the pool accepts a 32-bit share (difficulty
 // >= 1, the "32BITS SHARES" counter -- not every pool share, those come in
@@ -45,7 +54,6 @@ extern volatile uint32_t shares32Rejected;
 // 256 nonces and stays off the engine until it is back to zero. Expands to
 // nothing in every other build.
 #if defined(PIPELINED_S3_MINING)
-#include <atomic>
 extern std::atomic<int> g_hwShaWanted;
 
 struct HwShaRequest
@@ -59,8 +67,6 @@ struct HwShaRequest
 #endif
 
 // Mining
-#define MAX_NONCE_STEP  5000000U
-#define MAX_NONCE       25000000U
 #define TARGET_NONCE    471136297U
 #define DEFAULT_DIFFICULTY  0.00015
 #define KEEPALIVE_TIME_ms       30000
@@ -127,20 +133,22 @@ size_t getNotableShares(NotableShare *out, size_t maxCount);
 // Non-blocking LAN UDP fleet share celebration (called from loop()).
 void celebrateProcess(void);
 
-void runMiner(void *name);
 void minerWorkerSw(void * task_id);
 void minerWorkerHw(void * task_id);
-
-String printLocalTime(void);
 
 void resetStat();
 void updateBestDiff(double diff); // keep the best hash difficulty seen (any core)
 void addHashes(uint32_t n);        // stratum task: hashes the miners report
 uint64_t getTotalHashes();         // since the saved stats began; any task
 uint64_t getSessionHashes();       // since boot; any task
+uint64_t getTotalKHashes();        // cumulative KH since saved stats began
+uint64_t getUpTime();              // cumulative mining seconds
 double getBestDiff();
 double getSessionBestDiff();
 void saveStat();   // write the stats to NVS now (before a planned restart / power off)
+const char* getResetReasonStr();
+uint32_t getPoolDisconnectedSinceMs();
+bool getThermalThrottled();
 
 extern volatile uint32_t shares;
 extern volatile uint32_t valids;

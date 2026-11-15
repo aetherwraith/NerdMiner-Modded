@@ -91,6 +91,10 @@
 #define DEFAULT_NIGHTFADE	60	// minutes, half before and half after sunset / sunrise
 #endif
 
+#ifndef DEFAULT_TEMPLIMIT
+#define DEFAULT_TEMPLIMIT	0	// thermal auto-dim/throttle threshold in C (0 = disabled)
+#endif
+
 #define LED_MODE_OFF		0
 #define LED_MODE_STATUS		1	// red at start-up, blue while connecting, blinks the colour while mining
 #define LED_MODE_STEADY		2	// the colour, always on
@@ -152,6 +156,7 @@
 #define JSON_SPIFFS_KEY_MQTTUSER	"mqttUser"
 #define JSON_SPIFFS_KEY_MQTTPASS	"mqttPass"
 #define JSON_SPIFFS_KEY_MQTTTOPIC	"mqttTopic"
+#define JSON_SPIFFS_KEY_TEMPLIMIT	"tempLimit"
 
 // settings
 struct TSettings
@@ -197,6 +202,7 @@ struct TSettings
 	String MqttUser{ "" };
 	String MqttPass{ "" };
 	String MqttTopic{ "" };
+	int TempLimit{ DEFAULT_TEMPLIMIT };	// thermal guardrail C (0 = off, 40-95 = auto-dim & duty throttle)
 };
 
 #endif // _STORAGE_H_

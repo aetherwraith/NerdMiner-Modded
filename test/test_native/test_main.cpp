@@ -67,9 +67,14 @@ static void test_method_and_replies()
   TEST_ASSERT_EQUAL(STRATUM_PARSE_ERROR, parse_mining_method("{\"id\":6,\"result\":null,\"error\":{\"code\":21,\"message\":\"Stale\"}}"));
   TEST_ASSERT_EQUAL(STRATUM_PARSE_ERROR, parse_mining_method("{\"id\":6,\"result\":null,\"error\":[21]}"));
   TEST_ASSERT_EQUAL(STRATUM_PARSE_ERROR, parse_mining_method("not json"));
-  TEST_ASSERT_EQUAL(7, parse_extract_id("{\"id\":7,\"result\":false,\"error\":null}"));
-  TEST_ASSERT_FALSE(parse_extract_result("{\"id\":7,\"result\":false,\"error\":null}"));
-  TEST_ASSERT_TRUE(parse_extract_result("{\"id\":7,\"result\":true,\"error\":null}"));
+  unsigned long rxId = 0;
+  bool rxResult = true;
+  TEST_ASSERT_EQUAL(STRATUM_SUCCESS, parse_mining_method("{\"id\":7,\"result\":false,\"error\":null}", &rxId, &rxResult));
+  TEST_ASSERT_EQUAL(7, rxId);
+  TEST_ASSERT_FALSE(rxResult);
+  TEST_ASSERT_EQUAL(STRATUM_SUCCESS, parse_mining_method("{\"id\":7,\"result\":true,\"error\":null}", &rxId, &rxResult));
+  TEST_ASSERT_EQUAL(7, rxId);
+  TEST_ASSERT_TRUE(rxResult);
 }
 
 static void test_notify_fields()
@@ -131,8 +136,9 @@ static void test_merkle_branch_outlives_the_next_message()
   mining_job j;
   TEST_ASSERT_TRUE(parse_mining_notify(big_notify, j));
   // the next messages reuse the shared JSON document
-  TEST_ASSERT_EQUAL(STRATUM_SUCCESS, parse_mining_method("{\"id\":9,\"result\":[\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"],\"error\":null}"));
-  TEST_ASSERT_EQUAL(9, parse_extract_id("{\"id\":9,\"result\":true,\"error\":null}"));
+  unsigned long rxId = 0;
+  TEST_ASSERT_EQUAL(STRATUM_SUCCESS, parse_mining_method("{\"id\":9,\"result\":[\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"],\"error\":null}", &rxId));
+  TEST_ASSERT_EQUAL(9, rxId);
   TEST_ASSERT_EQUAL_UINT(3, j.merkle_branch.size());
   TEST_ASSERT_EQUAL_STRING("a61a86bfef236ffcdf31d3df360740364a803dc39653428b6bd5210fe8bd5ae5", j.merkle_branch[0].c_str());
   TEST_ASSERT_EQUAL_STRING("8e0f53ae84878e7bc8c61be28f0e3f30460ac51981738f07c2e4e91071539cf9", j.merkle_branch[2].c_str());
@@ -510,6 +516,7 @@ static void test_fill_and_parse_config_json()
   patch["ledColorHex"] = "#12ab34";
   patch["ledscreenoff"] = true;
   patch["screenOffTimeout"] = 60;
+  patch["tempLimit"] = 72;
   TEST_ASSERT_TRUE(nvMemory::parseJsonConfig(patch, &s));
   TEST_ASSERT_EQUAL_STRING("Europe/Dublin", s.Timezone.c_str());
   TEST_ASSERT_EQUAL_STRING("solo2.ckpool.org", s.BackupPoolAddress.c_str());
@@ -520,6 +527,25 @@ static void test_fill_and_parse_config_json()
   TEST_ASSERT_EQUAL_HEX32(0x12AB34, s.ledColor);
   TEST_ASSERT_TRUE(s.ledScreenOff);
   TEST_ASSERT_EQUAL_INT(1, s.ScreenTimeout);
+  TEST_ASSERT_EQUAL_INT(72, s.TempLimit);
+}
+
+static void test_v112_helpers()
+{
+  uint8_t out[4] = {0xAA, 0xAA, 0xAA, 0xAA};
+  TEST_ASSERT_EQUAL_INT(2, to_byte_array("12345678", 4, out));
+  TEST_ASSERT_EQUAL_HEX8(0x12, out[0]);
+  TEST_ASSERT_EQUAL_HEX8(0x34, out[1]);
+  TEST_ASSERT_EQUAL_HEX8(0xAA, out[2]);
+
+  char buf[32] = {0};
+  suffix_string(1234.0, buf, sizeof(buf), 2);
+  TEST_ASSERT_TRUE(strlen(buf) > 0);
+
+  uint32_t mask = 0;
+  TEST_ASSERT_TRUE(parse_mining_configure("{\"id\":2,\"result\":{\"version-rolling\":true,\"version-rolling.mask\":\"1fffe000\"},\"error\":null}", mask));
+  TEST_ASSERT_EQUAL_HEX32(0x1fffe000u, mask);
+  TEST_ASSERT_FALSE(parse_mining_configure("{\"id\":2,\"result\":{\"version-rolling\":false},\"error\":null}", mask));
 }
 
 int main(int, char **)
@@ -552,5 +578,6 @@ int main(int, char **)
   RUN_TEST(test_config_power_cut_before_rename_keeps_new);
   RUN_TEST(test_config_delete_removes_both);
   RUN_TEST(test_fill_and_parse_config_json);
+  RUN_TEST(test_v112_helpers);
   return UNITY_END();
 }

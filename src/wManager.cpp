@@ -364,9 +364,9 @@ void init_WifiManager()
     if (shouldSaveConfig)
     {
         nvMem.saveConfig(&Settings);
+        backlightTick(); // apply updated brightness live without forcing a reboot
         #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
         if (Settings.invertColors != invertAtBoot) ESP.restart();
-        if (Settings.Brightness != 250) ESP.restart();
         if (Settings.flipDisplay != flipAtBoot) ESP.restart(); // rotation is applied at display init
         #endif
     }

@@ -9,6 +9,7 @@
 #include "ShaTests/nerdSHA256plus.h"
 #include "stratum.h"
 #include "mining.h"
+#include "mining_internal.h"
 #include "utils.h"
 #include "monitor.h"
 #include "timeconst.h"
@@ -26,32 +27,8 @@
 #include "i2c_master.h"
 #include <esp_timer.h>
 
-// 10 Jobs per second
-#define NONCE_PER_JOB_SW 4096
-// The SW and HW miners must never hash the same nonce of a job (the pool
-// refuses the second one as "Duplicate"). The pipelined HW loop searches
-// byte-swapped nonces from its own cursor, so native-space chunk ranges alone
-// don't keep it apart from the SW chunks: they split the nonce space by the
-// low byte of the native nonce instead. SW chunks only use nonces whose low
-// byte is below 0x80 (swNonce(): a 4096-nonce chunk spans 8192 natives, all
-// allocations stay multiples of 256), while HW paths only use nonces whose
-// low byte is 0x80 and above (hwNonce() or pipelined top-bit cursor).
-#define SW_NONCE_SPAN (2 * NONCE_PER_JOB_SW)
-static inline uint32_t swNonce(uint32_t start, uint32_t n)
-{
-  return start + ((n >> 7) << 8) + (n & 0x7Fu);
-}
-static inline uint32_t hwNonce(uint32_t start, uint32_t n)
-{
-  return start + ((n >> 7) << 8) + 0x80u + (n & 0x7Fu);
-}
-
-// Chunk size the classic-ESP32 pipelined path re-enters C for (256K nonces).
-#define NONCE_PER_JOB_HW (256 * 1024)
-
-//#define I2C_SLAVE
-//#define SHA256_VALIDATE
-//#define RANDOM_NONCE
+// SW and HW miners split the nonce space by the low byte of the native nonce:
+// SW chunks use low byte < 0x80, HW paths use low byte >= 0x80.
 #define RANDOM_NONCE_MASK 0xFFFFC000u
 
 #ifdef HARDWARE_SHA265
@@ -103,6 +80,23 @@ uint64_t getSessionHashes()
   return v;
 }
 
+uint64_t totalKHashes = 0; // 32 bits wrapped after ~4.3 TH (about 50 days at 1 MH/s)
+uint32_t elapsedKHs = 0;
+uint64_t upTime = 0;
+
+uint64_t getTotalKHashes()
+{
+  return getTotalHashes() / 1000;
+}
+
+uint64_t getUpTime()
+{
+  portENTER_CRITICAL(&s_hashMux);
+  const uint64_t v = upTime;
+  portEXIT_CRITICAL(&s_hashMux);
+  return v;
+}
+
 // Saved stats read back at boot: added to all-time total only, so session
 // hashes still reflect work computed since boot.
 static void restoreHashes(uint32_t mhashes)
@@ -111,10 +105,6 @@ static void restoreHashes(uint32_t mhashes)
   s_hashTotal += (uint64_t)mhashes * 1000000ULL;
   portEXIT_CRITICAL(&s_hashMux);
 }
-
-uint64_t totalKHashes = 0; // 32 bits wrapped after ~4.3 TH (about 50 days at 1 MH/s)
-uint32_t elapsedKHs = 0;
-uint64_t upTime = 0;
 
 // Per-path attempt counters, only used to print a HW vs SW hashrate
 // breakdown under DEBUG_MINING so real hardware can be A/B tested
@@ -297,34 +287,66 @@ static void loadPoolChange(TSettings &to, const PoolChange &from)
 }
 
 // Backup pool (see mining.h). Only the stratum task changes these.
-static volatile bool s_onBackup = false;
+static std::atomic<bool> s_onBackup{false};
 static uint8_t s_poolFailures = 0;   // failed attempts in a row on the pool in use
 static uint32_t s_backupSince = 0;   // millis() of the switch to the backup, or of the last look at the main pool
+static std::atomic<uint32_t> s_poolDisconnectedSinceMs{0};
+std::atomic<bool> s_thermalThrottled{false};
+
+uint32_t getPoolDisconnectedSinceMs(void)
+{
+  return s_poolDisconnectedSinceMs.load(std::memory_order_relaxed);
+}
+
+bool getThermalThrottled(void)
+{
+  return s_thermalThrottled.load(std::memory_order_relaxed);
+}
+
+const char* getResetReasonStr(void)
+{
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "poweron";
+    case ESP_RST_EXT:      return "ext";
+    case ESP_RST_SW:       return "sw";
+    case ESP_RST_PANIC:    return "panic";
+    case ESP_RST_INT_WDT:  return "int_wdt";
+    case ESP_RST_TASK_WDT: return "task_wdt";
+    case ESP_RST_WDT:      return "wdt";
+    case ESP_RST_DEEPSLEEP:return "deepsleep";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SDIO:     return "sdio";
+    default:               return "unknown";
+  }
+}
 
 static bool backupPoolSet(void)
 {
+  std::lock_guard<std::mutex> lock(g_settingsMutex);
   return !Settings.BackupPoolAddress.isEmpty() && Settings.BackupPoolPort > 0;
 }
 
 bool onBackupPool(void)
 {
-  return s_onBackup;
+  return s_onBackup.load(std::memory_order_relaxed);
 }
 
 String activePoolAddress(void)
 {
   std::lock_guard<std::mutex> lock(g_settingsMutex);
-  return s_onBackup ? Settings.BackupPoolAddress : Settings.PoolAddress;
+  return s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolAddress : Settings.PoolAddress;
 }
 
 int activePoolPort(void)
 {
-  return s_onBackup ? Settings.BackupPoolPort : Settings.PoolPort;
+  std::lock_guard<std::mutex> lock(g_settingsMutex);
+  return s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolPort : Settings.PoolPort;
 }
 
-static const char *activePoolPassword(void)
+static String activePoolPassword(void)
 {
-  return s_onBackup ? Settings.BackupPoolPassword : Settings.PoolPassword;
+  std::lock_guard<std::mutex> lock(g_settingsMutex);
+  return String(s_onBackup.load(std::memory_order_relaxed) ? Settings.BackupPoolPassword : Settings.PoolPassword);
 }
 
 // While on the backup: does the main pool take a connection again?
@@ -364,6 +386,7 @@ static double getPoolDifficulty(void)
 
 // mining.authorize state
 static unsigned long s_authId = 0;
+static unsigned long s_cfgId = 0;
 static volatile int8_t s_authorized = -1;
 
 // Share submit -> ACK ping RTT tracking (8-slot ring buffer)
@@ -594,7 +617,8 @@ static bool takePoolChange(void)
   s_poolChangePending = false;
   if (!mainChanged && !(s_onBackup && backupChanged))
     return false;
-  s_onBackup = s_onBackup && !mainChanged && backupPoolSet();
+  const bool hasBackup = !Settings.BackupPoolAddress.isEmpty() && Settings.BackupPoolPort > 0;
+  s_onBackup = s_onBackup && !mainChanged && hasBackup;
   s_poolFailures = 0;
   s_backupSince = millis();
   return true;
@@ -610,30 +634,41 @@ int currentIntervalIndex = 0;
 bool checkPoolConnection(void) {
   if (client.connected()) {
     s_stratumConnected = true;
+    s_poolDisconnectedSinceMs.store(0, std::memory_order_relaxed);
     return true;
   }
 
   s_stratumConnected = false;
+  if (s_poolDisconnectedSinceMs.load(std::memory_order_relaxed) == 0)
+    s_poolDisconnectedSinceMs.store(millis() | 1u, std::memory_order_relaxed);
   isMinerSuscribed = false;
 
   Serial.println("Client not connected, trying to connect...");
   const String poolAddr = activePoolAddress();
 
-  // Resolve first time pool DNS and save IP
-  if (serverIP == IPAddress(1, 1, 1, 1)) {
-    WiFi.hostByName(poolAddr.c_str(), serverIP);
-    Serial.printf("Resolved DNS and save ip (first time) got: %s\n", serverIP.toString().c_str());
+  if (serverIP == IPAddress(1, 1, 1, 1) || serverIP == IPAddress(0, 0, 0, 0)) {
+    if (!WiFi.hostByName(poolAddr.c_str(), serverIP) || serverIP == IPAddress(0, 0, 0, 0)) {
+      serverIP = IPAddress(1, 1, 1, 1);
+      Serial.println("DNS resolution failed for: " + poolAddr);
+      return false;
+    }
+    Serial.printf("Resolved DNS got: %s\n", serverIP.toString().c_str());
   }
 
-  // Try connecting pool IP
-  if (!client.connect(serverIP, activePoolPort())) {
+  // Try connecting pool IP with a 3s timeout so reconnects never stall the task
+  if (!client.connect(serverIP, activePoolPort(), 3000)) {
     Serial.println("Imposible to connect to : " + poolAddr);
-    WiFi.hostByName(poolAddr.c_str(), serverIP);
+    IPAddress resolved;
+    if (WiFi.hostByName(poolAddr.c_str(), resolved) && resolved != IPAddress(0, 0, 0, 0))
+      serverIP = resolved;
+    else
+      serverIP = IPAddress(1, 1, 1, 1);
     Serial.printf("Resolved DNS got: %s\n", serverIP.toString().c_str());
     return false;
   }
 
   s_stratumConnected = true;
+  s_poolDisconnectedSinceMs.store(0, std::memory_order_relaxed);
   return true;
 }
 
@@ -666,27 +701,20 @@ bool checkPoolInactivity(unsigned int keepAliveTime, unsigned long inactivityTim
   return false;
 }
 
-// ---------------------------------------------------------------------------
-// Double-buffered immutable ActiveJob + lock-free atomic chunk cursors
-// (replaces per-chunk std::make_shared<JobRequest> heap churn)
-// ---------------------------------------------------------------------------
-struct ActiveJob
-{
-  uint32_t id;
-  uint32_t nonce_base;
-  double difficulty;
-  uint8_t sha_buffer[128];
-  uint32_t midstate[8];
-  uint32_t bake[16];
-#ifdef HARDWARE_SHA265
-#if defined(CONFIG_IDF_TARGET_ESP32)
-  uint32_t sha_buffer_swap[32];
-#elif defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
-  uint32_t hw_midstate[8];
+std::mutex s_job_mutex;
+std::mutex g_hwShaMutex;  // see mining.h for why this exists
+volatile bool g_otaUpdating = false;
+std::atomic<int> g_tlsPauseCount{0};
+#if defined(PIPELINED_S3_MINING)
+std::atomic<int> g_hwShaWanted{0}; // see mining.h
 #endif
-#endif
-};
 
+ActiveJob s_jobs[2];
+volatile uint8_t s_activeJobSlot = 0xFF;
+std::atomic<uint32_t> s_swNextIndex{0};
+#ifdef HARDWARE_SHA265
+std::atomic<uint32_t> s_hwNextIndex{0};
+#endif
 struct JobResult
 {
   uint32_t id;
@@ -695,22 +723,8 @@ struct JobResult
   uint8_t hash[32];
 };
 
-static std::mutex s_job_mutex;
-std::mutex g_hwShaMutex;  // see mining.h for why this exists
-volatile bool g_otaUpdating = false;
-static volatile bool s_tlsPauseRequested = false;
-#if defined(PIPELINED_S3_MINING)
-std::atomic<int> g_hwShaWanted{0}; // see mining.h
-#endif
-
-static ActiveJob s_jobs[2];
-static volatile uint8_t s_activeJobSlot = 0xFF;
-static std::atomic<uint32_t> s_swNextIndex{0};
-#ifdef HARDWARE_SHA265
-static std::atomic<uint32_t> s_hwNextIndex{0};
-#endif
 std::list<std::shared_ptr<JobResult>> s_job_result_list;
-static volatile uint8_t s_working_current_job_id = 0xFF;
+std::atomic<uint32_t> s_working_current_job_id{0xFFFFFFFFu};
 
 static inline void notifyStratumTask(void)
 {
@@ -719,7 +733,7 @@ static inline void notifyStratumTask(void)
     xTaskNotifyGive(h);
 }
 
-static void submitShareResult(uint32_t jobId, uint32_t nonce, double diff, const uint8_t hash[32])
+void submitShareResult(uint32_t jobId, uint32_t nonce, double diff, const uint8_t hash[32])
 {
   std::shared_ptr<JobResult> share = std::make_shared<JobResult>();
   share->id = jobId;
@@ -735,26 +749,27 @@ static void submitShareResult(uint32_t jobId, uint32_t nonce, double diff, const
 }
 
 #if defined(PIPELINED_ASM_MINING) && defined(CONFIG_IDF_TARGET_ESP32)
-// What the pipelined HW loop works from (layout is known to the asm, see
-// src/pipelined_hw_sha_classic_v2.S).
-struct pl_ctx_t
-{
-  uint32_t hdr[20];       // header words as the SHA engine wants them (byte-swapped)
-  uint32_t nonce;         // in: first nonce to try (swapped space); out: next one
-  uint32_t budget;        // in: nonces to try; out: nonces not tried
-  volatile uint32_t run;  // the asm reads it every nonce, so clearing it stops a chunk at once
-  uint32_t pad;           // 0x80000000
-  uint32_t chk;           // bench builds only
-};
-static pl_ctx_t s_pl_ctx;
+pl_ctx_t s_pl_ctx;
 #endif
 
 void pauseHwMinerForTls(void)
 {
-  s_tlsPauseRequested = true;
 #if defined(PIPELINED_ASM_MINING) && defined(CONFIG_IDF_TARGET_ESP32)
   s_pl_ctx.run = 0;
 #endif
+}
+
+TlsPauseGuard::TlsPauseGuard()
+{
+  g_tlsPauseCount.fetch_add(1, std::memory_order_release);
+  pauseHwMinerForTls();
+  g_hwShaMutex.lock();
+}
+
+TlsPauseGuard::~TlsPauseGuard()
+{
+  g_hwShaMutex.unlock();
+  g_tlsPauseCount.fetch_sub(1, std::memory_order_release);
 }
 
 struct Submition
@@ -770,7 +785,7 @@ static void MiningJobStop(uint32_t &job_pool, std::map<uint32_t, std::shared_ptr
     std::lock_guard<std::mutex> lock(s_job_mutex);
     s_job_result_list.clear();
     s_activeJobSlot = 0xFF;
-    s_working_current_job_id = 0xFF;
+    s_working_current_job_id.store(0xFFFFFFFFu, std::memory_order_relaxed);
   }
 #if defined(PIPELINED_ASM_MINING) && defined(CONFIG_IDF_TARGET_ESP32)
   s_pl_ctx.run = 0;
@@ -795,6 +810,7 @@ static uint32_t RandomGet()
 
 void runStratumWorker(void *name) {
   s_stratumTaskHandle = xTaskGetCurrentTaskHandle();
+  esp_task_wdt_add(NULL);
 
   Serial.println("");
   Serial.printf("\n[WORKER] Started. Running %s on core %d\n", (char *)name, xPortGetCoreID());
@@ -869,10 +885,57 @@ void runStratumWorker(void *name) {
   uint32_t diget_mid[8] = {0};
   uint32_t bake[16] = {0};
   #if defined(HARDWARE_SHA265) && defined(CONFIG_IDF_TARGET_ESP32)
-  uint8_t sha_buffer_swap[128] = {0};
+  uint32_t sha_buffer_swap[20] = {0};
   #endif
+  bool adaptiveDiffSent = false;
+
+  auto drainAndSubmitResults = [&]() {
+    std::list<std::shared_ptr<JobResult>> job_result_list;
+    if (job_pool != 0xFFFFFFFF)
+    {
+      std::lock_guard<std::mutex> lock(s_job_mutex);
+      job_result_list.splice(job_result_list.end(), s_job_result_list);
+    }
+    while (!job_result_list.empty())
+    {
+      std::shared_ptr<JobResult> res = job_result_list.front();
+      job_result_list.pop_front();
+
+      updateBestDiff(res->difficulty);
+      if (res->difficulty > currentPoolDifficulty && job_pool == res->id)
+      {
+        if (!client.connected())
+        {
+          s_stratumConnected = false;
+          break;
+        }
+        unsigned long sumbit_id = 0;
+        tx_mining_submit(client, mWorker, mJob, res->nonce, sumbit_id, 0, mWorker.version_rolling_enabled);
+        const uint32_t sentNow = millis();
+        mLastTXtoPool = sentNow;
+        s_submitSentRing[s_submitSentHead] = {sumbit_id, sentNow};
+        s_submitSentHead = (s_submitSentHead + 1) & 7;
+
+        Serial.print("   - Current diff share: "); Serial.println(res->difficulty, 12);
+        Serial.print("   - Current pool diff : "); Serial.println(currentPoolDifficulty, 12);
+        Serial.print("   - TX SHARE: ");
+        for (size_t i = 0; i < 32; i++)
+            Serial.printf("%02x", res->hash[i]);
+        Serial.println("");
+
+        std::shared_ptr<Submition> submition = std::make_shared<Submition>();
+        submition->diff = res->difficulty;
+        submition->is32bit = (res->hash[29] == 0 && res->hash[28] == 0);
+        submition->isValid = submition->is32bit ? checkValid(res->hash, mJob.nbits.c_str()) : false;
+        s_submition_map.insert(std::make_pair(sumbit_id, submition));
+        if (s_submition_map.size() > 32)
+          s_submition_map.erase(s_submition_map.begin());
+      }
+    }
+  };
 
   while (true) {
+    esp_task_wdt_reset();
 
     if (takePoolChange()) {
       Serial.printf("[STRATUM] Pool settings changed, switching to %s:%d\n", activePoolAddress().c_str(), activePoolPort());
@@ -906,7 +969,7 @@ void runStratumWorker(void *name) {
       rxDropUntilNewline = false;
       mWorker = init_mining_subscribe();
 
-      // STEP 1: Pool server connection (SUBSCRIBE)
+      // STEP 1: Pool server connection (SUBSCRIBE + optional BIP-320 CONFIGURE)
       if (!tx_mining_subscribe(client, mWorker)) {
         resetSocket();
         MiningJobStop(job_pool, s_submition_map);
@@ -914,10 +977,14 @@ void runStratumWorker(void *name) {
         continue;
       }
 
+      s_cfgId = 0;
+      tx_mining_configure(client, s_cfgId);
+      adaptiveDiffSent = false;
+
       {
         std::lock_guard<std::mutex> lock(g_settingsMutex);
         strlcpy(mWorker.wName, Settings.BtcWallet, sizeof(mWorker.wName));
-        strlcpy(mWorker.wPass, activePoolPassword(), sizeof(mWorker.wPass));
+        strlcpy(mWorker.wPass, activePoolPassword().c_str(), sizeof(mWorker.wPass));
       }
       // STEP 2: Pool authorize work
       s_authorized = -1;
@@ -1035,6 +1102,12 @@ void runStratumWorker(void *name) {
                                             Serial.println("[STRATUM] New job could not be prepared, still mining the previous one");
                                             break;
                                           }
+                                          // Drain any shares found for the previous job before replacing mJob/job_pool
+                                          drainAndSubmitResults();
+                                          // Drop large coinbase/merkle strings once binary midstate/header is built
+                                          newJob.coinb1 = String();
+                                          newJob.coinb2 = String();
+                                          std::vector<String>().swap(newJob.merkle_branch);
                                           mJob = newJob;
                                           mMiner = newMiner;
 
@@ -1065,8 +1138,8 @@ void runStratumWorker(void *name) {
                                           #endif
 
                                           #if defined(HARDWARE_SHA265) && defined(CONFIG_IDF_TARGET_ESP32)
-                                          for (int i = 0; i < 32; ++i)
-                                            ((uint32_t *)sha_buffer_swap)[i] = __builtin_bswap32(((const uint32_t *)(mMiner.bytearray_blockheader))[i]);
+                                          for (int i = 0; i < 20; ++i)
+                                            sha_buffer_swap[i] = __builtin_bswap32(((const uint32_t *)(mMiner.bytearray_blockheader))[i]);
                                           #endif
 
                                           #ifdef RANDOM_NONCE
@@ -1089,7 +1162,7 @@ void runStratumWorker(void *name) {
                                             nj.id = job_pool;
                                             nj.nonce_base = nonce_pool;
                                             nj.difficulty = currentPoolDifficulty;
-                                            memcpy(nj.sha_buffer, mMiner.bytearray_blockheader, sizeof(nj.sha_buffer));
+                                            memcpy(nj.tail, mMiner.bytearray_blockheader + 64, sizeof(nj.tail));
                                             memcpy(nj.midstate, diget_mid, sizeof(nj.midstate));
                                             memcpy(nj.bake, bake, sizeof(nj.bake));
                                             #ifdef HARDWARE_SHA265
@@ -1104,7 +1177,7 @@ void runStratumWorker(void *name) {
                                             s_hwNextIndex.store(0, std::memory_order_relaxed);
                                             #endif
                                             s_activeJobSlot = nextSlot;
-                                            s_working_current_job_id = job_pool & 0xFF;
+                                            s_working_current_job_id.store(job_pool, std::memory_order_relaxed);
                                             #if defined(PIPELINED_ASM_MINING) && defined(CONFIG_IDF_TARGET_ESP32)
                                             s_pl_ctx.run = 0; // stop the HW loop mid-chunk right now
                                             #endif
@@ -1129,6 +1202,17 @@ void runStratumWorker(void *name) {
                                       }
                                       break;
           case STRATUM_SUCCESS:       {
+                                        if (s_cfgId != 0 && rxId == s_cfgId)
+                                        {
+                                          s_cfgId = 0;
+                                          uint32_t mask = 0;
+                                          if (parse_mining_configure(line, mask)) {
+                                            mWorker.version_rolling_enabled = true;
+                                            mWorker.version_rolling_mask = mask;
+                                            Serial.printf("[STRATUM] BIP-320 version rolling enabled (mask 0x%08lx)\n", (unsigned long)mask);
+                                          }
+                                          break;
+                                        }
                                         if (s_authId != 0 && rxId == s_authId)
                                         {
                                           s_authId = 0;
@@ -1205,7 +1289,6 @@ void runStratumWorker(void *name) {
 
     s_stratumConnected = client.connected();
 
-    std::list<std::shared_ptr<JobResult>> job_result_list;
     #ifdef I2C_SLAVE
     if (!i2c_slave_vector.empty() && job_pool != 0xFFFFFFFF)
     {
@@ -1218,64 +1301,30 @@ void runStratumWorker(void *name) {
       memcpy(i2c_tail, mMiner.bytearray_blockheader + 64, sizeof(i2c_tail));
       for (size_t n = 0; n < nonce_vector.size(); ++n)
       {
-        std::shared_ptr<JobResult> result = std::make_shared<JobResult>();
+        uint8_t i2c_hash[32];
         ((uint32_t *)(i2c_tail + 12))[0] = nonce_vector[n];
-        if (nerd_sha256d_baked(diget_mid, i2c_tail, bake, result->hash))
+        if (nerd_sha256d_baked(diget_mid, i2c_tail, bake, i2c_hash))
         {
-          result->id = job_pool;
-          result->nonce = nonce_vector[n];
-          result->difficulty = diff_from_target(result->hash);
-          job_result_list.push_back(result);
+          submitShareResult(job_pool, nonce_vector[n], diff_from_target(i2c_hash), i2c_hash);
         }
       }
     }
     #endif
 
-    if (job_pool != 0xFFFFFFFF)
-    {
-      std::lock_guard<std::mutex> lock(s_job_mutex);
-      job_result_list.splice(job_result_list.end(), s_job_result_list);
-    }
+    drainAndSubmitResults();
 
-    while (!job_result_list.empty())
-    {
-      std::shared_ptr<JobResult> res = job_result_list.front();
-      job_result_list.pop_front();
-
-      updateBestDiff(res->difficulty);
-      if (res->difficulty > currentPoolDifficulty && job_pool == res->id)
-      {
-        if (!client.connected())
-        {
-          s_stratumConnected = false;
-          break;
+    // Adaptive suggest_difficulty once measured hashrate stabilizes (~15s)
+    if (!adaptiveDiffSent && isMinerSuscribed && client.connected() && millis() >= 15000) {
+      double khs = (double)getSessionHashes() / (double)millis();
+      if (khs > 10.0) {
+        double targetDiff = (khs * 1000.0 * 20.0) / 4294967296.0;
+        if (targetDiff < 0.0001) targetDiff = 0.0001;
+        if (targetDiff > 1.0) targetDiff = 1.0;
+        if (targetDiff > currentPoolDifficulty * 3.0 || targetDiff < currentPoolDifficulty / 3.0) {
+          tx_suggest_difficulty(client, targetDiff);
+          mLastTXtoPool = millis();
         }
-        unsigned long sumbit_id = 0;
-        tx_mining_submit(client, mWorker, mJob, res->nonce, sumbit_id);
-        const uint32_t sentNow = millis();
-        mLastTXtoPool = sentNow;
-        s_submitSentRing[s_submitSentHead] = {sumbit_id, sentNow};
-        s_submitSentHead = (s_submitSentHead + 1) & 7;
-
-        Serial.print("   - Current diff share: "); Serial.println(res->difficulty, 12);
-        Serial.print("   - Current pool diff : "); Serial.println(currentPoolDifficulty, 12);
-        Serial.print("   - TX SHARE: ");
-        for (size_t i = 0; i < 32; i++)
-            Serial.printf("%02x", res->hash[i]);
-        Serial.println("");
-
-        std::shared_ptr<Submition> submition = std::make_shared<Submition>();
-        submition->diff = res->difficulty;
-        submition->is32bit = (res->hash[29] == 0 && res->hash[28] == 0);
-        if (submition->is32bit)
-        {
-          submition->isValid = checkValid(res->hash, mJob.nbits.c_str());
-        } else
-          submition->isValid = false;
-
-        s_submition_map.insert(std::make_pair(sumbit_id, submition));
-        if (s_submition_map.size() > 32)
-          s_submition_map.erase(s_submition_map.begin());
+        adaptiveDiffSent = true;
       }
     }
 
@@ -1284,958 +1333,6 @@ void runStratumWorker(void *name) {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(hasSocketData ? 0 : 10));
   }
 }
-
-//////////////////THREAD CALLS///////////////////
-
-void minerWorkerSw(void * task_id)
-{
-  unsigned int miner_id = (uint32_t)task_id;
-  Serial.printf("[MINER] %d Started minerWorkerSw Task!\n", miner_id);
-
-  uint8_t hash[32];
-  uint32_t midstate[8];
-  uint32_t bake[16];
-  uint8_t tail[16];
-  uint32_t wdt_counter = 0;
-  #ifdef DEBUG_MINING
-  volatile uint32_t *myDebugCounter = &debugHashesSw[miner_id & 1];
-  #endif
-
-  while (1)
-  {
-    while (g_otaUpdating) {
-      esp_task_wdt_reset();
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-
-    uint32_t job_id = 0, nonce_base = 0, sw_idx = 0;
-    double job_difficulty = 0.0;
-    bool has_job = false;
-    {
-      std::lock_guard<std::mutex> lock(s_job_mutex);
-      const uint8_t slot = s_activeJobSlot;
-      if (slot < 2)
-      {
-        const uint32_t claimed = s_swNextIndex.fetch_add(NONCE_PER_JOB_SW, std::memory_order_relaxed);
-        if (claimed < 0x80000000u - NONCE_PER_JOB_SW)
-        {
-          const ActiveJob &aj = s_jobs[slot];
-          job_id = aj.id;
-          nonce_base = aj.nonce_base;
-          job_difficulty = aj.difficulty;
-          memcpy(midstate, aj.midstate, sizeof(midstate));
-          memcpy(bake, aj.bake, sizeof(bake));
-          memcpy(tail, aj.sha_buffer + 64, sizeof(tail));
-          sw_idx = claimed;
-          has_job = true;
-        }
-      }
-    }
-
-    if (has_job)
-    {
-      const uint8_t job_in_work = job_id & 0xFF;
-      uint32_t done = NONCE_PER_JOB_SW;
-      for (uint32_t n = 0; n < NONCE_PER_JOB_SW; ++n)
-      {
-        const uint32_t nonce = swNonce(nonce_base, sw_idx + n);
-        ((uint32_t *)(tail + 12))[0] = nonce;
-        #ifdef DEBUG_MINING
-        (*myDebugCounter)++;
-        #endif
-#if defined(NERD_SW_ASM)
-        if (nerd_sha256d_prefilter(midstate, tail, bake) &&
-            nerd_sha256d_baked(midstate, tail, bake, hash))
-#else
-        if (nerd_sha256d_baked(midstate, tail, bake, hash))
-#endif
-        {
-          const double diff_hash = diff_from_target(hash);
-          updateBestDiff(diff_hash);
-          if (diff_hash > job_difficulty)
-            submitShareResult(job_id, nonce, diff_hash, hash);
-        }
-
-        if ((uint16_t)(n & 0xFF) == 0 && s_working_current_job_id != job_in_work)
-        {
-          done = n + 1;
-          break;
-        }
-      }
-      addHashes(done);
-    } else
-      vTaskDelay(2 / portTICK_PERIOD_MS);
-
-    wdt_counter++;
-    if (wdt_counter >= 8)
-    {
-      wdt_counter = 0;
-      esp_task_wdt_reset();
-    }
-  }
-}
-
-#ifdef HARDWARE_SHA265
-
-#if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
-
-static inline void nerd_sha_ll_fill_text_block_sha256(const void *input_text, uint32_t nonce)
-{
-    uint32_t *data_words = (uint32_t *)input_text;
-    uint32_t *reg_addr_buf = (uint32_t *)(SHA_TEXT_BASE);
-
-    REG_WRITE(&reg_addr_buf[0], data_words[0]);
-    REG_WRITE(&reg_addr_buf[1], data_words[1]);
-    REG_WRITE(&reg_addr_buf[2], data_words[2]);
-    REG_WRITE(&reg_addr_buf[3], nonce);
-    REG_WRITE(&reg_addr_buf[4], 0x00000080);
-    REG_WRITE(&reg_addr_buf[5], 0x00000000);
-    REG_WRITE(&reg_addr_buf[6], 0x00000000);
-    REG_WRITE(&reg_addr_buf[7], 0x00000000);
-    REG_WRITE(&reg_addr_buf[8], 0x00000000);
-    REG_WRITE(&reg_addr_buf[9], 0x00000000);
-    REG_WRITE(&reg_addr_buf[10], 0x00000000);
-    REG_WRITE(&reg_addr_buf[11], 0x00000000);
-    REG_WRITE(&reg_addr_buf[12], 0x00000000);
-    REG_WRITE(&reg_addr_buf[13], 0x00000000);
-    REG_WRITE(&reg_addr_buf[14], 0x00000000);
-    REG_WRITE(&reg_addr_buf[15], 0x80020000);
-}
-
-static inline void nerd_sha_ll_fill_text_block_sha256_inter()
-{
-  uint32_t *reg_addr_buf = (uint32_t *)(SHA_TEXT_BASE);
-
-  REG_WRITE(&reg_addr_buf[0], REG_READ(SHA_H_BASE + 0 * 4));
-  REG_WRITE(&reg_addr_buf[1], REG_READ(SHA_H_BASE + 1 * 4));
-  REG_WRITE(&reg_addr_buf[2], REG_READ(SHA_H_BASE + 2 * 4));
-  REG_WRITE(&reg_addr_buf[3], REG_READ(SHA_H_BASE + 3 * 4));
-  REG_WRITE(&reg_addr_buf[4], REG_READ(SHA_H_BASE + 4 * 4));
-  REG_WRITE(&reg_addr_buf[5], REG_READ(SHA_H_BASE + 5 * 4));
-  REG_WRITE(&reg_addr_buf[6], REG_READ(SHA_H_BASE + 6 * 4));
-  REG_WRITE(&reg_addr_buf[7], REG_READ(SHA_H_BASE + 7 * 4));
-
-  REG_WRITE(&reg_addr_buf[8], 0x00000080);
-  REG_WRITE(&reg_addr_buf[9], 0x00000000);
-  REG_WRITE(&reg_addr_buf[10], 0x00000000);
-  REG_WRITE(&reg_addr_buf[11], 0x00000000);
-  REG_WRITE(&reg_addr_buf[12], 0x00000000);
-  REG_WRITE(&reg_addr_buf[13], 0x00000000);
-  REG_WRITE(&reg_addr_buf[14], 0x00000000);
-  REG_WRITE(&reg_addr_buf[15], 0x00010000);
-}
-
-static inline void nerd_sha_ll_read_digest(void* ptr)
-{
-  ((uint32_t*)ptr)[0] = REG_READ(SHA_H_BASE + 0 * 4);
-  ((uint32_t*)ptr)[1] = REG_READ(SHA_H_BASE + 1 * 4);
-  ((uint32_t*)ptr)[2] = REG_READ(SHA_H_BASE + 2 * 4);
-  ((uint32_t*)ptr)[3] = REG_READ(SHA_H_BASE + 3 * 4);
-  ((uint32_t*)ptr)[4] = REG_READ(SHA_H_BASE + 4 * 4);
-  ((uint32_t*)ptr)[5] = REG_READ(SHA_H_BASE + 5 * 4);
-  ((uint32_t*)ptr)[6] = REG_READ(SHA_H_BASE + 6 * 4);
-  ((uint32_t*)ptr)[7] = REG_READ(SHA_H_BASE + 7 * 4);
-}
-
-static inline bool nerd_sha_ll_read_digest_if(void* ptr)
-{
-  uint32_t last = REG_READ(SHA_H_BASE + 7 * 4);
-  if ((uint16_t)(last >> 16) != 0)
-    return false;
-
-  ((uint32_t*)ptr)[7] = last;
-  ((uint32_t*)ptr)[0] = REG_READ(SHA_H_BASE + 0 * 4);
-  ((uint32_t*)ptr)[1] = REG_READ(SHA_H_BASE + 1 * 4);
-  ((uint32_t*)ptr)[2] = REG_READ(SHA_H_BASE + 2 * 4);
-  ((uint32_t*)ptr)[3] = REG_READ(SHA_H_BASE + 3 * 4);
-  ((uint32_t*)ptr)[4] = REG_READ(SHA_H_BASE + 4 * 4);
-  ((uint32_t*)ptr)[5] = REG_READ(SHA_H_BASE + 5 * 4);
-  ((uint32_t*)ptr)[6] = REG_READ(SHA_H_BASE + 6 * 4);
-  return true;
-}
-
-static inline void nerd_sha_ll_write_digest(void *digest_state)
-{
-    uint32_t *digest_state_words = (uint32_t *)digest_state;
-    uint32_t *reg_addr_buf = (uint32_t *)(SHA_H_BASE);
-
-    REG_WRITE(&reg_addr_buf[0], digest_state_words[0]);
-    REG_WRITE(&reg_addr_buf[1], digest_state_words[1]);
-    REG_WRITE(&reg_addr_buf[2], digest_state_words[2]);
-    REG_WRITE(&reg_addr_buf[3], digest_state_words[3]);
-    REG_WRITE(&reg_addr_buf[4], digest_state_words[4]);
-    REG_WRITE(&reg_addr_buf[5], digest_state_words[5]);
-    REG_WRITE(&reg_addr_buf[6], digest_state_words[6]);
-    REG_WRITE(&reg_addr_buf[7], digest_state_words[7]);
-}
-
-static inline void nerd_sha_hal_wait_idle()
-{
-    while (REG_READ(SHA_BUSY_REG))
-    {}
-}
-
-#if defined(PIPELINED_S3_MINING) && defined(CONFIG_IDF_TARGET_ESP32S3)
-// Overlapped ESP32-S3 mining loop (build flag PIPELINED_S3_MINING).
-static uint32_t __attribute__((noinline, optimize("O2")))
-s3_pl_mine(const uint32_t *mid, const uint32_t *tail, uint32_t nonce, uint32_t count, bool *hit)
-{
-  volatile uint32_t *const text = (volatile uint32_t *)SHA_TEXT_BASE;
-  volatile uint32_t *const h = (volatile uint32_t *)SHA_H_BASE;
-  volatile uint32_t *const busy = (volatile uint32_t *)SHA_BUSY_REG;
-  const uint32_t m0 = mid[0], m1 = mid[1], m2 = mid[2], m3 = mid[3], m4 = mid[4], m5 = mid[5], m6 = mid[6],
-                 m7 = mid[7];
-  const uint32_t t0 = tail[0], t1 = tail[1], t2 = tail[2];
-
-  // Second block of the header for the first nonce
-  text[0] = t0;
-  text[1] = t1;
-  text[2] = t2;
-  text[3] = nonce;
-  text[4] = 0x00000080;
-  for (int i = 5; i < 15; ++i)
-    text[i] = 0;
-  text[15] = 0x80020000;
-
-  for (uint32_t i = 0; i < count; ++i)
-  {
-    h[0] = m0;
-    h[1] = m1;
-    h[2] = m2;
-    h[3] = m3;
-    h[4] = m4;
-    h[5] = m5;
-    h[6] = m6;
-    h[7] = m7;
-    REG_WRITE(SHA_CONTINUE_REG, 1); // first hash
-    text[8] = 0x00000080;           // meanwhile: the fixed words of the second hash's block
-    text[15] = 0x00010000;          // (9..14 are zero in both blocks)
-    while (*busy)
-    {
-    }
-    text[0] = h[0];
-    text[1] = h[1];
-    text[2] = h[2];
-    text[3] = h[3];
-    text[4] = h[4];
-    text[5] = h[5];
-    text[6] = h[6];
-    text[7] = h[7];
-    REG_WRITE(SHA_START_REG, 1); // second hash
-    text[0] = t0;                // meanwhile: the header block for the next nonce
-    text[1] = t1;
-    text[2] = t2;
-    text[3] = nonce + i + 1;
-    text[4] = 0x00000080;
-    text[5] = 0;
-    text[6] = 0;
-    text[7] = 0;
-    text[8] = 0;
-    text[15] = 0x80020000;
-    while (*busy)
-    {
-    }
-    if ((h[7] >> 16) == 0)
-    {
-      *hit = true;
-      return i + 1;
-    }
-  }
-  *hit = false;
-  return count;
-}
-
-static bool s3_pl_selftest()
-{
-  static const uint32_t expected[] = {0x642c, 0x66ce, 0x731b, 0x7697, 0x1478f};
-  const uint32_t first = 0x1000, last = first + 131072;
-  uint8_t hdr[80];
-  uint32_t mid[8];
-  for (int i = 0; i < 80; ++i)
-    hdr[i] = (uint8_t)(i * 37 + 11);
-
-  g_hwShaMutex.lock();
-  esp_sha_acquire_hardware();
-  sha_hal_hash_block(SHA2_256, hdr, 64 / 4, true);
-  sha_hal_read_digest(SHA2_256, mid);
-  REG_WRITE(SHA_MODE_REG, SHA2_256);
-  size_t found = 0;
-  bool ok = true;
-  uint32_t n = first;
-  while (n != last)
-  {
-    bool hit = false;
-    n += s3_pl_mine(mid, (const uint32_t *)(hdr + 64), n, last - n, &hit);
-    if (!hit)
-      break;
-    if (found >= sizeof(expected) / sizeof(expected[0]) || expected[found] != n - 1)
-    {
-      ok = false;
-      break;
-    }
-    found++;
-  }
-  esp_sha_release_hardware();
-  g_hwShaMutex.unlock();
-  return ok && found == sizeof(expected) / sizeof(expected[0]);
-}
-#endif // PIPELINED_S3_MINING
-
-//#define VALIDATION
-void minerWorkerHw(void * task_id)
-{
-  unsigned int miner_id = (uint32_t)task_id;
-  Serial.printf("[MINER] %d Started minerWorkerHw Task!\n", miner_id);
-
-  uint8_t hash[32];
-  uint32_t digest_mid[8];
-  uint32_t sw_mid[8];
-  uint32_t sw_bake[16];
-  uint8_t sha_buffer[64];
-  uint32_t wdt_counter = 0;
-
-#if defined(PIPELINED_S3_MINING) && defined(CONFIG_IDF_TARGET_ESP32S3)
-  const bool s3_pl_ok = s3_pl_selftest() || s3_pl_selftest() || s3_pl_selftest();
-  Serial.printf("[MINER] HW SHA loop: %s\n", s3_pl_ok ? "overlapped" : "stock (the overlapped loop failed its self-test)");
-#endif
-
-#ifdef VALIDATION
-  uint8_t doubleHash[32];
-#endif
-
-  while (1)
-  {
-    while (g_otaUpdating) {
-      esp_task_wdt_reset();
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-
-    uint32_t job_id = 0, nonce_base = 0, hw_idx = 0;
-    double job_difficulty = 0.0;
-    bool has_job = false;
-    {
-      std::lock_guard<std::mutex> lock(s_job_mutex);
-      const uint8_t slot = s_activeJobSlot;
-      if (slot < 2)
-      {
-        const uint32_t claimed = s_hwNextIndex.fetch_add(NONCE_PER_JOB_HW, std::memory_order_relaxed);
-        if (claimed < 0x80000000u - NONCE_PER_JOB_HW)
-        {
-          const ActiveJob &aj = s_jobs[slot];
-          job_id = aj.id;
-          nonce_base = aj.nonce_base;
-          job_difficulty = aj.difficulty;
-          memcpy(digest_mid, aj.hw_midstate, sizeof(digest_mid));
-          memcpy(sw_mid, aj.midstate, sizeof(sw_mid));
-          memcpy(sw_bake, aj.bake, sizeof(sw_bake));
-          memcpy(sha_buffer, aj.sha_buffer + 64, sizeof(sha_buffer));
-          hw_idx = claimed;
-          has_job = true;
-        }
-      }
-    }
-
-    if (has_job)
-    {
-      const uint8_t job_in_work = job_id & 0xFF;
-
-      g_hwShaMutex.lock();
-      esp_sha_acquire_hardware();
-      REG_WRITE(SHA_MODE_REG, SHA2_256);
-
-#if defined(PIPELINED_S3_MINING) && defined(CONFIG_IDF_TARGET_ESP32S3)
-      if (s3_pl_ok)
-      {
-        uint32_t pos = 0;
-        uint32_t end_pos = NONCE_PER_JOB_HW;
-        uint32_t reported = 0;
-        while (pos != end_pos)
-        {
-          // Keep each run inside a single [..0x80 .. ..0xFF] 128-nonce window
-          // so consecutive native nonces in s3_pl_mine never cross into SW's <0x80 half.
-          uint32_t want = 128u - ((hw_idx + pos) & 0x7Fu);
-          if (want > end_pos - pos)
-            want = end_pos - pos;
-          bool hit = false;
-          pos += s3_pl_mine(digest_mid, (const uint32_t *)sha_buffer, hwNonce(nonce_base, hw_idx + pos), want, &hit);
-
-          if (hit)
-          {
-            #ifdef DEBUG_MINING
-            debugPipelinedHits++;
-            #endif
-            const uint32_t cand = hwNonce(nonce_base, hw_idx + pos - 1);
-            ((uint32_t *)(sha_buffer + 12))[0] = cand;
-            uint8_t sw_hash[32];
-            bool confirmed = nerd_sha256d_baked(sw_mid, sha_buffer, sw_bake, sw_hash);
-            #ifdef DEBUG_MINING
-            if (confirmed)
-              debugPipelinedRealHits++;
-            else
-              debugPipelinedHwSwMismatch++;
-            #endif
-            const double cand_diff = confirmed && isSha256Valid(sw_hash) ? diff_from_target(sw_hash) : 0.0;
-            updateBestDiff(cand_diff);
-            if (cand_diff > job_difficulty)
-            {
-              #ifdef DEBUG_MINING
-              debugPipelinedAccepted++;
-              #endif
-              submitShareResult(job_id, cand, cand_diff, sw_hash);
-            }
-          }
-
-          if (s_working_current_job_id != job_in_work || s_tlsPauseRequested)
-          {
-            end_pos = pos;
-          }
-          else if (pos != end_pos && g_hwShaWanted.load() != 0)
-          {
-            esp_sha_release_hardware();
-            g_hwShaMutex.unlock();
-            while (g_hwShaWanted.load() != 0)
-              vTaskDelay(1);
-            g_hwShaMutex.lock();
-            esp_sha_acquire_hardware();
-            REG_WRITE(SHA_MODE_REG, SHA2_256);
-            continue;
-          }
-          else if (pos != end_pos && pos - reported >= 32768)
-          {
-            addHashes(pos - reported);
-            reported = pos;
-          }
-        }
-        addHashes(pos - reported);
-        #ifdef DEBUG_MINING
-        debugHashesHw += pos;
-        #endif
-      }
-      else
-#endif
-      {
-        uint32_t done = NONCE_PER_JOB_HW;
-        for (uint32_t i = 0; i < NONCE_PER_JOB_HW; ++i)
-        {
-          const uint32_t n = hwNonce(nonce_base, hw_idx + i);
-          #ifdef DEBUG_MINING
-          debugHashesHw++;
-          #endif
-          nerd_sha_ll_write_digest(digest_mid);
-          nerd_sha_ll_fill_text_block_sha256(sha_buffer, n);
-          REG_WRITE(SHA_CONTINUE_REG, 1);
-
-          sha_ll_load(SHA2_256);
-          nerd_sha_hal_wait_idle();
-          nerd_sha_ll_fill_text_block_sha256_inter();
-          REG_WRITE(SHA_START_REG, 1);
-          sha_ll_load(SHA2_256);
-          nerd_sha_hal_wait_idle();
-          if (nerd_sha_ll_read_digest_if(hash))
-          {
-#ifdef VALIDATION
-            ((uint32_t *)(sha_buffer + 12))[0] = n;
-            nerd_sha256d_baked(sw_mid, sha_buffer, sw_bake, doubleHash);
-            for (int k = 0; k < 32; ++k)
-            {
-              if (hash[k] != doubleHash[k])
-              {
-                Serial.println("***HW sha256 esp32s3 bug detected***");
-                break;
-              }
-            }
-#endif
-            const double diff_hash = diff_from_target(hash);
-            if (isSha256Valid(hash))
-            {
-              updateBestDiff(diff_hash);
-              if (diff_hash > job_difficulty)
-                submitShareResult(job_id, n, diff_hash, hash);
-            }
-          }
-          if ((uint8_t)(i & 0xFF) == 0 &&
-              (s_working_current_job_id != job_in_work || s_tlsPauseRequested))
-          {
-            done = i + 1;
-            break;
-          }
-        }
-        addHashes(done);
-      }
-
-      esp_sha_release_hardware();
-      g_hwShaMutex.unlock();
-      if (s_tlsPauseRequested)
-      {
-        s_tlsPauseRequested = false;
-        vTaskDelay(1);
-      }
-      #if defined(PIPELINED_S3_MINING) && defined(CONFIG_IDF_TARGET_ESP32S3)
-      else if (s3_pl_ok)
-        vTaskDelay(1);
-      #endif
-    } else
-      vTaskDelay(2 / portTICK_PERIOD_MS);
-
-    wdt_counter++;
-    if (wdt_counter >= 8)
-    {
-      wdt_counter = 0;
-      esp_task_wdt_reset();
-    }
-  }
-}
-
-#endif  // ESP32S2 || ESP32S3 || ESP32C3
-
-#if defined(CONFIG_IDF_TARGET_ESP32)
-
-static inline bool nerd_sha_ll_read_digest_swap_if(void* ptr)
-{
-  DPORT_INTERRUPT_DISABLE();
-  uint32_t fin = DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 7 * 4);
-  if ((uint32_t)(fin & 0xFFFF) != 0)
-  {
-    DPORT_INTERRUPT_RESTORE();
-    return false;
-  }
-  ((uint32_t*)ptr)[7] = __builtin_bswap32(fin);
-  ((uint32_t*)ptr)[0] = __builtin_bswap32(DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 0 * 4));
-  ((uint32_t*)ptr)[1] = __builtin_bswap32(DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 1 * 4));
-  ((uint32_t*)ptr)[2] = __builtin_bswap32(DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 2 * 4));
-  ((uint32_t*)ptr)[3] = __builtin_bswap32(DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 3 * 4));
-  ((uint32_t*)ptr)[4] = __builtin_bswap32(DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 4 * 4));
-  ((uint32_t*)ptr)[5] = __builtin_bswap32(DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 5 * 4));
-  ((uint32_t*)ptr)[6] = __builtin_bswap32(DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 6 * 4));
-  DPORT_INTERRUPT_RESTORE();
-  return true;
-}
-
-static inline void nerd_sha_ll_read_digest(void* ptr)
-{
-  DPORT_INTERRUPT_DISABLE();
-  ((uint32_t*)ptr)[0] = DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 0 * 4);
-  ((uint32_t*)ptr)[1] = DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 1 * 4);
-  ((uint32_t*)ptr)[2] = DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 2 * 4);
-  ((uint32_t*)ptr)[3] = DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 3 * 4);
-  ((uint32_t*)ptr)[4] = DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 4 * 4);
-  ((uint32_t*)ptr)[5] = DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 5 * 4);
-  ((uint32_t*)ptr)[6] = DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 6 * 4);
-  ((uint32_t*)ptr)[7] = DPORT_SEQUENCE_REG_READ(SHA_TEXT_BASE + 7 * 4);
-  DPORT_INTERRUPT_RESTORE();
-}
-
-static inline void nerd_sha_hal_wait_idle()
-{
-    while (DPORT_REG_READ(SHA_256_BUSY_REG))
-    {}
-}
-
-static inline void nerd_sha_ll_fill_text_block_sha256(const void *input_text)
-{
-    uint32_t *data_words = (uint32_t *)input_text;
-    uint32_t *reg_addr_buf = (uint32_t *)(SHA_TEXT_BASE);
-
-    reg_addr_buf[0]  = data_words[0];
-    reg_addr_buf[1]  = data_words[1];
-    reg_addr_buf[2]  = data_words[2];
-    reg_addr_buf[3]  = data_words[3];
-    reg_addr_buf[4]  = data_words[4];
-    reg_addr_buf[5]  = data_words[5];
-    reg_addr_buf[6]  = data_words[6];
-    reg_addr_buf[7]  = data_words[7];
-    reg_addr_buf[8]  = data_words[8];
-    reg_addr_buf[9]  = data_words[9];
-    reg_addr_buf[10] = data_words[10];
-    reg_addr_buf[11] = data_words[11];
-    reg_addr_buf[12] = data_words[12];
-    reg_addr_buf[13] = data_words[13];
-    reg_addr_buf[14] = data_words[14];
-    reg_addr_buf[15] = data_words[15];
-}
-
-static inline void nerd_sha_ll_fill_text_block_sha256_upper(const void *input_text, uint32_t nonce)
-{
-    uint32_t *data_words = (uint32_t *)input_text;
-    uint32_t *reg_addr_buf = (uint32_t *)(SHA_TEXT_BASE);
-
-    reg_addr_buf[0]  = data_words[0];
-    reg_addr_buf[1]  = data_words[1];
-    reg_addr_buf[2]  = data_words[2];
-    reg_addr_buf[3]  = __builtin_bswap32(nonce);
-    reg_addr_buf[4]  = 0x80000000;
-    reg_addr_buf[5]  = 0x00000000;
-    reg_addr_buf[6]  = 0x00000000;
-    reg_addr_buf[7]  = 0x00000000;
-    reg_addr_buf[8]  = 0x00000000;
-    reg_addr_buf[9]  = 0x00000000;
-    reg_addr_buf[10] = 0x00000000;
-    reg_addr_buf[11] = 0x00000000;
-    reg_addr_buf[12] = 0x00000000;
-    reg_addr_buf[13] = 0x00000000;
-    reg_addr_buf[14] = 0x00000000;
-    reg_addr_buf[15] = 0x00000280;
-}
-
-static inline void nerd_sha_ll_fill_text_block_sha256_double()
-{
-    uint32_t *reg_addr_buf = (uint32_t *)(SHA_TEXT_BASE);
-
-    reg_addr_buf[8]  = 0x80000000;
-    reg_addr_buf[9]  = 0x00000000;
-    reg_addr_buf[10] = 0x00000000;
-    reg_addr_buf[11] = 0x00000000;
-    reg_addr_buf[12] = 0x00000000;
-    reg_addr_buf[13] = 0x00000000;
-    reg_addr_buf[14] = 0x00000000;
-    reg_addr_buf[15] = 0x00000100;
-}
-
-#ifdef PIPELINED_ASM_MINING
-typedef uint32_t (*pl_mine_fn)(volatile uint32_t *sha_base, pl_ctx_t *ctx);
-
-// src/pipelined_hw_sha_classic_v2.S: counted delays, no status polling.
-extern "C" uint32_t pipelined_hw_mine_classic_v2(volatile uint32_t *sha_base, pl_ctx_t *ctx);
-extern "C" uint32_t pipelined_hw_mine_classic_v2_margin(volatile uint32_t *sha_base, pl_ctx_t *ctx);
-extern "C" uint32_t pipelined_hw_mine_classic_v2_wide(volatile uint32_t *sha_base, pl_ctx_t *ctx);
-
-#if defined(HW_SHA256_TEST) || defined(SHA_BENCH)
-// src/pipelined_hw_sha_classic.cpp: legacy BUSY-polling loop (kept for bench/test only; saves 293 B IRAM).
-extern "C" bool pipelined_hw_mine_classic(
-    volatile uint32_t *sha_base,
-    const uint32_t *header_swapped,
-    uint32_t *nonce_swapped_inout,
-    volatile uint32_t *hash_count_low,
-    volatile bool *mining_flag,
-    uint32_t iter_budget);
-extern "C" void pipelined_hw_mine_classic_reinit(void);
-
-static uint32_t pl_mine_legacy(volatile uint32_t *sha_base, pl_ctx_t *ctx)
-{
-  uint32_t done = 0;
-  bool hit = pipelined_hw_mine_classic(sha_base, ctx->hdr, &ctx->nonce, &done,
-                                       (volatile bool *)&ctx->run, ctx->budget);
-  ctx->budget -= done;
-  if (hit)
-    pipelined_hw_mine_classic_reinit();
-  else if (ctx->budget == 0)
-    ctx->run = 1;
-  return hit;
-}
-#endif
-
-static uint32_t pl_mine_plain(volatile uint32_t *sha_base, pl_ctx_t *ctx)
-{
-  (void)sha_base;
-  uint8_t hash[32];
-  while (ctx->run && ctx->budget > 0)
-  {
-    nerd_sha_ll_fill_text_block_sha256(ctx->hdr);
-    sha_ll_start_block(SHA2_256);
-
-    nerd_sha_hal_wait_idle();
-    nerd_sha_ll_fill_text_block_sha256_upper(ctx->hdr + 16, __builtin_bswap32(ctx->nonce));
-    sha_ll_continue_block(SHA2_256);
-
-    nerd_sha_hal_wait_idle();
-    sha_ll_load(SHA2_256);
-
-    nerd_sha_hal_wait_idle();
-    nerd_sha_ll_fill_text_block_sha256_double();
-    sha_ll_start_block(SHA2_256);
-
-    nerd_sha_hal_wait_idle();
-    sha_ll_load(SHA2_256);
-
-    ctx->nonce++;
-    ctx->budget--;
-    if (nerd_sha_ll_read_digest_swap_if(hash))
-      return 1;
-  }
-  return 0;
-}
-
-static const struct { pl_mine_fn fn; const char *name; } s_pl_loops[] = {
-  {pipelined_hw_mine_classic_v2,        "fast"},
-  {pipelined_hw_mine_classic_v2_margin, "fast, +2 margins"},
-  {pipelined_hw_mine_classic_v2_wide,   "fast, wide margins"},
-#if defined(HW_SHA256_TEST) || defined(SHA_BENCH)
-  {pl_mine_legacy,                      "polled"},
-#endif
-  {pl_mine_plain,                       "plain"},
-};
-#define PL_LOOP_COUNT (sizeof(s_pl_loops) / sizeof(s_pl_loops[0]))
-#define PL_LOOP_PLAIN (PL_LOOP_COUNT - 1)
-static unsigned s_pl_loop = 0;
-
-static bool pl_selftest(pl_mine_fn fn)
-{
-  static const uint32_t expected[] = {0xa94c, 0xe496, 0x1f476, 0x302f0, 0x35af9, 0x3cf5c};
-  const uint32_t first = 0x1000;
-  static pl_ctx_t c;
-  for (uint32_t i = 0; i < 19; ++i)
-    c.hdr[i] = 0x9E3779B9u * (i + 1);
-  c.nonce = first;
-  c.budget = 262144;
-  c.pad = 0x80000000u;
-  c.run = 1;
-  size_t found = 0;
-  while (c.budget > 0 && fn((volatile uint32_t *)SHA_TEXT_BASE, &c))
-  {
-    if (found >= sizeof(expected) / sizeof(expected[0]) || c.nonce - 1 - first != expected[found])
-      return false;
-    found++;
-  }
-  return found == sizeof(expected) / sizeof(expected[0]) && c.budget == 0;
-}
-
-static void pl_select_loop()
-{
-  g_hwShaMutex.lock();
-  esp_sha_lock_engine(SHA2_256);
-  periph_module_reset(PERIPH_SHA_MODULE);
-  unsigned n = 0;
-  const unsigned chip_rev = efuse_hal_get_major_chip_version();
-  if (chip_rev < 3)
-  {
-    Serial.printf("[MINER] chip revision %u: the pipelined HW SHA loops need revision 3\n", chip_rev);
-    n = PL_LOOP_PLAIN;
-  }
-  while (n + 1 < PL_LOOP_COUNT && !pl_selftest(s_pl_loops[n].fn) && !pl_selftest(s_pl_loops[n].fn) &&
-         !pl_selftest(s_pl_loops[n].fn))
-  {
-    Serial.printf("[MINER] HW SHA loop '%s' failed its self-test\n", s_pl_loops[n].name);
-    n++;
-  }
-  #ifdef PL_FORCE_LOOP
-  n = PL_FORCE_LOOP;
-  #endif
-  s_pl_loop = n;
-  esp_sha_unlock_engine(SHA2_256);
-  g_hwShaMutex.unlock();
-  Serial.printf("[MINER] HW SHA loop: %s\n", s_pl_loops[n].name);
-}
-
-static void pl_health(bool confirmed)
-{
-  static uint32_t hits = 0, unconfirmed = 0;
-  hits++;
-  if (!confirmed)
-    unconfirmed++;
-  if (hits < 256)
-    return;
-  if (unconfirmed >= 8 && s_pl_loop + 1 < PL_LOOP_COUNT)
-  {
-    s_pl_loop++;
-    Serial.printf("[MINER] %u of %u HW candidates not confirmed; switching HW SHA loop to: %s\n",
-                  unconfirmed, hits, s_pl_loops[s_pl_loop].name);
-  }
-  hits = unconfirmed = 0;
-}
-#endif // PIPELINED_ASM_MINING
-
-void minerWorkerHw(void * task_id)
-{
-  unsigned int miner_id = (uint32_t)task_id;
-  Serial.printf("[MINER] %d Started minerWorkerHwEsp32D Task!\n", miner_id);
-
-  #ifndef PIPELINED_ASM_MINING
-  uint8_t hash[32];
-  #endif
-  uint8_t sha_buffer[128];
-  uint32_t sw_mid[8];
-  uint32_t sw_bake[16];
-  uint8_t sw_tail[16];
-
-  #ifdef PIPELINED_ASM_MINING
-  uint32_t pipelined_swapped_cursor = 0;
-  uint32_t pipelined_last_job_id = 0xFFFFFFFF;
-  pl_select_loop();
-  #endif
-
-  #ifdef DEBUG_MINING
-  int64_t debugChunkEndUs = 0;
-  #endif
-
-  while (1)
-  {
-    while (g_otaUpdating) {
-      esp_task_wdt_reset();
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-
-    uint32_t job_id = 0, nonce_base = 0, hw_idx = 0;
-    double job_difficulty = 0.0;
-    bool has_job = false;
-    {
-      std::lock_guard<std::mutex> lock(s_job_mutex);
-      const uint8_t slot = s_activeJobSlot;
-      if (slot < 2)
-      {
-        const uint32_t claimed = s_hwNextIndex.fetch_add(NONCE_PER_JOB_HW, std::memory_order_relaxed);
-        if (claimed < 0x7F000000u - NONCE_PER_JOB_HW)
-        {
-          const ActiveJob &aj = s_jobs[slot];
-          job_id = aj.id;
-          nonce_base = aj.nonce_base;
-          job_difficulty = aj.difficulty;
-          memcpy(sha_buffer, aj.sha_buffer_swap, sizeof(sha_buffer));
-          memcpy(sw_mid, aj.midstate, sizeof(sw_mid));
-          memcpy(sw_bake, aj.bake, sizeof(sw_bake));
-          memcpy(sw_tail, aj.sha_buffer + 64, sizeof(sw_tail));
-          hw_idx = claimed;
-          has_job = true;
-        }
-      }
-    }
-
-    if (has_job)
-    {
-      #ifdef DEBUG_MINING
-      if (debugChunkEndUs != 0)
-      {
-        int64_t gap = esp_timer_get_time() - debugChunkEndUs;
-        if (gap > 0 && gap < 10000000)
-        {
-          debugChunkGapUs += (uint32_t)gap;
-          debugChunkCount++;
-        }
-      }
-      #endif
-
-      const uint8_t job_in_work = job_id & 0xFF;
-
-      g_hwShaMutex.lock();
-      esp_sha_lock_engine(SHA2_256);
-#ifdef PIPELINED_ASM_MINING
-      {
-        if (job_id != pipelined_last_job_id)
-        {
-          pipelined_last_job_id = job_id;
-          // Top bit set -> native low byte >= 0x80, disjoint from swNonce() (< 0x80).
-          pipelined_swapped_cursor = __builtin_bswap32(nonce_base) | 0x80000000u;
-        }
-
-        memcpy(s_pl_ctx.hdr, sha_buffer, sizeof(s_pl_ctx.hdr));
-        s_pl_ctx.nonce = pipelined_swapped_cursor;
-        s_pl_ctx.budget = NONCE_PER_JOB_HW;
-        s_pl_ctx.pad = 0x80000000u;
-        s_pl_ctx.run = 1;
-        if (s_working_current_job_id != job_in_work || s_tlsPauseRequested)
-          s_pl_ctx.run = 0;
-
-        periph_module_reset(PERIPH_SHA_MODULE);
-
-        while (s_pl_ctx.run && s_pl_ctx.budget > 0)
-        {
-          if (!s_pl_loops[s_pl_loop].fn((volatile uint32_t *)SHA_TEXT_BASE, &s_pl_ctx))
-            break;
-
-          #ifdef DEBUG_MINING
-          int64_t hitOverheadStartUs = esp_timer_get_time();
-          debugPipelinedHits++;
-          #endif
-
-          uint32_t cand_native_pl = __builtin_bswap32(s_pl_ctx.nonce - 1);
-          ((uint32_t *)(sw_tail + 12))[0] = cand_native_pl;
-          uint8_t sw_hash[32];
-          bool confirmed = nerd_sha256d_baked(sw_mid, sw_tail, sw_bake, sw_hash);
-          pl_health(confirmed);
-          #ifdef DEBUG_MINING
-          if (confirmed)
-            debugPipelinedRealHits++;
-          else
-            debugPipelinedHwSwMismatch++;
-          #endif
-
-          const double cand_diff = confirmed && isSha256Valid(sw_hash) ? diff_from_target(sw_hash) : 0.0;
-          updateBestDiff(cand_diff);
-          if (cand_diff > job_difficulty)
-          {
-            #ifdef DEBUG_MINING
-            debugPipelinedAccepted++;
-            #endif
-            submitShareResult(job_id, cand_native_pl, cand_diff, sw_hash);
-          }
-
-          #ifdef DEBUG_MINING
-          debugHitOverheadUs += (uint32_t)(esp_timer_get_time() - hitOverheadStartUs);
-          debugHitOverheadCount++;
-          #endif
-        }
-
-        pipelined_swapped_cursor = s_pl_ctx.nonce | 0x80000000u;
-        const uint32_t done = NONCE_PER_JOB_HW - s_pl_ctx.budget;
-        addHashes(done);
-        #ifdef DEBUG_MINING
-        debugHashesHw += done;
-        #endif
-      }
-#else
-      {
-        uint32_t done = NONCE_PER_JOB_HW;
-        for (uint32_t i = 0; i < NONCE_PER_JOB_HW; ++i)
-        {
-          const uint32_t nonce = hwNonce(nonce_base, hw_idx + i);
-          #ifdef DEBUG_MINING
-          debugHashesHw++;
-          #endif
-          nerd_sha_ll_fill_text_block_sha256(sha_buffer);
-          sha_ll_start_block(SHA2_256);
-
-          nerd_sha_hal_wait_idle();
-          nerd_sha_ll_fill_text_block_sha256_upper(sha_buffer + 64, nonce);
-          sha_ll_continue_block(SHA2_256);
-
-          nerd_sha_hal_wait_idle();
-          sha_ll_load(SHA2_256);
-
-          nerd_sha_hal_wait_idle();
-          nerd_sha_ll_fill_text_block_sha256_double();
-          sha_ll_start_block(SHA2_256);
-
-          nerd_sha_hal_wait_idle();
-          sha_ll_load(SHA2_256);
-          if (nerd_sha_ll_read_digest_swap_if(hash))
-          {
-            const double diff_hash = diff_from_target(hash);
-            if (isSha256Valid(hash))
-            {
-              updateBestDiff(diff_hash);
-              if (diff_hash > job_difficulty)
-                submitShareResult(job_id, nonce, diff_hash, hash);
-            }
-          }
-          if ((uint8_t)(i & 0xFF) == 0 &&
-              (s_working_current_job_id != job_in_work || s_tlsPauseRequested))
-          {
-            done = i + 1;
-            break;
-          }
-        }
-        addHashes(done);
-      }
-#endif // PIPELINED_ASM_MINING
-      esp_sha_unlock_engine(SHA2_256);
-      g_hwShaMutex.unlock();
-      if (s_tlsPauseRequested)
-      {
-        s_tlsPauseRequested = false;
-        vTaskDelay(1);
-      }
-      #ifdef DEBUG_MINING
-      debugChunkEndUs = esp_timer_get_time();
-      #endif
-    } else
-      vTaskDelay(2 / portTICK_PERIOD_MS);
-
-    esp_task_wdt_reset();
-  }
-}
-
-#endif  // CONFIG_IDF_TARGET_ESP32
-
-#endif  // HARDWARE_SHA265
 
 
 #define DELAY 100
@@ -2356,10 +1453,6 @@ static bool readLegacyStats()
 }
 
 void restoreStat() {
-  if (!Settings.saveStats) {
-    s_statsLoaded = true;
-    return;
-  }
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     Serial.printf("[MONITOR] NVS partition is full or has invalid version, erasing...\n");
@@ -2370,6 +1463,11 @@ void restoreStat() {
   ret = nvs_open("state", NVS_READWRITE, &stat_handle);
   if (ret != ESP_OK) {
     Serial.printf("[MONITOR] Stats: NVS open failed (%d), not saved this run\n", ret);
+    s_statsLoaded = true;
+    return;
+  }
+
+  if (!Settings.saveStats) {
     s_statsLoaded = true;
     return;
   }
@@ -2462,6 +1560,7 @@ void runMonitor(void *name)
 {
   (void)name;
   Serial.println("[MONITOR] started");
+  esp_task_wdt_add(NULL);
   restoreStat();
 
   unsigned long mLastCheck = 0;
@@ -2484,6 +1583,7 @@ void runMonitor(void *name)
 
   while (1)
   {
+    esp_task_wdt_reset();
     uint32_t now_millis = millis();
     uint32_t mElapsed = now_millis - mLastCheck;
     if (mElapsed >= 1000)
@@ -2535,11 +1635,29 @@ void runMonitor(void *name)
       while (uptime_frac >= 1000)
       {
         uptime_frac -= 1000;
+        portENTER_CRITICAL(&s_hashMux);
         upTime++;
+        portEXIT_CRITICAL(&s_hashMux);
       }
 
       applyPendingSettings(); // from the LAN settings page
       webMonitorDataTick();   // price / block height for the live web monitor
+      {
+        int tLim = 0;
+        {
+          std::lock_guard<std::mutex> lock(g_settingsMutex);
+          tLim = Settings.TempLimit;
+        }
+        if (tLim > 0) {
+          float tc = temperatureRead();
+          if (tc >= (float)tLim)
+            s_thermalThrottled.store(true, std::memory_order_relaxed);
+          else if (tc <= (float)(tLim - 2))
+            s_thermalThrottled.store(false, std::memory_order_relaxed);
+        } else {
+          s_thermalThrottled.store(false, std::memory_order_relaxed);
+        }
+      }
       backlightTick();
       drawCurrentScreen(mElapsed);
 

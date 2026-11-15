@@ -110,7 +110,11 @@ bool tx_mining_subscribe(WiFiClient& client, mining_subscribe& mSubscribe)
     
     Serial.printf("[WORKER] ==> Mining subscribe\n");
     Serial.print("  Sending  : "); Serial.println(payload);
-    client.print(payload);
+    size_t len = strlen(payload);
+    if (client.print(payload) != len) {
+        Serial.println("[WORKER] Subscribe write failed");
+        return false;
+    }
     
     for (int i = 0; i < 50 && !client.available(); ++i)
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -172,7 +176,8 @@ mining_subscribe init_mining_subscribe(void)
     new_mSub.extranonce2 = "";
     new_mSub.extranonce2_size = 0;
     new_mSub.sub_details = "";
-
+    new_mSub.version_rolling_enabled = false;
+    new_mSub.version_rolling_mask = 0;
 
     return new_mSub;
 }
@@ -191,7 +196,11 @@ bool tx_mining_auth(WiFiClient& client, const char * user, const char * pass, un
     Serial.printf("[WORKER] ==> Autorize work\n");
     // Not the payload itself: it holds the pool password
     Serial.printf("  Sending  : mining.authorize \"%s\", password %s\n", user, (pass && *pass) ? "(set)" : "(empty)");
-    client.print(payload);
+    size_t len = strlen(payload);
+    if (client.print(payload) != len) {
+        Serial.println("[WORKER] Authorize write failed");
+        return false;
+    }
 
     vTaskDelay(200 / portTICK_PERIOD_MS); //Small delay
 
@@ -334,7 +343,40 @@ bool parse_mining_notify(const String& line, mining_job& mJob)
 }
 
 
-bool tx_mining_submit(WiFiClient& client, const mining_subscribe& mWorker, const mining_job& mJob, unsigned long nonce, unsigned long &submit_id)
+bool tx_mining_configure(WiFiClient& client, unsigned long &cfg_id)
+{
+    char payload[BUFFER] = {0};
+    id = getNextId(id);
+    cfg_id = id;
+    snprintf(payload, sizeof(payload),
+             "{\"id\":%lu,\"method\":\"mining.configure\",\"params\":[[\"version-rolling\"],{\"version-rolling.mask\":\"1fffe000\",\"version-rolling.min-bit-count\":2}]}\n",
+             id);
+    Serial.print("  Sending  : "); Serial.print(payload);
+    size_t len = strlen(payload);
+    return client.print(payload) == len;
+}
+
+bool parse_mining_configure(const String& line, uint32_t& maskOut)
+{
+    maskOut = 0;
+    if (!verifyPayload(line)) return false;
+
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, line.c_str(), line.length());
+    if (error || checkError(doc)) return false;
+    JsonVariantConst res = doc["result"];
+    if (!res.is<JsonObjectConst>()) return false;
+
+    bool enabled = res["version-rolling"] | false;
+    if (!enabled) return false;
+
+    const char* maskStr = res["version-rolling.mask"];
+    if (!maskStr || !*maskStr) return false;
+    maskOut = (uint32_t)strtoul(maskStr, nullptr, 16);
+    return maskOut != 0;
+}
+
+bool tx_mining_submit(WiFiClient& client, const mining_subscribe& mWorker, const mining_job& mJob, unsigned long nonce, unsigned long &submit_id, uint32_t versionBits, bool useVersionBits)
 {
     char payload[BUFFER] = {0};
     char nonceHex[9];
@@ -346,18 +388,31 @@ bool tx_mining_submit(WiFiClient& client, const mining_subscribe& mWorker, const
     // Submit
     id = getNextId(id);
     submit_id = id;
-    snprintf(payload, sizeof(payload), "{\"id\":%lu,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]}\n",
-        id,
-        jsonEscape(String(mWorker.wName)).c_str(),
-        jsonEscape(mJob.job_id).c_str(),
-        mWorker.extranonce2.c_str(),
-        mJob.ntime.c_str(),
-        nonceHex
-        );
+    if (useVersionBits) {
+        char vbitsHex[9];
+        snprintf(vbitsHex, sizeof(vbitsHex), "%08lx", (unsigned long)versionBits);
+        snprintf(payload, sizeof(payload), "{\"id\":%lu,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]}\n",
+            id,
+            jsonEscape(String(mWorker.wName)).c_str(),
+            jsonEscape(mJob.job_id).c_str(),
+            mWorker.extranonce2.c_str(),
+            mJob.ntime.c_str(),
+            nonceHex,
+            vbitsHex
+            );
+    } else {
+        snprintf(payload, sizeof(payload), "{\"id\":%lu,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]}\n",
+            id,
+            jsonEscape(String(mWorker.wName)).c_str(),
+            jsonEscape(mJob.job_id).c_str(),
+            mWorker.extranonce2.c_str(),
+            mJob.ntime.c_str(),
+            nonceHex
+            );
+    }
     Serial.print("  Sending  : "); Serial.print(payload);
-    client.print(payload);
-
-    return true;
+    size_t len = strlen(payload);
+    return client.print(payload) == len;
 }
 
 bool parse_mining_set_difficulty(const String& line, double& difficulty)
@@ -391,28 +446,6 @@ bool tx_suggest_difficulty(WiFiClient& client, double difficulty)
     snprintf(payload, sizeof(payload), "{\"id\":%lu,\"method\":\"mining.suggest_difficulty\",\"params\":[%.10g]}\n", id, difficulty);
     
     Serial.print("  Sending  : "); Serial.print(payload);
-    return client.print(payload);
-
-}
-
-
-unsigned long parse_extract_id(const String &line)
-{
-    StaticJsonDocument<512> doc;
-    if (parseEnvelope(doc, line))
-        return 0;
-    
-    if (!doc.containsKey("id"))
-        return 0;
-
-    return doc["id"] | 0UL;
-}
-
-// A reply's "result": true when the pool accepted the submitted share.
-bool parse_extract_result(const String &line)
-{
-    StaticJsonDocument<512> doc;
-    if (parseEnvelope(doc, line))
-        return false;
-    return doc["result"] | false;
+    size_t len = strlen(payload);
+    return client.print(payload) == len;
 }
