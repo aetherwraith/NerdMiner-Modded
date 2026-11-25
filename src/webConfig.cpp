@@ -1894,7 +1894,7 @@ static esp_err_t handleApiEvents(httpd_req_t *req)
   }
 
   if (!s_sseTaskHandle) {
-    xTaskCreate(sseTask, "SSE", 4096, nullptr, 2, &s_sseTaskHandle);
+    xTaskCreatePinnedToCore(sseTask, "SSE", 4096, nullptr, 2, &s_sseTaskHandle, 0);
   }
   return ESP_OK;
 }
@@ -1948,6 +1948,7 @@ void setup_webConfig(void)
     return;
 
   httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+  cfg.core_id = 0; // Core 1 is dedicated to MinerHw-0 (priority 19)
   cfg.server_port = 80;
   cfg.stack_size = 8192;
   cfg.max_uri_handlers = 116;
