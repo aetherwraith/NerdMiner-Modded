@@ -615,14 +615,31 @@ document.querySelector('[role="tablist"]').addEventListener('keydown',function(e
 function offline(){
   $('off').style.display='block';document.body.classList.add('stale');
   var st=$('st');st.className='pill bad';set('stt',t('offline'))}
-var pollTimer=0,histTimer=0,fleetTimer=0;
+var pollTimer=0,histTimer=0,fleetTimer=0,sseOk=false,sseEs=null;
+function startSse(){
+  if(!window.EventSource||sseEs)return;
+  try{
+    sseEs=new EventSource('/api/events');
+    sseEs.onopen=function(){sseOk=true;clearTimeout(pollTimer)};
+    sseEs.onmessage=function(e){
+      if(!e||!e.data)return;
+      try{
+        var j=JSON.parse(e.data);
+        document.body.classList.remove('stale');
+        update(j);
+        if(hist.length<2&&activeTab==='mon')draw();
+      }catch(err){}
+    };
+    sseEs.onerror=function(){sseOk=false;if(sseEs){try{sseEs.close()}catch(_){}sseEs=null}if(!pollTimer)pollTimer=setTimeout(poll,3000)};
+  }catch(e){}
+}
 function poll(){
   clearTimeout(pollTimer);
-  if(document.hidden)return;
+  if(document.hidden||sseOk)return;
   getJSON('/api/status',5000).then(function(j){
     document.body.classList.remove('stale');
     try{update(j);if(hist.length<2&&activeTab==='mon')draw()}catch(e){if(window.console)console.error(e)}
-  },offline).then(function(){pollTimer=setTimeout(poll,3000)})}
+  },offline).then(function(){if(!sseOk)pollTimer=setTimeout(poll,3000)})}
 function history(){
   clearTimeout(histTimer);
   if(document.hidden)return;
@@ -1290,12 +1307,18 @@ $('fimp-file').addEventListener('change',async function(ev){
 });
 
 document.addEventListener('visibilitychange',function(){
-  if(!document.hidden){poll();history();if(activeTab==='flt')pollFleet()}
+  if(document.hidden){
+    sseOk=false;
+    if(sseEs){try{sseEs.close()}catch(_){}sseEs=null}
+  }else{
+    poll();startSse();history();if(activeTab==='flt')pollFleet();
+  }
 });
 window.addEventListener('resize',function(){if(activeTab==='mon')draw()});
 
 loadPeers();
 poll();
+startSse();
 history();
 })();
 </script>

@@ -2,7 +2,7 @@
 #define _OTA_H_
 
 #include <Arduino.h>
-#include <WebServer.h>
+#include <esp_http_server.h>
 
 enum OtaState {
   OTA_STATE_IDLE = 0,
@@ -32,9 +32,9 @@ struct OtaStatus {
 };
 
 /**
- * @brief Initialize OTA endpoints and attach to WebServer
+ * @brief Initialize OTA endpoints and attach to esp_http_server
  */
-void setup_ota(WebServer &server);
+void setup_ota(httpd_handle_t server);
 
 /**
  * @brief Background tick for OTA operations

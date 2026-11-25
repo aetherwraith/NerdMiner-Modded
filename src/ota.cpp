@@ -14,11 +14,7 @@
 #include "wManager.h"
 #include "drivers/storage/storage.h"
 #include "webOtaPage.h"
-
-extern bool checkWebApiMutationAllowed();
-extern bool isWebApiMutationPermitted();
-extern void sendCorsJson(int code, const String &json);
-extern bool handleCorsOptions(void);
+#include "webConfig.h"
 
 #ifndef PIOENV_NAME
 #if defined(ESP32_2432S028R)
@@ -48,12 +44,6 @@ static TaskHandle_t s_checkTaskHandle = nullptr;
 static String s_targetOtaUrl = "";
 static volatile bool s_otaRebootScheduled = false;
 static unsigned long s_otaRebootTime = 0;
-static bool s_uploadRejected = false;
-static uint8_t s_uploadHeaderBuf[16];
-static size_t s_uploadHeaderLen = 0;
-static size_t s_uploadBytesWritten = 0;
-static size_t s_uploadLastReportedBytes = 0;
-static int s_uploadLastReportedPct = -1;
 
 String getBoardModel(void) {
   return String(PIOENV_NAME);
@@ -551,14 +541,19 @@ void otaProcess(void) {
 
 // ----------------- Web UI & API Handlers -----------------
 
-static void handleOtaPage(WebServer &server) {
-  if (!checkWebApiMutationAllowed()) return;
-  server.sendHeader("Content-Encoding", "gzip");
-  server.sendHeader("Cache-Control", "no-cache");
-  server.send_P(200, "text/html; charset=utf-8", (PGM_P)OTA_HTML_GZ, OTA_HTML_GZ_LEN);
+static esp_err_t handleOtaOptions(httpd_req_t *req) {
+  return handleCorsOptions(req);
 }
 
-static void handleApiGetUpdate(WebServer &server) {
+static esp_err_t handleOtaPage(httpd_req_t *req) {
+  if (!checkWebApiMutationAllowed(req)) return ESP_OK;
+  httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  return httpd_resp_send(req, (const char *)OTA_HTML_GZ, OTA_HTML_GZ_LEN);
+}
+
+static esp_err_t handleApiGetUpdate(httpd_req_t *req) {
   OtaStatus st = getOtaStatus();
   char buf[1024];
   snprintf(buf, sizeof(buf),
@@ -579,24 +574,22 @@ static void handleApiGetUpdate(WebServer &server) {
            jsonEscape(st.downloadUrl).c_str(),
            jsonEscape(st.errorMessage).c_str());
 
-  server.sendHeader("Cache-Control", "no-store");
-  sendCorsJson(200, buf);
+  return sendCorsJson(req, 200, buf, true);
 }
 
-static void handleApiPostUpdate(WebServer &server) {
-  if (handleCorsOptions()) return;
-  if (!checkWebApiMutationAllowed()) return;
+static esp_err_t handleApiPostUpdate(httpd_req_t *req) {
+  if (!checkWebApiMutationAllowed(req)) return ESP_OK;
 
   String targetUrl = "";
-  if (server.hasArg("plain")) {
-    String body = server.arg("plain");
+  String body = reqReadBody(req, 1024);
+  if (body.length() > 0) {
     StaticJsonDocument<256> doc;
     if (deserializeJson(doc, body.c_str()) == DeserializationError::Ok) {
       if (doc.containsKey("url")) targetUrl = doc["url"].as<String>();
     }
   }
-  if (targetUrl.length() == 0 && server.hasArg("url")) {
-    targetUrl = server.arg("url");
+  if (targetUrl.length() == 0) {
+    targetUrl = reqQueryParam(req, "url");
   }
 
   bool ok = (targetUrl.length() > 0) ? startUrlOta(targetUrl) : startGitHubOta("latest");
@@ -614,12 +607,11 @@ static void handleApiPostUpdate(WebServer &server) {
              ok ? "OTA update initiated" : "Failed to start OTA update");
   }
 
-  sendCorsJson(ok ? 200 : 400, buf);
+  return sendCorsJson(req, ok ? 200 : 400, buf);
 }
 
-static void handleApiCheckUpdate(WebServer &server) {
-  if (handleCorsOptions()) return;
-  if (!checkWebApiMutationAllowed()) return;
+static esp_err_t handleApiCheckUpdate(httpd_req_t *req) {
+  if (!checkWebApiMutationAllowed(req)) return ESP_OK;
 
   bool started = startGitHubCheck();
   OtaStatus st = getOtaStatus();
@@ -639,184 +631,321 @@ static void handleApiCheckUpdate(WebServer &server) {
            jsonEscape(st.releaseNotes).c_str(),
            jsonEscape(st.errorMessage).c_str());
 
-  server.sendHeader("Cache-Control", "no-store");
-  sendCorsJson(started ? 202 : (st.state == OTA_STATE_ERROR ? 500 : 409), buf);
+  return sendCorsJson(req, started ? 202 : (st.state == OTA_STATE_ERROR ? 500 : 409), buf, true);
 }
 
-void setup_ota(WebServer &server) {
-  server.on("/update", HTTP_OPTIONS, []() {
-    handleCorsOptions();
-  });
+static esp_err_t sendUploadError500(httpd_req_t *req, const String &errMsg) {
+  httpd_resp_set_status(req, "500 Internal Server Error");
+  httpd_resp_set_type(req, "text/plain");
+  httpd_resp_set_hdr(req, "Connection", "close");
+  String body = "Update Failed: " + errMsg;
+  return httpd_resp_send(req, body.c_str(), body.length());
+}
 
-  server.on("/update", HTTP_GET, [&server]() {
-    handleOtaPage(server);
-  });
-
-  server.on("/update", HTTP_POST, [&server]() {
-    if (!checkWebApiMutationAllowed()) {
-      return;
+static const uint8_t *findBytes(const uint8_t *haystack, size_t haystackLen,
+                                const uint8_t *needle, size_t needleLen) {
+  if (needleLen == 0 || haystackLen < needleLen) return nullptr;
+  for (size_t i = 0; i <= haystackLen - needleLen; ++i) {
+    if (haystack[i] == needle[0] && memcmp(haystack + i, needle, needleLen) == 0) {
+      return haystack + i;
     }
-    server.sendHeader("Connection", "close");
-    OtaStatus st = getOtaStatus();
-    if (Update.hasError() || st.state == OTA_STATE_ERROR) {
-      String errMsg = st.errorMessage.length() > 0 ? st.errorMessage : String(Update.errorString());
-      server.send(500, "text/plain", "Update Failed: " + errMsg);
-    } else {
-      server.send(200, "text/html", F("<html><head><meta http-equiv='refresh' content='15;url=/'></head>"
-                                      "<body style='font-family:sans-serif;background:#121212;color:#e0e0e0;padding:2em;text-align:center'>"
-                                      "<h2>&#x2705; Update Successful!</h2>"
-                                      "<p>Firmware written successfully. Device is restarting...</p>"
-                                      "<p>Redirecting in 15 seconds...</p>"
-                                      "</body></html>"));
-      s_otaRebootTime = millis() + 1000;
-      s_otaRebootScheduled = true;
-    }
-  }, [&server]() {
-    HTTPUpload &upload = server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-      if (!isWebApiMutationPermitted()) {
-        s_uploadRejected = true;
-        Serial.println(F("[OTA] Rejected unauthorized or cross-origin /update upload"));
-        return;
-      }
-      s_uploadRejected = false;
-      s_uploadHeaderLen = 0;
-      s_uploadBytesWritten = 0;
-      s_uploadLastReportedBytes = 0;
-      s_uploadLastReportedPct = 0;
-      Serial.printf("[OTA] Starting upload: %s\n", upload.filename.c_str());
-      {
-        std::lock_guard<std::mutex> lock(s_otaMutex);
-        s_otaStatus.state = OTA_STATE_FLASHING;
-        s_otaStatus.bytesWritten = 0;
-        s_otaStatus.totalBytes = 0;
-        s_otaStatus.progressPercent = 0;
-        s_otaStatus.errorMessage = "";
-      }
+  }
+  return nullptr;
+}
 
-      const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
-      if (!update_partition) {
-        String msg = "No OTA partition found; device must be flashed via USB once.";
+static esp_err_t handleUpdateUpload(httpd_req_t *req) {
+  if (!checkWebApiMutationAllowed(req)) {
+    return ESP_OK;
+  }
+
+  if (req->content_len <= 0) {
+    String msg = "Empty or invalid upload content length";
+    setOtaError(msg);
+    Serial.println("[OTA] Error: " + msg);
+    return sendUploadError500(req, msg);
+  }
+
+  String contentType = reqHeader(req, "Content-Type");
+  String contentTypeLower = contentType;
+  contentTypeLower.toLowerCase();
+  bool isMultipart = (contentTypeLower.indexOf("multipart/form-data") >= 0);
+  String boundary = "";
+  if (isMultipart) {
+    int bIdx = contentTypeLower.indexOf("boundary=");
+    if (bIdx >= 0) {
+      String raw = contentType.substring(bIdx + 9);
+      raw.trim();
+      if (raw.startsWith("\"")) {
+        int endQuote = raw.indexOf('"', 1);
+        boundary = (endQuote > 1) ? raw.substring(1, endQuote) : raw.substring(1);
+      } else {
+        int endPos = raw.indexOf(';');
+        if (endPos < 0) endPos = raw.length();
+        boundary = raw.substring(0, endPos);
+        boundary.trim();
+      }
+    }
+    if (boundary.length() == 0 || boundary.length() > 120) {
+      String msg = "Invalid or missing multipart boundary";
+      setOtaError(msg);
+      Serial.println("[OTA] Error: " + msg);
+      return sendUploadError500(req, msg);
+    }
+  }
+
+  Serial.printf("[OTA] Starting upload (%d bytes, %s)\n",
+                (int)req->content_len, isMultipart ? "multipart" : "raw");
+  {
+    std::lock_guard<std::mutex> lock(s_otaMutex);
+    s_otaStatus.state = OTA_STATE_FLASHING;
+    s_otaStatus.bytesWritten = 0;
+    s_otaStatus.totalBytes = 0;
+    s_otaStatus.progressPercent = 0;
+    s_otaStatus.errorMessage = "";
+  }
+
+  const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+  if (!update_partition) {
+    String msg = "No OTA partition found; device must be flashed via USB once.";
+    setOtaError(msg);
+    Serial.println("[OTA] Error: " + msg);
+    return sendUploadError500(req, msg);
+  }
+
+  // Pause mining and yield HW SHA engine immediately before flash operations
+  g_otaUpdating = true;
+  pauseHwMinerForTls();
+
+  if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+    String msg = "Update.begin failed: " + String(Update.errorString());
+    setOtaError(msg);
+    Serial.println("[OTA] Error: " + msg);
+    g_otaUpdating = false;
+    return sendUploadError500(req, msg);
+  }
+
+  uint8_t headerBuf[16];
+  size_t headerLen = 0;
+  size_t bytesWritten = 0;
+  size_t lastReportedBytes = 0;
+  bool failed = false;
+
+  auto writeFirmwareBytes = [&](const uint8_t *data, size_t len) -> bool {
+    if (failed || len == 0) return !failed;
+    const uint8_t *writePtr = data;
+    size_t writeLen = len;
+    if (headerLen < 16) {
+      size_t take = 16 - headerLen;
+      if (take > writeLen) take = writeLen;
+      memcpy(headerBuf + headerLen, writePtr, take);
+      headerLen += take;
+      writePtr += take;
+      writeLen -= take;
+      if (headerLen == 16) {
+        String valErr;
+        if (!validateFirmwareHeader(headerBuf, 16, valErr)) {
+          setOtaError(valErr);
+          Serial.println("[OTA] Validation failed: " + valErr);
+          Update.abort();
+          failed = true;
+          return false;
+        }
+        if (Update.write(headerBuf, 16) != 16) {
+          String msg = "Write failed: " + String(Update.errorString());
+          setOtaError(msg);
+          Serial.println("[OTA] Error: " + msg);
+          Update.abort();
+          failed = true;
+          return false;
+        }
+        bytesWritten += 16;
+      }
+    }
+    if (writeLen > 0 && headerLen == 16) {
+      if (Update.write(const_cast<uint8_t *>(writePtr), writeLen) != writeLen) {
+        String msg = "Write failed: " + String(Update.errorString());
         setOtaError(msg);
         Serial.println("[OTA] Error: " + msg);
         Update.abort();
-        return;
+        failed = true;
+        return false;
+      }
+      bytesWritten += writeLen;
+    }
+    if (headerLen == 16 && (bytesWritten - lastReportedBytes) >= 16384) {
+      lastReportedBytes = bytesWritten;
+      std::lock_guard<std::mutex> lock(s_otaMutex);
+      s_otaStatus.bytesWritten = bytesWritten;
+    }
+    return true;
+  };
+
+  uint8_t recvBuf[2048];
+  size_t remaining = (size_t)req->content_len;
+
+  // Multipart state
+  bool inPartHeaders = isMultipart;
+  bool boundaryFound = false;
+  String partHdrBuf;
+  const String boundaryMarker = isMultipart ? ("\r\n--" + boundary) : String("");
+  const size_t tailWindowSize = isMultipart ? (boundary.length() + 6) : 0;
+  // tailWindowSize <= 126, so 2048 + 128 fits both carried tail and one recvBuf chunk
+  uint8_t workBuf[2048 + 128];
+  size_t tailLen = 0;
+
+  auto feedMultipartBody = [&](const uint8_t *data, size_t len) -> bool {
+    if (boundaryFound || len == 0 || failed) return !failed;
+    size_t offset = 0;
+    while (offset < len && !boundaryFound && !failed) {
+      size_t space = sizeof(workBuf) - tailLen;
+      size_t take = len - offset;
+      if (take > space) take = space;
+      memcpy(workBuf + tailLen, data + offset, take);
+      size_t totalLen = tailLen + take;
+      offset += take;
+
+      const uint8_t *match = findBytes(
+          workBuf, totalLen,
+          reinterpret_cast<const uint8_t *>(boundaryMarker.c_str()),
+          boundaryMarker.length());
+      if (match != nullptr) {
+        size_t payloadLen = (size_t)(match - workBuf);
+        if (payloadLen > 0) {
+          writeFirmwareBytes(workBuf, payloadLen);
+        }
+        boundaryFound = true;
+        tailLen = 0;
+        break;
       }
 
-      // Pause mining and yield HW SHA engine immediately before flash operations
-      g_otaUpdating = true;
-      pauseHwMinerForTls();
+      if (totalLen > tailWindowSize) {
+        size_t flushLen = totalLen - tailWindowSize;
+        if (!writeFirmwareBytes(workBuf, flushLen)) {
+          return false;
+        }
+        memmove(workBuf, workBuf + flushLen, tailWindowSize);
+        tailLen = tailWindowSize;
+      } else {
+        tailLen = totalLen;
+      }
+    }
+    return !failed;
+  };
 
-      if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
-        String msg = "Update.begin failed: " + String(Update.errorString());
+  while (remaining > 0) {
+    int toRead = (remaining > sizeof(recvBuf)) ? (int)sizeof(recvBuf) : (int)remaining;
+    int ret = httpd_req_recv(req, (char *)recvBuf, toRead);
+    if (ret <= 0) {
+      String msg = "Upload stream interrupted";
+      setOtaError(msg);
+      Serial.println("[OTA] Error: " + msg);
+      Update.abort();
+      failed = true;
+      break;
+    }
+    remaining -= (size_t)ret;
+
+    if (failed || boundaryFound) {
+      continue;
+    }
+
+    if (!isMultipart) {
+      if (!writeFirmwareBytes(recvBuf, (size_t)ret)) {
+        break;
+      }
+      continue;
+    }
+
+    if (inPartHeaders) {
+      partHdrBuf.concat((const char *)recvBuf, (unsigned int)ret);
+      int hdrEnd = partHdrBuf.indexOf("\r\n\r\n");
+      if (hdrEnd >= 0) {
+        inPartHeaders = false;
+        size_t bodyStart = (size_t)hdrEnd + 4;
+        if (bodyStart < partHdrBuf.length()) {
+          feedMultipartBody(
+              reinterpret_cast<const uint8_t *>(partHdrBuf.c_str()) + bodyStart,
+              partHdrBuf.length() - bodyStart);
+        }
+        partHdrBuf = "";
+      } else if (partHdrBuf.length() > 4096) {
+        String msg = "Multipart headers too large";
         setOtaError(msg);
         Serial.println("[OTA] Error: " + msg);
-        g_otaUpdating = false;
+        Update.abort();
+        failed = true;
+        break;
       }
+    } else {
+      feedMultipartBody(recvBuf, (size_t)ret);
     }
-    else if (upload.status == UPLOAD_FILE_WRITE) {
-      if (s_uploadRejected) return;
-      if (Update.isRunning()) {
-        const uint8_t *writePtr = upload.buf;
-        size_t writeLen = upload.currentSize;
-        if (s_uploadHeaderLen < 16) {
-          size_t take = 16 - s_uploadHeaderLen;
-          if (take > writeLen) take = writeLen;
-          memcpy(s_uploadHeaderBuf + s_uploadHeaderLen, writePtr, take);
-          s_uploadHeaderLen += take;
-          writePtr += take;
-          writeLen -= take;
-          if (s_uploadHeaderLen == 16) {
-            String valErr;
-            if (!validateFirmwareHeader(s_uploadHeaderBuf, 16, valErr)) {
-              setOtaError(valErr);
-              Serial.println("[OTA] Validation failed: " + valErr);
-              Update.abort();
-              g_otaUpdating = false;
-              return;
-            }
-            if (Update.write(s_uploadHeaderBuf, 16) != 16) {
-              String msg = "Write failed: " + String(Update.errorString());
-              setOtaError(msg);
-              Serial.println("[OTA] Error: " + msg);
-              Update.abort();
-              g_otaUpdating = false;
-              return;
-            }
-            s_uploadBytesWritten += 16;
-          }
-        }
-        if (writeLen > 0 && s_uploadHeaderLen == 16) {
-          if (Update.write(const_cast<uint8_t*>(writePtr), writeLen) != writeLen) {
-            String msg = "Write failed: " + String(Update.errorString());
-            setOtaError(msg);
-            Serial.println("[OTA] Error: " + msg);
-            Update.abort();
-            g_otaUpdating = false;
-            return;
-          }
-          s_uploadBytesWritten += writeLen;
-        }
-        if (s_uploadHeaderLen == 16 && (s_uploadBytesWritten - s_uploadLastReportedBytes) >= 16384) {
-          s_uploadLastReportedBytes = s_uploadBytesWritten;
-          std::lock_guard<std::mutex> lock(s_otaMutex);
-          s_otaStatus.bytesWritten = s_uploadBytesWritten;
-        }
-      }
-    }
-    else if (upload.status == UPLOAD_FILE_END) {
-      if (s_uploadRejected) return;
-      if (Update.isRunning()) {
-        if (s_uploadHeaderLen < 16) {
-          setOtaError("Firmware image too small (< 16 bytes)");
-          Update.abort();
-        } else if (Update.end(true)) {
-          {
-            std::lock_guard<std::mutex> lock(s_otaMutex);
-            s_otaStatus.bytesWritten = s_uploadBytesWritten;
-            s_otaStatus.totalBytes = upload.totalSize > 0 ? upload.totalSize : s_uploadBytesWritten;
-            s_otaStatus.state = OTA_STATE_SUCCESS;
-            s_otaStatus.progressPercent = 100;
-          }
-          Serial.printf("[OTA] Manual upload success! Total: %u bytes.\n", upload.totalSize);
-        } else {
-          String msg = "Update.end failed: " + String(Update.errorString());
-          setOtaError(msg);
-          Serial.println("[OTA] Error: " + msg);
-        }
-      }
-      g_otaUpdating = false;
-    }
-    else if (upload.status == UPLOAD_FILE_ABORTED) {
-      if (s_uploadRejected) return;
+  }
+
+  if (!failed && isMultipart && !boundaryFound) {
+    String msg = "Truncated multipart upload (missing closing boundary)";
+    setOtaError(msg);
+    Serial.println("[OTA] Error: " + msg);
+    Update.abort();
+    failed = true;
+  }
+
+  if (!failed) {
+    if (headerLen < 16) {
+      setOtaError("Firmware image too small (< 16 bytes)");
       Update.abort();
-      setOtaError("Upload aborted by client");
-      Serial.println(F("[OTA] Upload aborted"));
-      g_otaUpdating = false;
+      failed = true;
+    } else if (Update.end(true)) {
+      {
+        std::lock_guard<std::mutex> lock(s_otaMutex);
+        s_otaStatus.bytesWritten = bytesWritten;
+        s_otaStatus.totalBytes = bytesWritten;
+        s_otaStatus.state = OTA_STATE_SUCCESS;
+        s_otaStatus.progressPercent = 100;
+      }
+      Serial.printf("[OTA] Manual upload success! Total: %u bytes.\n", (unsigned)bytesWritten);
+    } else {
+      String msg = "Update.end failed: " + String(Update.errorString());
+      setOtaError(msg);
+      Serial.println("[OTA] Error: " + msg);
+      failed = true;
     }
-  });
+  }
 
-  server.on("/api/system/update", HTTP_OPTIONS, []() {
-    handleCorsOptions();
-  });
+  g_otaUpdating = false;
 
-  server.on("/api/system/update", HTTP_GET, [&server]() {
-    handleApiGetUpdate(server);
-  });
+  if (failed || Update.hasError()) {
+    OtaStatus st = getOtaStatus();
+    String errMsg = st.errorMessage.length() > 0 ? st.errorMessage : String(Update.errorString());
+    return sendUploadError500(req, errMsg);
+  }
 
-  server.on("/api/system/update", HTTP_POST, [&server]() {
-    handleApiPostUpdate(server);
-  });
+  static const char SUCCESS_HTML[] =
+      "<html><head><meta http-equiv='refresh' content='15;url=/'></head>"
+      "<body style='font-family:sans-serif;background:#121212;color:#e0e0e0;padding:2em;text-align:center'>"
+      "<h2>&#x2705; Update Successful!</h2>"
+      "<p>Firmware written successfully. Device is restarting...</p>"
+      "<p>Redirecting in 15 seconds...</p>"
+      "</body></html>";
+  httpd_resp_set_hdr(req, "Connection", "close");
+  httpd_resp_set_type(req, "text/html");
+  esp_err_t res = httpd_resp_send(req, SUCCESS_HTML, sizeof(SUCCESS_HTML) - 1);
+  s_otaRebootTime = millis() + 1000;
+  s_otaRebootScheduled = true;
+  return res;
+}
 
-  server.on("/api/system/update/check", HTTP_OPTIONS, []() {
-    handleCorsOptions();
-  });
-
-  server.on("/api/system/update/check", HTTP_POST, [&server]() {
-    handleApiCheckUpdate(server);
-  });
-
-  server.on("/api/system/update/check", HTTP_GET, [&server]() {
-    handleApiCheckUpdate(server);
-  });
+void setup_ota(httpd_handle_t server) {
+  static const httpd_uri_t routes[] = {
+      {"/update", HTTP_OPTIONS, handleOtaOptions, NULL},
+      {"/update", HTTP_GET, handleOtaPage, NULL},
+      {"/update", HTTP_POST, handleUpdateUpload, NULL},
+      {"/api/system/update", HTTP_OPTIONS, handleOtaOptions, NULL},
+      {"/api/system/update", HTTP_GET, handleApiGetUpdate, NULL},
+      {"/api/system/update", HTTP_POST, handleApiPostUpdate, NULL},
+      {"/api/system/update/check", HTTP_OPTIONS, handleOtaOptions, NULL},
+      {"/api/system/update/check", HTTP_POST, handleApiCheckUpdate, NULL},
+  };
+  for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+    httpd_register_uri_handler(server, &routes[i]);
+  }
 }

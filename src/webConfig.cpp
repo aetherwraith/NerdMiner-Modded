@@ -1,8 +1,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WebServer.h>
 #include <ArduinoJson.h>
 #include <esp_timer.h>
+#include <esp_http_server.h>
+#include <mbedtls/base64.h>
+#include <atomic>
 #include "webConfig.h"
 #include "version.h"
 #include "wManager.h"
@@ -36,18 +38,157 @@ extern volatile uint32_t rejects;
 static const char *WEBCFG_USER = "admin";
 #define WEBCFG_PASS_MAX 63
 
-static WebServer webCfgServer(80);
+static httpd_handle_t s_httpd = nullptr;
 static bool webCfgStarted = false;
-static bool s_corsAdded = false;
 
-static void ensureCorsHeaders()
+static void setCorsHeaders(httpd_req_t *req)
 {
-  if (s_corsAdded)
-    return;
-  s_corsAdded = true;
-  webCfgServer.sendHeader("Access-Control-Allow-Origin", "*");
-  webCfgServer.sendHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, OPTIONS");
-  webCfgServer.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, OPTIONS");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+String reqHeader(httpd_req_t *req, const char *name)
+{
+  size_t len = httpd_req_get_hdr_value_len(req, name);
+  if (len == 0) return String();
+  String val;
+  if (!val.reserve(len + 1)) return String();
+  char *buf = const_cast<char *>(val.c_str());
+  if (httpd_req_get_hdr_value_str(req, name, buf, len + 1) == ESP_OK)
+  {
+    return String(buf);
+  }
+  return String();
+}
+
+static int hexVal(char c)
+{
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+  if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+  return -1;
+}
+
+static String urlDecode(const char *s, size_t len)
+{
+  String out;
+  out.reserve(len);
+  for (size_t i = 0; i < len; ++i)
+  {
+    if (s[i] == '+')
+    {
+      out += ' ';
+    }
+    else if (s[i] == '%' && i + 2 < len)
+    {
+      int h1 = hexVal(s[i + 1]), h2 = hexVal(s[i + 2]);
+      if (h1 >= 0 && h2 >= 0)
+      {
+        out += (char)((h1 << 4) | h2);
+        i += 2;
+        continue;
+      }
+      out += s[i];
+    }
+    else
+    {
+      out += s[i];
+    }
+  }
+  return out;
+}
+
+static String findFormOrQueryParam(const String &src, const char *key, bool *foundOut = nullptr)
+{
+  if (foundOut) *foundOut = false;
+  const size_t klen = strlen(key);
+  size_t pos = 0;
+  while (pos <= src.length())
+  {
+    int amp = src.indexOf('&', pos);
+    size_t end = (amp >= 0) ? (size_t)amp : src.length();
+    int eq = src.indexOf('=', pos);
+    size_t nameEnd = (eq >= 0 && (size_t)eq < end) ? (size_t)eq : end;
+    if (nameEnd - pos == klen && memcmp(src.c_str() + pos, key, klen) == 0)
+    {
+      if (foundOut) *foundOut = true;
+      if (eq >= 0 && (size_t)eq < end)
+        return urlDecode(src.c_str() + eq + 1, end - (size_t)eq - 1);
+      return String();
+    }
+    if (amp < 0) break;
+    pos = (size_t)amp + 1;
+  }
+  return String();
+}
+
+String reqQueryParam(httpd_req_t *req, const char *key)
+{
+  size_t qlen = httpd_req_get_url_query_len(req);
+  if (qlen == 0) return String();
+  String q;
+  if (!q.reserve(qlen + 1)) return String();
+  char *buf = const_cast<char *>(q.c_str());
+  if (httpd_req_get_url_query_str(req, buf, qlen + 1) != ESP_OK)
+    return String();
+  return findFormOrQueryParam(String(buf), key);
+}
+
+String reqReadBody(httpd_req_t *req, size_t maxBytes)
+{
+  if (req->content_len <= 0) return String();
+  size_t toRead = (size_t)req->content_len;
+  if (toRead > maxBytes) toRead = maxBytes;
+  String body;
+  if (!body.reserve(toRead + 1)) return String();
+  char buf[512];
+  size_t total = 0;
+  while (total < toRead)
+  {
+    size_t chunk = toRead - total;
+    if (chunk > sizeof(buf)) chunk = sizeof(buf);
+    int r = httpd_req_recv(req, buf, chunk);
+    if (r <= 0)
+    {
+      if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+      break;
+    }
+    body.concat(buf, (size_t)r);
+    total += (size_t)r;
+  }
+  return body;
+}
+
+static esp_err_t sendHttpText(httpd_req_t *req, const char *status, const char *ctype, const char *body, size_t len)
+{
+  httpd_resp_set_status(req, status);
+  httpd_resp_set_type(req, ctype);
+  return httpd_resp_send(req, body, (ssize_t)len);
+}
+
+static esp_err_t sendHttpText(httpd_req_t *req, const char *status, const char *ctype, const char *body)
+{
+  return sendHttpText(req, status, ctype, body, body ? strlen(body) : 0);
+}
+
+static const char *httpStatusStr(int code)
+{
+  switch (code)
+  {
+    case 200: return "200 OK";
+    case 202: return "202 Accepted";
+    case 204: return "204 No Content";
+    case 302: return "302 Found";
+    case 400: return "400 Bad Request";
+    case 401: return "401 Unauthorized";
+    case 403: return "403 Forbidden";
+    case 404: return "404 Not Found";
+    case 405: return "405 Method Not Allowed";
+    case 409: return "409 Conflict";
+    case 500: return "500 Internal Server Error";
+    default:  return "200 OK";
+  }
 }
 
 static String currentWebPassword()
@@ -56,12 +197,37 @@ static String currentWebPassword()
   return Settings.WebPassword;
 }
 
-static bool checkAuth()
+static bool isBasicAuthValid(httpd_req_t *req, const String &pw)
+{
+  String auth = reqHeader(req, "Authorization");
+  if (!auth.startsWith("Basic ") && !auth.startsWith("basic "))
+    return false;
+  const char *b64 = auth.c_str() + 6;
+  size_t b64Len = strlen(b64);
+  if (b64Len == 0 || b64Len > 160)
+    return false;
+  unsigned char decoded[128] = {0};
+  size_t outLen = 0;
+  if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &outLen,
+                            reinterpret_cast<const unsigned char *>(b64), b64Len) != 0)
+    return false;
+  decoded[outLen] = '\0';
+  String expected = String(WEBCFG_USER) + ":" + pw;
+  return outLen == expected.length() && memcmp(decoded, expected.c_str(), outLen) == 0;
+}
+
+static void sendAuthRequired(httpd_req_t *req)
+{
+  httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"NerdMiner\"");
+  sendHttpText(req, "401 Unauthorized", "text/plain", "Unauthorized");
+}
+
+static bool checkAuth(httpd_req_t *req)
 {
   const String pw = currentWebPassword();
-  if (!webCfgServer.authenticate(WEBCFG_USER, pw.c_str()))
+  if (!isBasicAuthValid(req, pw))
   {
-    webCfgServer.requestAuthentication();
+    sendAuthRequired(req);
     return false;
   }
   return true;
@@ -91,16 +257,16 @@ static bool parseIpv4Octets(const String &host, int out[4])
   return start == (int)host.length() + 1;
 }
 
-static bool isLanOriginAllowed()
+static bool isLanOriginAllowed(httpd_req_t *req)
 {
-  String origin = webCfgServer.header("Origin");
+  String origin = reqHeader(req, "Origin");
   origin.trim();
   if (origin.isEmpty())
     return true;
   if (origin.equalsIgnoreCase("null"))
     return false;
 
-  const String hostHdr = webCfgServer.hostHeader();
+  const String hostHdr = reqHeader(req, "Host");
   if (hostHdr.length() > 0)
   {
     if (origin.equalsIgnoreCase("http://" + hostHdr) || origin.equalsIgnoreCase("https://" + hostHdr))
@@ -154,32 +320,30 @@ static bool isLanOriginAllowed()
   return false;
 }
 
-bool isWebApiMutationPermitted()
+bool isWebApiMutationPermitted(httpd_req_t *req)
 {
-  if (!isLanOriginAllowed())
+  if (!isLanOriginAllowed(req))
     return false;
   const String pw = currentWebPassword();
   if (pw.length() > 0 && pw != DEFAULT_WEBPASSWORD)
-    return webCfgServer.authenticate(WEBCFG_USER, pw.c_str());
+    return isBasicAuthValid(req, pw);
   return true;
 }
 
-bool checkWebApiMutationAllowed()
+bool checkWebApiMutationAllowed(httpd_req_t *req)
 {
-  ensureCorsHeaders();
-  if (!isLanOriginAllowed())
+  setCorsHeaders(req);
+  if (!isLanOriginAllowed(req))
   {
-    webCfgServer.send(403, "application/json", "{\"success\":false,\"error\":\"Forbidden: external cross-origin request refused\"}");
-    s_corsAdded = false;
+    sendHttpText(req, "403 Forbidden", "application/json", "{\"success\":false,\"error\":\"Forbidden: external cross-origin request refused\"}");
     return false;
   }
   const String pw = currentWebPassword();
   if (pw.length() > 0 && pw != DEFAULT_WEBPASSWORD)
   {
-    if (!webCfgServer.authenticate(WEBCFG_USER, pw.c_str()))
+    if (!isBasicAuthValid(req, pw))
     {
-      webCfgServer.requestAuthentication();
-      s_corsAdded = false;
+      sendAuthRequired(req);
       return false;
     }
   }
@@ -190,13 +354,13 @@ bool checkWebApiMutationAllowed()
 // has cached for this page, so /save only takes requests whose Origin (or,
 // without one, Referer) is this device. Browsers send Origin with every POST;
 // a request with neither header (curl, scripts) is let through.
-static bool sameOrigin()
+static bool sameOrigin(httpd_req_t *req)
 {
-  const String self = "http://" + webCfgServer.hostHeader();
-  const String origin = webCfgServer.header("Origin");
+  const String self = "http://" + reqHeader(req, "Host");
+  const String origin = reqHeader(req, "Origin");
   if (origin.length())
     return origin.equalsIgnoreCase(self);
-  const String referer = webCfgServer.header("Referer");
+  const String referer = reqHeader(req, "Referer");
   if (referer.length())
     return referer.equalsIgnoreCase(self) || referer.startsWith(self + "/");
   return true;
@@ -218,8 +382,11 @@ TSettings currentSettings()
 
 struct ChunkedWriter : public Print
 {
+  httpd_req_t *req;
   char buf[512];
   size_t pos = 0;
+
+  explicit ChunkedWriter(httpd_req_t *r) : req(r) {}
 
   size_t write(uint8_t c) override
   {
@@ -235,10 +402,9 @@ struct ChunkedWriter : public Print
   }
   void flush() override
   {
-    if (pos > 0)
+    if (pos > 0 && req)
     {
-      buf[pos] = '\0';
-      webCfgServer.sendContent(buf);
+      httpd_resp_send_chunk(req, buf, (ssize_t)pos);
       pos = 0;
     }
   }
@@ -339,28 +505,28 @@ struct ChunkedWriter : public Print
   void finish()
   {
     flush();
-    webCfgServer.sendContent("");
+    if (req)
+      httpd_resp_send_chunk(req, nullptr, 0);
   }
 };
 
-static bool s_webRestartPending = false;
-static uint32_t s_webRestartAt = 0;
+static std::atomic<bool> s_webRestartPending{false};
+static std::atomic<uint32_t> s_webRestartAt{0};
 
 static void scheduleWebRestart(uint32_t delayMs)
 {
-  s_webRestartPending = true;
-  s_webRestartAt = millis() + delayMs;
+  s_webRestartAt.store(millis() + delayMs, std::memory_order_relaxed);
+  s_webRestartPending.store(true, std::memory_order_release);
 }
 
-static void handleRoot()
+static esp_err_t handleRoot(httpd_req_t *req)
 {
-  if (!checkAuth())
-    return;
+  if (!checkAuth(req))
+    return ESP_OK;
 
   const TSettings Settings = currentSettings(); // shadows the global on purpose
-  webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  webCfgServer.send(200, "text/html", "");
-  ChunkedWriter w;
+  httpd_resp_set_type(req, "text/html");
+  ChunkedWriter w(req);
   w.writeF(F("<!DOCTYPE html><html><head><meta charset='utf-8'>"
              "<meta name='viewport' content='width=device-width, initial-scale=1'>"
              "<title>NerdMiner Settings</title>"
@@ -572,55 +738,92 @@ static void handleRoot()
 #endif
   w.writeF(F("</body></html>"));
   w.finish();
+  return ESP_OK;
 }
 
 bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut);
 
-static bool applySettingsFromRequest(bool isHtmlForm, const String &webPass,
+template <typename Fn>
+static void forEachFormPair(const String &src, Fn fn)
+{
+  size_t pos = 0;
+  while (pos <= src.length())
+  {
+    int amp = src.indexOf('&', pos);
+    size_t end = (amp >= 0) ? (size_t)amp : src.length();
+    if (end > pos)
+    {
+      int eq = src.indexOf('=', pos);
+      size_t nameEnd = (eq >= 0 && (size_t)eq < end) ? (size_t)eq : end;
+      String k = urlDecode(src.c_str() + pos, nameEnd - pos);
+      String v = (eq >= 0 && (size_t)eq < end) ? urlDecode(src.c_str() + eq + 1, end - (size_t)eq - 1) : String();
+      fn(k, v);
+    }
+    if (amp < 0) break;
+    pos = (size_t)amp + 1;
+  }
+}
+
+static String queryString(httpd_req_t *req)
+{
+  size_t qlen = httpd_req_get_url_query_len(req);
+  if (qlen == 0) return String();
+  String q;
+  if (!q.reserve(qlen + 1)) return String();
+  char *buf = const_cast<char *>(q.c_str());
+  if (httpd_req_get_url_query_str(req, buf, qlen + 1) == ESP_OK)
+    return String(buf);
+  return String();
+}
+
+static bool applySettingsFromRequest(httpd_req_t *req, const String &rawBody, bool isHtmlForm, const String &webPass,
                                        bool &poolChangedOut, bool &restartOut, bool &passChangedOut)
 {
   const TSettings before = currentSettings();
   TSettings next = before;
+  const String qStr = queryString(req);
+  const String formSrc = rawBody.length() > 0 ? rawBody : qStr;
+  auto hasFormArg = [&](const char *key) -> bool {
+    bool found = false;
+    findFormOrQueryParam(formSrc, key, &found);
+    return found;
+  };
+  auto getFormArg = [&](const char *key) -> String {
+    return findFormOrQueryParam(formSrc, key);
+  };
 
   DynamicJsonDocument doc(1536);
   DeserializationError err = DeserializationError::EmptyInput;
-  if (!isHtmlForm && webCfgServer.hasArg("plain"))
+  if (!isHtmlForm && rawBody.length() > 0)
   {
-    String body = webCfgServer.arg("plain");
-    err = deserializeJson(doc, body.c_str());
+    err = deserializeJson(doc, rawBody.c_str());
   }
 
   if (err)
   {
-    const bool cityHasCoords = isHtmlForm && webCfgServer.arg("city").indexOf(',') > 0;
-    for (int i = 0; i < webCfgServer.args(); i++)
-    {
-      const String k = webCfgServer.argName(i);
+    const bool cityHasCoords = isHtmlForm && getFormArg("city").indexOf(',') > 0;
+    forEachFormPair(formSrc, [&](const String &k, String v) {
       if (k == "plain")
-        continue;
+        return;
       if (isHtmlForm)
       {
         if (k == "webpass" || k == "webpass2" || k == "mqpass" || k == "mqpassclear")
-          continue;
+          return;
         if (cityHasCoords && (k == "lat" || k == "lon"))
-          continue;
-      }
-      String v = webCfgServer.arg(i);
-      if (isHtmlForm)
-      {
+          return;
         if (k == "hostname")
         {
           v.trim();
           if (v.isEmpty())
-            continue;
+            return;
         }
         if (k == "city" && v.isEmpty())
-          continue;
+          return;
         if (k == "mquser" || k == "mqtopic" || k == "mqhost")
           v = v.substring(0, 64);
       }
       doc[k.c_str()] = v.c_str();
-    }
+    });
   }
 
   nvMemory::parseJsonConfig(doc, &next);
@@ -628,34 +831,34 @@ static bool applySettingsFromRequest(bool isHtmlForm, const String &webPass,
   if (isHtmlForm)
   {
     // HTML checkboxes omit the form parameter when unchecked
-    next.saveStats = webCfgServer.hasArg("savestats");
+    next.saveStats = hasFormArg("savestats");
 #ifndef NO_MQTT
-    next.MqttEnabled = webCfgServer.hasArg("mqtt");
-    if (webCfgServer.hasArg("mqhost"))
-      next.MqttHost = mqttCleanHost(webCfgServer.arg("mqhost").substring(0, 64), next.MqttPort);
-    if (webCfgServer.hasArg("mqpassclear"))
+    next.MqttEnabled = hasFormArg("mqtt");
+    if (hasFormArg("mqhost"))
+      next.MqttHost = mqttCleanHost(getFormArg("mqhost").substring(0, 64), next.MqttPort);
+    if (hasFormArg("mqpassclear"))
       next.MqttPass = "";
-    else if (webCfgServer.arg("mqpass").length() > 0)
-      next.MqttPass = webCfgServer.arg("mqpass").substring(0, 64);
+    else if (getFormArg("mqpass").length() > 0)
+      next.MqttPass = getFormArg("mqpass").substring(0, 64);
 #endif
 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB) || defined(ES3C35P) || defined(ESP32_4IN_ST7796)
-    next.invertColors = webCfgServer.hasArg("invert");
-    next.flipDisplay = webCfgServer.hasArg("flip");
+    next.invertColors = hasFormArg("invert");
+    next.flipDisplay = hasFormArg("flip");
 #if defined(ESP32_2432S028R) || defined(ESP32_2432S028_2USB)
-    next.autoBrightness = webCfgServer.hasArg("autobrightness");
+    next.autoBrightness = hasFormArg("autobrightness");
 #endif
 #endif
 #ifdef TDISPLAY_PULSE
-    next.flipDisplay = webCfgServer.hasArg("flip");
+    next.flipDisplay = hasFormArg("flip");
 #endif
 #ifdef HAS_BACKLIGHT_CONTROL
-    next.nightDim = webCfgServer.hasArg("nightdim");
+    next.nightDim = hasFormArg("nightdim");
 #endif
 #ifdef NO_DISPLAY
-    next.statusLed = webCfgServer.hasArg("led");
+    next.statusLed = hasFormArg("led");
 #endif
 #ifdef HAS_RGB_LED
-    next.ledScreenOff = webCfgServer.hasArg("ledscreen");
+    next.ledScreenOff = hasFormArg("ledscreen");
 #endif
     if (!webPass.isEmpty())
       next.WebPassword = webPass;
@@ -666,36 +869,37 @@ static bool applySettingsFromRequest(bool isHtmlForm, const String &webPass,
   return true;
 }
 
-static void handleSave()
+static esp_err_t handleSave(httpd_req_t *req)
 {
-  if (!checkAuth())
-    return;
-  if (!sameOrigin())
+  if (!checkAuth(req))
+    return ESP_OK;
+  if (!sameOrigin(req))
   {
-    webCfgServer.send(403, "text/plain", "Refused: the form was not sent from this miner's own settings page.");
-    return;
+    return sendHttpText(req, "403 Forbidden", "text/plain",
+                        "Refused: the form was not sent from this miner's own settings page.");
   }
 
+  const String rawBody = reqReadBody(req, 4096);
   // New page password: checked first, so a typo saves nothing at all.
-  const String webPass = webCfgServer.arg("webpass");
-  if (!webPass.isEmpty() || !webCfgServer.arg("webpass2").isEmpty())
+  const String webPass = findFormOrQueryParam(rawBody, "webpass");
+  const String webPass2 = findFormOrQueryParam(rawBody, "webpass2");
+  if (!webPass.isEmpty() || !webPass2.isEmpty())
   {
-    const char *problem = webPass != webCfgServer.arg("webpass2") ? "The two new passwords are not the same."
-                          : webPass.length() > WEBCFG_PASS_MAX   ? "The new password is longer than 63 characters."
-                                                                  : nullptr;
+    const char *problem = webPass != webPass2 ? "The two new passwords are not the same."
+                          : webPass.length() > WEBCFG_PASS_MAX ? "The new password is longer than 63 characters."
+                                                               : nullptr;
     if (problem)
     {
-      webCfgServer.send(400, "text/html",
-                        String("<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                               "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
-                               "<body style='font-family:sans-serif'><p>") + problem +
-                            " Nothing was saved.</p><p><a href='/settings'>Back to settings</a></p></body></html>");
-      return;
+      String errHtml = String("<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                              "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
+                              "<body style='font-family:sans-serif'><p>") + problem +
+                       " Nothing was saved.</p><p><a href='/settings'>Back to settings</a></p></body></html>";
+      return sendHttpText(req, "400 Bad Request", "text/html", errHtml.c_str(), errHtml.length());
     }
   }
 
   bool poolChanged = false, restart = false, passChanged = false;
-  applySettingsFromRequest(true, webPass, poolChanged, restart, passChanged);
+  applySettingsFromRequest(req, rawBody, true, webPass, poolChanged, restart, passChanged);
 
   if (!restart)
   {
@@ -703,28 +907,29 @@ static void handleSave()
                              : F("<p>Saved and applied.</p>");
     if (passChanged)
       msg += F("<p>Password changed: log in again with the new one (user admin).</p>");
-    webCfgServer.send(200, "text/html",
-                      "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                      "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-                      "<meta http-equiv='refresh' content='3;url=/settings'></head>"
-                      "<body style='font-family:sans-serif'>" + msg +
-                      "<p><a href='/settings'>Back to settings</a></p></body></html>");
-    return;
+    String okHtml = "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                    "<meta http-equiv='refresh' content='3;url=/settings'></head>"
+                    "<body style='font-family:sans-serif'>" + msg +
+                    "<p><a href='/settings'>Back to settings</a></p></body></html>";
+    return sendHttpText(req, "200 OK", "text/html", okHtml.c_str(), okHtml.length());
   }
 
-  webCfgServer.send(200, "text/html",
-                     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                     "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
-                     "<body style='font-family:sans-serif'>"
-                     "<p>Saved. Restarting device...</p>"
-                     "<p><a href='/settings'>Back to settings</a></p>"
-                     "<script>function p(){fetch('/settings',{cache:'no-store'})"
-                     ".then(function(r){if(r.ok||r.status==401)location.replace('/settings');else setTimeout(p,1500)})"
-                     ".catch(function(){setTimeout(p,1500)})}setTimeout(p,4000);</script>"
-                     "</body></html>");
+  static const char kRestartHtml[] =
+      "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+      "<meta name='viewport' content='width=device-width, initial-scale=1'></head>"
+      "<body style='font-family:sans-serif'>"
+      "<p>Saved. Restarting device...</p>"
+      "<p><a href='/settings'>Back to settings</a></p>"
+      "<script>function p(){fetch('/settings',{cache:'no-store'})"
+      ".then(function(r){if(r.ok||r.status==401)location.replace('/settings');else setTimeout(p,1500)})"
+      ".catch(function(){setTimeout(p,1500)})}setTimeout(p,4000);</script>"
+      "</body></html>";
+  sendHttpText(req, "200 OK", "text/html", kRestartHtml, sizeof(kRestartHtml) - 1);
 
   saveStat(); // stats mined since the last periodic save
   scheduleWebRestart(1000);
+  return ESP_OK;
 }
 
 bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut)
@@ -819,46 +1024,47 @@ bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poo
   return true; // restart needed
 }
 
-void sendCorsJson(int code, const String &json)
+esp_err_t sendCorsJson(httpd_req_t *req, int code, const char *json, bool noStore)
 {
-  ensureCorsHeaders();
-  webCfgServer.send(code, "application/json", json);
-  s_corsAdded = false;
+  setCorsHeaders(req);
+  if (noStore)
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return sendHttpText(req, httpStatusStr(code), "application/json", json);
 }
 
-static void beginChunkedCorsJson(int code = 200)
+static void beginChunkedCorsJson(httpd_req_t *req, int code = 200, bool noStore = false)
 {
-  ensureCorsHeaders();
-  webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  webCfgServer.send(code, "application/json", "");
-  s_corsAdded = false;
+  setCorsHeaders(req);
+  if (noStore)
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  httpd_resp_set_status(req, httpStatusStr(code));
+  httpd_resp_set_type(req, "application/json");
 }
 
-bool handleCorsOptions(void)
+esp_err_t handleCorsOptions(httpd_req_t *req)
 {
-  if (webCfgServer.method() != HTTP_OPTIONS)
-    return false;
-  ensureCorsHeaders();
-  webCfgServer.send(204);
-  s_corsAdded = false;
-  return true;
+  if (req->method != HTTP_OPTIONS)
+    return ESP_FAIL;
+  setCorsHeaders(req);
+  httpd_resp_set_status(req, "204 No Content");
+  httpd_resp_send(req, nullptr, 0);
+  return ESP_OK;
 }
 
 template <typename MutateFn>
-static bool dispatchRestEndpoint(MutateFn onMutate)
+static bool dispatchRestEndpoint(httpd_req_t *req, MutateFn onMutate)
 {
-  if (handleCorsOptions())
+  if (handleCorsOptions(req) == ESP_OK)
     return false;
-  HTTPMethod m = webCfgServer.method();
-  if (m == HTTP_POST || m == HTTP_PATCH || m == HTTP_PUT)
+  if (req->method == HTTP_POST || req->method == HTTP_PATCH || req->method == HTTP_PUT)
   {
-    if (!checkWebApiMutationAllowed())
+    if (!checkWebApiMutationAllowed(req))
       return false;
     return onMutate();
   }
-  if (m != HTTP_GET)
+  if (req->method != HTTP_GET)
   {
-    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
+    sendCorsJson(req, 405, "{\"error\":\"Method Not Allowed\"}");
     return false;
   }
   return true;
@@ -909,7 +1115,7 @@ static String ledColorHex(uint32_t color)
 }
 #endif
 
-static void handleGetConfig()
+static esp_err_t handleGetConfig(httpd_req_t *req)
 {
   const TSettings s = currentSettings();
   String tzLabel, tzPosix, localTime;
@@ -943,18 +1149,19 @@ static void handleGetConfig()
   doc["PrimaryAddress"] = s.BtcWallet;
   doc["version"] = CURRENT_VERSION;
 
-  beginChunkedCorsJson(200);
-  ChunkedWriter w;
+  beginChunkedCorsJson(req, 200);
+  ChunkedWriter w(req);
   serializeJson(doc, w);
   w.finish();
+  return ESP_OK;
 }
 
-static void handleTimezoneEndpoint()
+static esp_err_t handleTimezoneEndpoint(httpd_req_t *req)
 {
-  bool ok = dispatchRestEndpoint([]() {
+  bool ok = dispatchRestEndpoint(req, [&]() {
+    const String body = reqReadBody(req, 1024);
     String newTz = "";
-    if (webCfgServer.hasArg("plain")) {
-      String body = webCfgServer.arg("plain");
+    if (body.length() > 0) {
       StaticJsonDocument<256> doc;
       if (!deserializeJson(doc, body.c_str())) {
         if (doc.containsKey("timezone")) newTz = doc["timezone"].as<String>();
@@ -962,8 +1169,10 @@ static void handleTimezoneEndpoint()
         else if (doc.containsKey("posix")) newTz = doc["posix"].as<String>();
       }
     }
-    if (newTz.isEmpty() && webCfgServer.hasArg("timezone")) newTz = webCfgServer.arg("timezone");
-    if (newTz.isEmpty() && webCfgServer.hasArg("tz")) newTz = webCfgServer.arg("tz");
+    if (newTz.isEmpty()) newTz = findFormOrQueryParam(body, "timezone");
+    if (newTz.isEmpty()) newTz = findFormOrQueryParam(body, "tz");
+    if (newTz.isEmpty()) newTz = reqQueryParam(req, "timezone");
+    if (newTz.isEmpty()) newTz = reqQueryParam(req, "tz");
 
     if (newTz.length() > 0) {
       const TSettings before = currentSettings();
@@ -974,15 +1183,15 @@ static void handleTimezoneEndpoint()
     }
     return true;
   });
-  if (!ok) return;
+  if (!ok) return ESP_OK;
 
   const TSettings s = currentSettings();
   String label, posix, localTime;
   bool dstActive = false;
   getTimezoneFields(s.Timezone, label, posix, localTime, dstActive);
 
-  beginChunkedCorsJson(200);
-  ChunkedWriter w;
+  beginChunkedCorsJson(req, 200);
+  ChunkedWriter w(req);
   w.write("{\"timezone\":\"");
   w.writeJsonEscaped(s.Timezone.c_str());
   w.write("\",\"label\":\"");
@@ -995,17 +1204,14 @@ static void handleTimezoneEndpoint()
   w.writeJsonEscaped(getDate().c_str());
   w.writePrintf("\",\"dstActive\":%s}", dstActive ? "true" : "false");
   w.finish();
+  return ESP_OK;
 }
 
-static void handleTimezonesList()
+static esp_err_t handleTimezonesList(httpd_req_t *req)
 {
-  if (handleCorsOptions()) return;
-  ensureCorsHeaders();
-  webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  webCfgServer.send(200, "application/json", "");
-  s_corsAdded = false;
-
-  ChunkedWriter w;
+  if (handleCorsOptions(req) == ESP_OK) return ESP_OK;
+  beginChunkedCorsJson(req, 200);
+  ChunkedWriter w(req);
   w.write("[", 1);
   for (int i = 0; i < kTimeZoneCount; i++) {
     if (i > 0) w.write(",", 1);
@@ -1019,17 +1225,14 @@ static void handleTimezonesList()
   }
   w.write("]", 1);
   w.finish();
+  return ESP_OK;
 }
 
-static void handleCitiesList()
+static esp_err_t handleCitiesList(httpd_req_t *req)
 {
-  if (handleCorsOptions()) return;
-  ensureCorsHeaders();
-  webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  webCfgServer.send(200, "application/json", "");
-  s_corsAdded = false;
-
-  ChunkedWriter w;
+  if (handleCorsOptions(req) == ESP_OK) return ESP_OK;
+  beginChunkedCorsJson(req, 200);
+  ChunkedWriter w(req);
   w.write("[", 1);
   for (int i = 0; i < kCityCount; i++) {
     if (i > 0) w.write(",", 1);
@@ -1039,44 +1242,49 @@ static void handleCitiesList()
   }
   w.write("]", 1);
   w.finish();
+  return ESP_OK;
 }
 
-static bool applyRequestConfig(bool &poolChangedOut, bool &restartOut)
+static bool applyRequestConfig(httpd_req_t *req, const String &rawBody, bool &poolChangedOut, bool &restartOut)
 {
   bool passChanged = false;
-  return applySettingsFromRequest(false, "", poolChangedOut, restartOut, passChanged);
+  return applySettingsFromRequest(req, rawBody, false, "", poolChangedOut, restartOut, passChanged);
 }
 
-static void handleConfigRoute()
+static esp_err_t handleConfigRoute(httpd_req_t *req)
 {
-  bool ok = dispatchRestEndpoint([]() {
+  bool ok = dispatchRestEndpoint(req, [&]() {
+    const String body = reqReadBody(req, 4096);
     bool poolChanged = false, restart = false;
-    applyRequestConfig(poolChanged, restart);
+    applyRequestConfig(req, body, poolChanged, restart);
     if (restart) {
-      sendCorsJson(200, "{\"success\":true,\"message\":\"Settings saved. Restarting device for changes...\",\"rebootRequired\":true}");
+      sendCorsJson(req, 200, "{\"success\":true,\"message\":\"Settings saved. Restarting device for changes...\",\"rebootRequired\":true}");
       saveStat();
       scheduleWebRestart(1000);
     } else {
-      String resp = "{\"success\":true,\"message\":\"Settings saved and applied live.\",\"rebootRequired\":false";
-      if (poolChanged) resp += ",\"poolChanged\":true";
-      resp += "}";
-      sendCorsJson(200, resp);
+      char resp[128];
+      snprintf(resp, sizeof(resp),
+               "{\"success\":true,\"message\":\"Settings saved and applied live.\",\"rebootRequired\":false%s}",
+               poolChanged ? ",\"poolChanged\":true" : "");
+      sendCorsJson(req, 200, resp);
     }
     return false;
   });
   if (ok) {
-    handleGetConfig();
+    return handleGetConfig(req);
   }
+  return ESP_OK;
 }
 
-static void handleLedEndpoint()
+static esp_err_t handleLedEndpoint(httpd_req_t *req)
 {
-  bool ok = dispatchRestEndpoint([]() {
+  bool ok = dispatchRestEndpoint(req, [&]() {
+    const String body = reqReadBody(req, 1024);
     bool poolChanged = false, restart = false;
-    applyRequestConfig(poolChanged, restart);
+    applyRequestConfig(req, body, poolChanged, restart);
     return true;
   });
-  if (!ok) return;
+  if (!ok) return ESP_OK;
 
   const TSettings s = currentSettings();
   char buf[256];
@@ -1092,16 +1300,17 @@ static void handleLedEndpoint()
 #else
   snprintf(buf, sizeof(buf), "{\"supported\":false}");
 #endif
-  sendCorsJson(200, buf);
+  return sendCorsJson(req, 200, buf);
 }
 
-static void handleDisplayEndpoint()
+static esp_err_t handleDisplayEndpoint(httpd_req_t *req)
 {
-  bool ok = dispatchRestEndpoint([]() {
+  bool ok = dispatchRestEndpoint(req, [&]() {
+    const String body = reqReadBody(req, 1024);
+    const String qStr = queryString(req);
     String screenAction = "";
     bool hasConfigKeys = false;
-    if (webCfgServer.hasArg("plain")) {
-      String body = webCfgServer.arg("plain");
+    if (body.length() > 0) {
       StaticJsonDocument<512> doc;
       if (!deserializeJson(doc, body.c_str())) {
         if (doc.containsKey("screen")) {
@@ -1116,16 +1325,16 @@ static void handleDisplayEndpoint()
         }
       }
     }
-    if (screenAction.isEmpty() && webCfgServer.hasArg("screen")) {
-      screenAction = webCfgServer.arg("screen");
+    const String formSrc = body.length() > 0 ? body : qStr;
+    if (screenAction.isEmpty()) {
+      screenAction = findFormOrQueryParam(formSrc, "screen");
       screenAction.toLowerCase();
     }
-    for (int i = 0; i < webCfgServer.args(); i++) {
-      String n = webCfgServer.argName(i);
-      if (n != "plain" && n != "screen") {
-        hasConfigKeys = true;
-        break;
-      }
+    if (!hasConfigKeys && formSrc.length() > 0) {
+      forEachFormPair(formSrc, [&](const String &k, const String &) {
+        if (k != "plain" && k != "screen")
+          hasConfigKeys = true;
+      });
     }
 
     if (screenAction.length() > 0) {
@@ -1144,9 +1353,9 @@ static void handleDisplayEndpoint()
 
     if (hasConfigKeys) {
       bool poolChanged = false, restart = false;
-      applyRequestConfig(poolChanged, restart);
+      applyRequestConfig(req, body, poolChanged, restart);
       if (restart) {
-        sendCorsJson(200, "{\"success\":true,\"message\":\"Display settings saved. Restarting device...\",\"rebootRequired\":true}");
+        sendCorsJson(req, 200, "{\"success\":true,\"message\":\"Display settings saved. Restarting device...\",\"rebootRequired\":true}");
         saveStat();
         scheduleWebRestart(1000);
         return false;
@@ -1154,11 +1363,11 @@ static void handleDisplayEndpoint()
     }
     return true;
   });
-  if (!ok) return;
+  if (!ok) return ESP_OK;
 
   const TSettings s = currentSettings();
-  beginChunkedCorsJson(200);
-  ChunkedWriter w;
+  beginChunkedCorsJson(req, 200);
+  ChunkedWriter w(req);
   w.writePrintf("{\"brightness\":%d,\"autoBrightness\":%s,\"screenTimeout\":%d,"
                 "\"nightDim\":%s,\"nightBrightness\":%d,\"nightFade\":%d,\"city\":\"",
                 s.Brightness, s.autoBrightness ? "true" : "false", s.ScreenTimeout,
@@ -1175,20 +1384,22 @@ static void handleDisplayEndpoint()
                 s.invertColors ? "true" : "false",
                 s.flipDisplay ? "true" : "false");
   w.finish();
+  return ESP_OK;
 }
 
-static void handlePoolEndpoint()
+static esp_err_t handlePoolEndpoint(httpd_req_t *req)
 {
-  bool ok = dispatchRestEndpoint([]() {
+  bool ok = dispatchRestEndpoint(req, [&]() {
+    const String body = reqReadBody(req, 2048);
     bool poolChanged = false, restart = false;
-    applyRequestConfig(poolChanged, restart);
+    applyRequestConfig(req, body, poolChanged, restart);
     return true;
   });
-  if (!ok) return;
+  if (!ok) return ESP_OK;
 
   const TSettings s = currentSettings();
-  beginChunkedCorsJson(200);
-  ChunkedWriter w;
+  beginChunkedCorsJson(req, 200);
+  ChunkedWriter w(req);
   w.write("{\"pool\":\"");
   w.writeJsonEscaped(s.PoolAddress.c_str());
   w.writePrintf("\",\"port\":%d,\"wallet\":\"", s.PoolPort);
@@ -1202,20 +1413,22 @@ static void handlePoolEndpoint()
   w.writePrintf("\",\"activePort\":%d,\"onBackupPool\":%s}",
                 activePoolPort(), onBackupPool() ? "true" : "false");
   w.finish();
+  return ESP_OK;
 }
 
-static void handleMqttEndpoint()
+static esp_err_t handleMqttEndpoint(httpd_req_t *req)
 {
-  bool ok = dispatchRestEndpoint([]() {
+  bool ok = dispatchRestEndpoint(req, [&]() {
+    const String body = reqReadBody(req, 2048);
     bool poolChanged = false, restart = false;
-    applyRequestConfig(poolChanged, restart);
+    applyRequestConfig(req, body, poolChanged, restart);
     return true;
   });
-  if (!ok) return;
+  if (!ok) return ESP_OK;
 
   const TSettings s = currentSettings();
-  beginChunkedCorsJson(200);
-  ChunkedWriter w;
+  beginChunkedCorsJson(req, 200);
+  ChunkedWriter w(req);
   w.writePrintf("{\"mqttEnabled\":%s,\"mqttHost\":\"", s.MqttEnabled ? "true" : "false");
   w.writeJsonEscaped(s.MqttHost.c_str());
   w.writePrintf("\",\"mqttPort\":%d,\"mqttUser\":\"", s.MqttPort);
@@ -1224,28 +1437,31 @@ static void handleMqttEndpoint()
   w.writeJsonEscaped(s.MqttTopic.c_str());
   w.writePrintf("\",\"mqttConnected\":%s}", mqttConnected() ? "true" : "false");
   w.finish();
+  return ESP_OK;
 }
 
-static void handleIdentify()
+static esp_err_t handleIdentify(httpd_req_t *req)
 {
-  if (handleCorsOptions()) return;
-  if (webCfgServer.method() != HTTP_POST) {
-    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
-    return;
+  if (handleCorsOptions(req) == ESP_OK) return ESP_OK;
+  if (req->method != HTTP_POST) {
+    return sendCorsJson(req, 405, "{\"error\":\"Method Not Allowed\"}");
   }
-  if (!checkWebApiMutationAllowed()) return;
+  if (!checkWebApiMutationAllowed(req)) return ESP_OK;
 
   uint32_t durationMs = 10000;
-  if (webCfgServer.hasArg("plain")) {
-    String body = webCfgServer.arg("plain");
+  const String body = reqReadBody(req, 512);
+  if (body.length() > 0) {
     StaticJsonDocument<192> doc;
     if (!deserializeJson(doc, body.c_str()) && doc.containsKey("durationMs")) {
       long d = doc["durationMs"].as<long>();
       durationMs = (d <= 0) ? 0 : (uint32_t)constrain(d, 500L, 120000L);
     }
-  } else if (webCfgServer.hasArg("durationMs")) {
-    long d = webCfgServer.arg("durationMs").toInt();
-    durationMs = (d <= 0) ? 0 : (uint32_t)constrain(d, 500L, 120000L);
+  } else {
+    String qd = reqQueryParam(req, "durationMs");
+    if (qd.length() > 0) {
+      long d = qd.toInt();
+      durationMs = (d <= 0) ? 0 : (uint32_t)constrain(d, 500L, 120000L);
+    }
   }
 
   triggerIdentify(durationMs);
@@ -1262,12 +1478,12 @@ static void handleIdentify()
            isIdentifying() ? "true" : "false",
            (unsigned long)durationMs,
            jsonEscape(host).c_str());
-  sendCorsJson(200, buf);
+  return sendCorsJson(req, 200, buf);
 }
 
-static void handleProbe()
+static esp_err_t handleProbe(httpd_req_t *req)
 {
-  if (handleCorsOptions()) return;
+  if (handleCorsOptions(req) == ESP_OK) return ESP_OK;
   char best_diff_str[16] = {0};
   char sess_diff_str[16] = {0};
   suffix_string(getBestDiff(), best_diff_str, sizeof(best_diff_str), 0);
@@ -1290,12 +1506,12 @@ static void handleProbe()
            best_diff_str, sess_diff_str, temperatureRead(),
            st.accepted, st.rejected, getStratumReconnects(),
            jsonEscape(host).c_str(), CURRENT_VERSION);
-  sendCorsJson(200, buf);
+  return sendCorsJson(req, 200, buf);
 }
 
-static void handleStatus()
+static esp_err_t handleStatus(httpd_req_t *req)
 {
-  if (handleCorsOptions()) return;
+  if (handleCorsOptions(req) == ESP_OK) return ESP_OK;
   char best_diff_str[16] = {0};
   char sess_diff_str[16] = {0};
   suffix_string(getBestDiff(), best_diff_str, sizeof(best_diff_str), 0);
@@ -1307,8 +1523,8 @@ static void handleStatus()
   const TSettings s = currentSettings();
   const uint32_t discMs = getPoolDisconnectedSinceMs();
 
-  beginChunkedCorsJson(200);
-  ChunkedWriter w;
+  beginChunkedCorsJson(req, 200);
+  ChunkedWriter w(req);
   w.write("{\"nerdminer\":true,\"hostname\":\"");
   w.writeJsonEscaped(s.Hostname);
   w.writePrintf("\",\"version\":\"%s\",\"deviceModel\":\"NerdMiner v2\","
@@ -1344,20 +1560,21 @@ static void handleStatus()
                 getCpuFrequencyMhz(), WiFi.macAddress().c_str(), ESP.getFreeHeap(),
                 CURRENT_VERSION, CURRENT_VERSION, CURRENT_VERSION);
   w.finish();
+  return ESP_OK;
 }
 
-static void handleSystemRestart()
+static esp_err_t handleSystemRestart(httpd_req_t *req)
 {
-  if (handleCorsOptions()) return;
-  if (webCfgServer.method() != HTTP_POST) {
-    sendCorsJson(405, "{\"error\":\"Method Not Allowed\"}");
-    return;
+  if (handleCorsOptions(req) == ESP_OK) return ESP_OK;
+  if (req->method != HTTP_POST) {
+    return sendCorsJson(req, 405, "{\"error\":\"Method Not Allowed\"}");
   }
-  if (!checkWebApiMutationAllowed()) return;
+  if (!checkWebApiMutationAllowed(req)) return ESP_OK;
 
-  sendCorsJson(200, "{\"success\":true,\"message\":\"Restarting...\"}");
+  sendCorsJson(req, 200, "{\"success\":true,\"message\":\"Restarting...\"}");
   saveStat();
   scheduleWebRestart(500);
+  return ESP_OK;
 }
 
 // Miner state as JSON for Home Assistant, scripts and dashboards. No login:
@@ -1467,17 +1684,17 @@ void fillMinerStatusJson(JsonDocument &doc)
 #endif
 }
 
-static void handleApiStatus()
+static esp_err_t handleApiStatus(httpd_req_t *req)
 {
-  if (handleCorsOptions()) return;
+  if (handleCorsOptions(req) == ESP_OK) return ESP_OK;
   noteWebMonitorPoll(); // the live monitor (or a script) is watching
   DynamicJsonDocument doc(2560);
   fillMinerStatusJson(doc);
-  webCfgServer.sendHeader("Cache-Control", "no-store");
-  beginChunkedCorsJson(200);
-  ChunkedWriter w;
+  beginChunkedCorsJson(req, 200, true);
+  ChunkedWriter w(req);
   serializeJson(doc, w);
   w.finish();
+  return ESP_OK;
 }
 
 // --------------------------------------------------------------------------
@@ -1492,6 +1709,7 @@ static uint16_t s_histRej[HISTORY_LEN];  // rejected shares delta in interval
 static uint32_t s_histLastRej = 0;
 static uint8_t s_historyCount = 0, s_historyHead = 0;
 static uint32_t s_historyLast = 0;
+static portMUX_TYPE s_historyMux = portMUX_INITIALIZER_UNLOCKED;
 
 static void historyTick()
 {
@@ -1501,49 +1719,227 @@ static void historyTick()
   const MinerStatus st = getMinerStatus();
   uint32_t v = (uint32_t)(st.hashrateKHs * 10.0f + 0.5f);
   if (v > 65535) v = 65535;
-  s_history[s_historyHead] = (uint16_t)v;
-  s_histPing[s_historyHead] = (st.pingMs >= -1 && st.pingMs <= 32767) ? (int16_t)st.pingMs : (int16_t)32767;
+  const int16_t pingSample = (st.pingMs >= -1 && st.pingMs <= 32767) ? (int16_t)st.pingMs : (int16_t)32767;
   uint32_t rDelta = st.rejected >= s_histLastRej ? (st.rejected - s_histLastRej) : st.rejected;
   s_histLastRej = st.rejected;
-  s_histRej[s_historyHead] = rDelta > 65535 ? 65535 : (uint16_t)rDelta;
+  const uint16_t rejSample = rDelta > 65535 ? 65535 : (uint16_t)rDelta;
+
+  portENTER_CRITICAL(&s_historyMux);
+  s_history[s_historyHead] = (uint16_t)v;
+  s_histPing[s_historyHead] = pingSample;
+  s_histRej[s_historyHead] = rejSample;
   s_historyHead = (s_historyHead + 1) % HISTORY_LEN;
   if (s_historyCount < HISTORY_LEN) s_historyCount++;
+  portEXIT_CRITICAL(&s_historyMux);
 }
 
-static void handleHistory()
+static esp_err_t handleHistory(httpd_req_t *req)
 {
-  if (handleCorsOptions()) return;
-  webCfgServer.sendHeader("Cache-Control", "no-store");
-  beginChunkedCorsJson();
-  ChunkedWriter w;
+  if (handleCorsOptions(req) == ESP_OK) return ESP_OK;
+
+  uint16_t khsCopy[HISTORY_LEN];
+  int16_t pingCopy[HISTORY_LEN];
+  uint16_t rejCopy[HISTORY_LEN];
+  uint8_t count = 0;
+  portENTER_CRITICAL(&s_historyMux);
+  count = s_historyCount;
+  for (uint8_t i = 0; i < count; i++) {
+    const uint8_t idx = (s_historyHead + HISTORY_LEN - count + i) % HISTORY_LEN;
+    khsCopy[i] = s_history[idx];
+    pingCopy[i] = s_histPing[idx];
+    rejCopy[i] = s_histRej[idx];
+  }
+  portEXIT_CRITICAL(&s_historyMux);
+
+  beginChunkedCorsJson(req, 200, true);
+  ChunkedWriter w(req);
   w.writePrintf("{\"interval_s\":%d,\"khs\":[", HISTORY_PERIOD_ms / 1000);
-  for (uint8_t i = 0; i < s_historyCount; i++) {
-    const uint16_t v = s_history[(s_historyHead + HISTORY_LEN - s_historyCount + i) % HISTORY_LEN];
+  for (uint8_t i = 0; i < count; i++) {
     if (i) w.write(",", 1);
-    w.writePrintf("%u.%u", v / 10U, v % 10U);
+    w.writePrintf("%u.%u", khsCopy[i] / 10U, khsCopy[i] % 10U);
   }
   w.write("],\"ping_ms\":[");
-  for (uint8_t i = 0; i < s_historyCount; i++) {
-    const int16_t p = s_histPing[(s_historyHead + HISTORY_LEN - s_historyCount + i) % HISTORY_LEN];
+  for (uint8_t i = 0; i < count; i++) {
     if (i) w.write(",", 1);
-    w.writePrintf("%d", (int)p);
+    w.writePrintf("%d", (int)pingCopy[i]);
   }
   w.write("],\"rej\":[");
-  for (uint8_t i = 0; i < s_historyCount; i++) {
-    const uint16_t r = s_histRej[(s_historyHead + HISTORY_LEN - s_historyCount + i) % HISTORY_LEN];
+  for (uint8_t i = 0; i < count; i++) {
     if (i) w.write(",", 1);
-    w.writePrintf("%u", (unsigned)r);
+    w.writePrintf("%u", (unsigned)rejCopy[i]);
   }
   w.write("]}");
   w.finish();
+  return ESP_OK;
 }
 
-static void handleMonitor()
+static esp_err_t handleMonitor(httpd_req_t *req)
 {
   noteWebMonitorOpened(); // fetch the BTC price / block height if the screens never did
-  webCfgServer.sendHeader("Content-Encoding", "gzip");
-  webCfgServer.sendHeader("Cache-Control", "no-cache");
-  webCfgServer.send_P(200, "text/html; charset=utf-8", (PGM_P)MONITOR_HTML_GZ, MONITOR_HTML_GZ_LEN);
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+  return httpd_resp_send(req, reinterpret_cast<const char *>(MONITOR_HTML_GZ), (ssize_t)MONITOR_HTML_GZ_LEN);
+}
+
+// --------------------------------------------------------------------------
+// /api/events SSE stream (1 Hz live telemetry, matching AxeForge)
+// --------------------------------------------------------------------------
+#define SSE_MAX_CLIENTS 2
+static int s_sseSockets[SSE_MAX_CLIENTS] = {-1, -1};
+static std::mutex s_sseMutex;
+static TaskHandle_t s_sseTaskHandle = nullptr;
+static std::atomic<bool> s_sseWorkQueued{false};
+
+static void sseFreeCtx(void *ctx)
+{
+  const int slot = (int)(intptr_t)ctx - 1;
+  if (slot >= 0 && slot < SSE_MAX_CLIENTS) {
+    std::lock_guard<std::mutex> lock(s_sseMutex);
+    s_sseSockets[slot] = -1;
+  }
+}
+
+static void ssePushWork(void *)
+{
+  s_sseWorkQueued.store(false, std::memory_order_release);
+  if (!s_httpd) return;
+
+  int fds[SSE_MAX_CLIENTS];
+  bool any = false;
+  {
+    std::lock_guard<std::mutex> lock(s_sseMutex);
+    for (int i = 0; i < SSE_MAX_CLIENTS; i++) {
+      fds[i] = s_sseSockets[i];
+      if (fds[i] >= 0) any = true;
+    }
+  }
+  if (!any) return;
+
+  noteWebMonitorPoll();
+  DynamicJsonDocument doc(2560);
+  fillMinerStatusJson(doc);
+  String frame;
+  frame.reserve(1024);
+  frame = F("data: ");
+  serializeJson(doc, frame);
+  frame += F("\n\n");
+
+  for (int i = 0; i < SSE_MAX_CLIENTS; i++) {
+    if (fds[i] < 0) continue;
+    int sent = httpd_socket_send(s_httpd, fds[i], frame.c_str(), frame.length(), 0);
+    if (sent < 0) {
+      std::lock_guard<std::mutex> lock(s_sseMutex);
+      if (s_sseSockets[i] == fds[i])
+        s_sseSockets[i] = -1;
+      httpd_sess_trigger_close(s_httpd, fds[i]);
+    }
+  }
+}
+
+static void sseTask(void *)
+{
+  while (true) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    if (!s_httpd) continue;
+    bool any = false;
+    {
+      std::lock_guard<std::mutex> lock(s_sseMutex);
+      for (int i = 0; i < SSE_MAX_CLIENTS; i++) {
+        if (s_sseSockets[i] >= 0) { any = true; break; }
+      }
+    }
+    if (any && !s_sseWorkQueued.exchange(true, std::memory_order_acq_rel)) {
+      if (httpd_queue_work(s_httpd, ssePushWork, nullptr) != ESP_OK) {
+        s_sseWorkQueued.store(false, std::memory_order_release);
+      }
+    }
+  }
+}
+
+static esp_err_t handleApiEvents(httpd_req_t *req)
+{
+  if (handleCorsOptions(req) == ESP_OK) return ESP_OK;
+
+  int fd = httpd_req_to_sockfd(req);
+  if (fd < 0) return ESP_FAIL;
+
+  int slot = -1;
+  {
+    std::lock_guard<std::mutex> lock(s_sseMutex);
+    for (int i = 0; i < SSE_MAX_CLIENTS; i++) {
+      if (s_sseSockets[i] < 0) {
+        slot = i;
+        s_sseSockets[i] = fd;
+        break;
+      }
+    }
+  }
+  if (slot < 0) {
+    return sendCorsJson(req, 503, "{\"error\":\"Too many SSE clients\"}");
+  }
+
+  httpd_sess_set_ctx(req->handle, fd, (void *)(intptr_t)(slot + 1), sseFreeCtx);
+
+  static const char kSseHdr[] =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/event-stream\r\n"
+      "Cache-Control: no-cache\r\n"
+      "Access-Control-Allow-Origin: *\r\n"
+      "\r\n: ok\n\n";
+  if (httpd_socket_send(req->handle, fd, kSseHdr, sizeof(kSseHdr) - 1, 0) < 0) {
+    std::lock_guard<std::mutex> lock(s_sseMutex);
+    s_sseSockets[slot] = -1;
+    return ESP_FAIL;
+  }
+
+  if (!s_sseTaskHandle) {
+    xTaskCreate(sseTask, "SSE", 4096, nullptr, 2, &s_sseTaskHandle);
+  }
+  return ESP_OK;
+}
+
+static esp_err_t handleFavicon(httpd_req_t *req)
+{
+  httpd_resp_set_status(req, "204 No Content");
+  return httpd_resp_send(req, nullptr, 0);
+}
+
+static esp_err_t handleHttp404(httpd_req_t *req, httpd_err_code_t)
+{
+  if (handleCorsOptions(req) == ESP_OK)
+    return ESP_OK;
+  httpd_resp_set_status(req, "302 Found");
+  httpd_resp_set_hdr(req, "Location", "/");
+  return httpd_resp_send(req, "", 0);
+}
+
+static void registerUri(httpd_handle_t server, const char *uri, httpd_method_t method, esp_err_t (*handler)(httpd_req_t *))
+{
+  httpd_uri_t u = {};
+  u.uri = uri;
+  u.method = method;
+  u.handler = handler;
+  httpd_register_uri_handler(server, &u);
+}
+
+static void registerGetOptions(httpd_handle_t server, const char *uri, esp_err_t (*handler)(httpd_req_t *))
+{
+  registerUri(server, uri, HTTP_GET, handler);
+  registerUri(server, uri, HTTP_OPTIONS, handler);
+}
+
+static void registerPostOptions(httpd_handle_t server, const char *uri, esp_err_t (*handler)(httpd_req_t *))
+{
+  registerUri(server, uri, HTTP_POST, handler);
+  registerUri(server, uri, HTTP_OPTIONS, handler);
+}
+
+static void registerRestRoute(httpd_handle_t server, const char *uri, esp_err_t (*handler)(httpd_req_t *))
+{
+  static const httpd_method_t kMethods[] = {HTTP_GET, HTTP_POST, HTTP_PATCH, HTTP_PUT, HTTP_OPTIONS};
+  for (httpd_method_t m : kMethods)
+    registerUri(server, uri, m, handler);
 }
 
 void setup_webConfig(void)
@@ -1551,85 +1947,84 @@ void setup_webConfig(void)
   if (webCfgStarted)
     return;
 
-  static const char *kHeaders[] = {"Origin", "Referer"}; // read by sameOrigin() & checkWebApiMutationAllowed()
-  webCfgServer.collectHeaders(kHeaders, 2);
-  webCfgServer.on("/", HTTP_GET, handleMonitor);            // live monitor + fleet UI (gzipped)
-  webCfgServer.on("/settings", HTTP_GET, handleRoot);        // settings, login
-  webCfgServer.on("/save", HTTP_POST, handleSave);
-  webCfgServer.on("/status", handleStatus);
-  webCfgServer.on("/api/status", handleApiStatus);
-  webCfgServer.on("/api/history", handleHistory);
-  webCfgServer.on("/probe", handleProbe);
-  webCfgServer.on("/api/identify", handleIdentify);
-  webCfgServer.on("/api/system/identify", handleIdentify);
-  webCfgServer.on("/api/system/info", handleStatus);
-  webCfgServer.on("/api/system/restart", handleSystemRestart);
-  webCfgServer.on("/api/restart", handleSystemRestart);
-  webCfgServer.on("/api/system/config", handleConfigRoute);
-  webCfgServer.on("/api/config", handleConfigRoute);
-  webCfgServer.on("/api/system", handleConfigRoute);
-  webCfgServer.on("/api/setting/mining", handleConfigRoute);
-  webCfgServer.on("/api/system/timezone", handleTimezoneEndpoint);
-  webCfgServer.on("/api/timezone", handleTimezoneEndpoint);
-  webCfgServer.on("/api/system/timezones", handleTimezonesList);
-  webCfgServer.on("/api/timezones", handleTimezonesList);
-  webCfgServer.on("/api/system/cities", handleCitiesList);
-  webCfgServer.on("/api/cities", handleCitiesList);
-  webCfgServer.on("/api/system/led", handleLedEndpoint);
-  webCfgServer.on("/api/led", handleLedEndpoint);
-  webCfgServer.on("/api/system/display", handleDisplayEndpoint);
-  webCfgServer.on("/api/display", handleDisplayEndpoint);
-  webCfgServer.on("/api/system/pool", handlePoolEndpoint);
-  webCfgServer.on("/api/pool", handlePoolEndpoint);
-  webCfgServer.on("/api/system/mqtt", handleMqttEndpoint);
-  webCfgServer.on("/api/mqtt", handleMqttEndpoint);
-  setup_ota(webCfgServer);
+  httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+  cfg.server_port = 80;
+  cfg.stack_size = 8192;
+  cfg.max_uri_handlers = 116;
+  cfg.max_open_sockets = 7;
+  cfg.lru_purge_enable = true;
+  cfg.recv_wait_timeout = 10;
+  cfg.send_wait_timeout = 10;
+
+  if (httpd_start(&s_httpd, &cfg) != ESP_OK || !s_httpd) {
+    Serial.println("[WEBCFG] Failed to start esp_http_server");
+    return;
+  }
+
+  registerUri(s_httpd, "/", HTTP_GET, handleMonitor);
+  registerUri(s_httpd, "/settings", HTTP_GET, handleRoot);
+  registerUri(s_httpd, "/save", HTTP_POST, handleSave);
+  registerGetOptions(s_httpd, "/status", handleStatus);
+  registerGetOptions(s_httpd, "/api/status", handleApiStatus);
+  registerGetOptions(s_httpd, "/api/events", handleApiEvents);
+  registerGetOptions(s_httpd, "/api/history", handleHistory);
+  registerGetOptions(s_httpd, "/probe", handleProbe);
+  registerPostOptions(s_httpd, "/api/identify", handleIdentify);
+  registerPostOptions(s_httpd, "/api/system/identify", handleIdentify);
+  registerGetOptions(s_httpd, "/api/system/info", handleStatus);
+  registerPostOptions(s_httpd, "/api/system/restart", handleSystemRestart);
+  registerPostOptions(s_httpd, "/api/restart", handleSystemRestart);
+  registerRestRoute(s_httpd, "/api/system/config", handleConfigRoute);
+  registerRestRoute(s_httpd, "/api/config", handleConfigRoute);
+  registerRestRoute(s_httpd, "/api/system", handleConfigRoute);
+  registerRestRoute(s_httpd, "/api/setting/mining", handleConfigRoute);
+  registerRestRoute(s_httpd, "/api/system/timezone", handleTimezoneEndpoint);
+  registerRestRoute(s_httpd, "/api/timezone", handleTimezoneEndpoint);
+  registerGetOptions(s_httpd, "/api/system/timezones", handleTimezonesList);
+  registerGetOptions(s_httpd, "/api/timezones", handleTimezonesList);
+  registerGetOptions(s_httpd, "/api/system/cities", handleCitiesList);
+  registerGetOptions(s_httpd, "/api/cities", handleCitiesList);
+  registerRestRoute(s_httpd, "/api/system/led", handleLedEndpoint);
+  registerRestRoute(s_httpd, "/api/led", handleLedEndpoint);
+  registerRestRoute(s_httpd, "/api/system/display", handleDisplayEndpoint);
+  registerRestRoute(s_httpd, "/api/display", handleDisplayEndpoint);
+  registerRestRoute(s_httpd, "/api/system/pool", handlePoolEndpoint);
+  registerRestRoute(s_httpd, "/api/pool", handlePoolEndpoint);
+  registerRestRoute(s_httpd, "/api/system/mqtt", handleMqttEndpoint);
+  registerRestRoute(s_httpd, "/api/mqtt", handleMqttEndpoint);
+  setup_ota(s_httpd);
 #ifdef TDISPLAY_UI_SCREENSHOT
-  // Dev builds: the screens rendered at boot (tDisplayPulseDriver.cpp),
-  // run-length encoded; tools/tdisplay_shots.py turns them into PNGs.
-  webCfgServer.on("/shot", HTTP_GET, []()
-  {
+  registerUri(s_httpd, "/shot", HTTP_GET, [](httpd_req_t *req) -> esp_err_t {
     extern bool tDisplayShot(int i, const char **name, const uint8_t **data, size_t *len);
     const char *name;
     const uint8_t *data;
     size_t len;
-    if (!tDisplayShot(webCfgServer.arg("i").toInt(), &name, &data, &len))
-    {
-      webCfgServer.send(404, "text/plain", "no such shot");
-      return;
+    int idx = reqQueryParam(req, "i").toInt();
+    if (!tDisplayShot(idx, &name, &data, &len)) {
+      return sendHttpText(req, "404 Not Found", "text/plain", "no such shot");
     }
-    webCfgServer.sendHeader("X-Shot-Name", name);
-    webCfgServer.send_P(200, "application/octet-stream", (PGM_P)data, len);
+    httpd_resp_set_hdr(req, "X-Shot-Name", name);
+    return sendHttpText(req, "200 OK", "application/octet-stream", reinterpret_cast<const char *>(data), len);
   });
 #endif
-  // Browsers ask for it on every visit; without this it fell to onNotFound,
-  // which redirected to "/" and sent the whole page again.
-  webCfgServer.on("/favicon.ico", HTTP_GET, []() { webCfgServer.send(204); });
-  webCfgServer.onNotFound([]()
-  {
-    if (handleCorsOptions())
-      return;
-    webCfgServer.sendHeader("Location", "/");
-    webCfgServer.send(302, "text/plain", "");
-  });
-  webCfgServer.begin();
+  registerUri(s_httpd, "/favicon.ico", HTTP_GET, handleFavicon);
+  httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, handleHttp404);
   webCfgStarted = true;
 
   Serial.print("[WEBCFG] Monitor at http://");
   Serial.print(WiFi.localIP());
-  Serial.println("/  (settings: /settings)");
+  Serial.println("/  (settings: /settings, SSE: /api/events)");
 }
 
 void webConfigProcess(void)
 {
   historyTick(); // also before the server is up, so the graph has the full hour
   if (webCfgStarted) {
-    s_corsAdded = false;
-    webCfgServer.handleClient();
     otaProcess();
   }
-  if (s_webRestartPending && (int32_t)(millis() - s_webRestartAt) >= 0) {
-    s_webRestartPending = false;
+  if (s_webRestartPending.load(std::memory_order_acquire) &&
+      (int32_t)(millis() - s_webRestartAt.load(std::memory_order_relaxed)) >= 0) {
+    s_webRestartPending.store(false, std::memory_order_release);
     ESP.restart();
   }
 }

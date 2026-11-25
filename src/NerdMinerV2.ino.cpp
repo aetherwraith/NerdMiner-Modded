@@ -7,7 +7,6 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WebServer.h>
 #include <esp_task_wdt.h>
 #include <OneButton.h>
 
