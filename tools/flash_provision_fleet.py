@@ -288,26 +288,80 @@ def _preflight_ota_check(host, expected_board=None, auth=None):
     return True, None
 
 
-def fleet_ota(hosts, bin_path, concurrency=3, auth=None, rolling=False, expected_board=None):
-    if not os.path.isfile(bin_path):
-        print(f"Firmware binary not found: {bin_path}")
-        return False
-    if expected_board is None:
-        expected_board = _infer_expected_board(bin_path)
-    with open(bin_path, "rb") as f:
-        bin_bytes = f.read()
+def _probe_board_model(host, auth=None):
+    """Fetch (boardModel, hasDualOta, err) from /api/system/update."""
+    try:
+        info = http_json(host, "/api/system/update", timeout=2.5, auth=auth)
+        if isinstance(info, dict):
+            return info.get("boardModel"), info.get("hasDualOta"), None
+        return None, None, None
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None, None, None
+        return None, None, f"HTTP {exc.code} on /api/system/update"
+    except Exception as exc:
+        return None, None, f"preflight unreachable ({exc})"
+
+
+def _resolve_board_bin(board_model, board_dir=None, board_map=None):
+    if board_model and board_map and board_model in board_map:
+        return board_map[board_model]
+    if board_model and board_dir:
+        cand = os.path.join(board_dir, board_model, "firmware.bin")
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def fleet_ota(hosts, bin_path=None, concurrency=3, auth=None, rolling=False, expected_board=None, board_dir=None, board_map=None):
+    if bin_path and os.path.isdir(bin_path) and not board_dir:
+        board_dir = bin_path
+        bin_path = None
+
+    if not board_dir and not board_map:
+        if not bin_path or not os.path.isfile(bin_path):
+            print(f"Firmware binary not found: {bin_path}")
+            return False
+        if expected_board is None:
+            expected_board = _infer_expected_board(bin_path)
+        with open(bin_path, "rb") as f:
+            bin_bytes = f.read()
+    else:
+        bin_bytes = None
 
     if rolling:
-        print(f"Loaded {bin_path} ({len(bin_bytes):,} bytes). Rolling OTA across {len(hosts)} device(s) (1-by-1 with /probe gate)...")
+        desc = f"multi-board profiles ({board_dir or 'board-map'})" if bin_bytes is None else f"{bin_path} ({len(bin_bytes):,} bytes)"
+        print(f"Loaded {desc}. Rolling OTA across {len(hosts)} device(s) (1-by-1 with /probe gate)...")
+        bin_cache = {}
         for idx, h in enumerate(hosts, start=1):
-            ok_pre, reason = _preflight_ota_check(h, expected_board=expected_board, auth=auth)
-            if not ok_pre:
-                print(f"  [ABORT] {h:<15} preflight failed: {reason}")
-                return False
-            print(f"[{idx}/{len(hosts)}] {h}: uploading...")
+            host_bin_path = bin_path
+            host_bytes = bin_bytes
+            if host_bytes is None:
+                board, dual_ota, err = _probe_board_model(h, auth=auth)
+                if err:
+                    print(f"  [ABORT] {h:<15} preflight failed: {err}")
+                    return False
+                if dual_ota is False:
+                    print(f"  [ABORT] {h:<15} device lacks dual-OTA partition table (hasDualOta=false)")
+                    return False
+                host_bin_path = _resolve_board_bin(board, board_dir=board_dir, board_map=board_map)
+                if not host_bin_path or not os.path.isfile(host_bin_path):
+                    print(f"  [ABORT] {h:<15} no firmware binary found for boardModel={board}")
+                    return False
+                if host_bin_path not in bin_cache:
+                    with open(host_bin_path, "rb") as bf:
+                        bin_cache[host_bin_path] = bf.read()
+                host_bytes = bin_cache[host_bin_path]
+                print(f"[{idx}/{len(hosts)}] {h} ({board}): uploading {os.path.basename(os.path.dirname(host_bin_path))}/firmware.bin...")
+            else:
+                ok_pre, reason = _preflight_ota_check(h, expected_board=expected_board, auth=auth)
+                if not ok_pre:
+                    print(f"  [ABORT] {h:<15} preflight failed: {reason}")
+                    return False
+                print(f"[{idx}/{len(hosts)}] {h}: uploading...")
             t0 = time.time()
             try:
-                code, text = upload_ota_one(h, bin_bytes, os.path.basename(bin_path), auth=auth)
+                code, text = upload_ota_one(h, host_bytes, os.path.basename(host_bin_path), auth=auth)
             except Exception as exc:
                 print(f"  [ABORT] {h:<15} upload error: {exc}")
                 return False
@@ -326,6 +380,9 @@ def fleet_ota(hosts, bin_path, concurrency=3, auth=None, rolling=False, expected
             print(f"  [BOOT]  {h:<15} -> {hname} running {ver} ({hr_khs:.1f} KH/s)")
         return True
 
+    if bin_bytes is None:
+        print("Multi-board OTA requires rolling mode (do not pass --fast-ota).")
+        return False
     print(f"Loaded {bin_path} ({len(bin_bytes):,} bytes). Flashing {len(hosts)} device(s) (concurrency={concurrency})...")
 
     ok_hosts = []
@@ -465,7 +522,9 @@ def main():
     parser.add_argument("--ips", help="Comma-separated list of miner IPs/hostnames (default: nm1-nm9 fleet)")
     parser.add_argument("--discover", nargs="?", const="192.168.4.", help="Scan /24 subnet prefix (e.g. 192.168.4.)")
     parser.add_argument("--status", action="store_true", help="Show live LAN fleet status table")
-    parser.add_argument("--ota", nargs="?", const=DEFAULT_BIN, help="Push firmware .bin over LAN OTA to target fleet (rolling 1-by-1 by default)")
+    parser.add_argument("--ota", nargs="?", const=DEFAULT_BIN, help="Push firmware .bin (or .pio/build dir) over LAN OTA to target fleet")
+    parser.add_argument("--board-dir", help="Build directory containing <boardModel>/firmware.bin for mixed-board rolling OTA")
+    parser.add_argument("--board-map", help="Comma-separated board=path.bin pairs (e.g. ESP32-2432S028R=a.bin,ES3C35P=b.bin)")
     parser.add_argument("--rolling", action="store_true", help="Sequential 1-by-1 OTA with /probe health gate (default for --ota)")
     parser.add_argument("--fast-ota", action="store_true", help="Parallel OTA uploads without 1-by-1 /probe gate")
     parser.add_argument("--concurrency", type=int, default=3, help="Parallel LAN OTA uploads (default: 3)")
@@ -490,9 +549,16 @@ def main():
             fleet_identify(hosts, auth=args.auth)
         if args.broadcast_json:
             fleet_broadcast(hosts, json.loads(args.broadcast_json), auth=args.auth)
-        if args.ota:
+        if args.ota or args.board_dir or args.board_map:
             use_rolling = not args.fast_ota or args.rolling
-            if not fleet_ota(hosts, args.ota, concurrency=args.concurrency, auth=args.auth, rolling=use_rolling):
+            bmap = {}
+            if args.board_map:
+                for item in args.board_map.split(","):
+                    if "=" in item:
+                        k, v = item.split("=", 1)
+                        bmap[k.strip()] = v.strip()
+            if not fleet_ota(hosts, args.ota, concurrency=args.concurrency, auth=args.auth, rolling=use_rolling,
+                             board_dir=args.board_dir, board_map=bmap or None):
                 sys.exit(1)
         if args.status or (args.discover and not (args.ota or args.broadcast_json or args.identify)):
             fleet_status(hosts, auth=args.auth)

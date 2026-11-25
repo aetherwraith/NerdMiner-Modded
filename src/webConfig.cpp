@@ -1447,7 +1447,10 @@ static void handleApiStatus()
 // --------------------------------------------------------------------------
 #define HISTORY_LEN 120
 #define HISTORY_PERIOD_ms 30000
-static uint16_t s_history[HISTORY_LEN]; // KH/s x 10
+static uint16_t s_history[HISTORY_LEN];  // KH/s x 10
+static int16_t s_histPing[HISTORY_LEN];  // pool ping ms (-1 if unavailable)
+static uint16_t s_histRej[HISTORY_LEN];  // rejected shares delta in interval
+static uint32_t s_histLastRej = 0;
 static uint8_t s_historyCount = 0, s_historyHead = 0;
 static uint32_t s_historyLast = 0;
 
@@ -1456,9 +1459,14 @@ static void historyTick()
   if (millis() - s_historyLast < HISTORY_PERIOD_ms)
     return;
   s_historyLast = millis();
-  uint32_t v = (uint32_t)(getMinerStatus().hashrateKHs * 10.0f + 0.5f);
+  const MinerStatus st = getMinerStatus();
+  uint32_t v = (uint32_t)(st.hashrateKHs * 10.0f + 0.5f);
   if (v > 65535) v = 65535;
   s_history[s_historyHead] = (uint16_t)v;
+  s_histPing[s_historyHead] = (st.pingMs >= -1 && st.pingMs <= 32767) ? (int16_t)st.pingMs : (int16_t)32767;
+  uint32_t rDelta = st.rejected >= s_histLastRej ? (st.rejected - s_histLastRej) : st.rejected;
+  s_histLastRej = st.rejected;
+  s_histRej[s_historyHead] = rDelta > 65535 ? 65535 : (uint16_t)rDelta;
   s_historyHead = (s_historyHead + 1) % HISTORY_LEN;
   if (s_historyCount < HISTORY_LEN) s_historyCount++;
 }
@@ -1466,21 +1474,29 @@ static void historyTick()
 static void handleHistory()
 {
   if (handleCorsOptions()) return;
-  String out;
-  out.reserve(16 + s_historyCount * 7);
-  out = F("{\"interval_s\":");
-  out += HISTORY_PERIOD_ms / 1000;
-  out += F(",\"khs\":[");
+  webCfgServer.sendHeader("Cache-Control", "no-store");
+  beginChunkedCorsJson();
+  ChunkedWriter w;
+  w.writePrintf("{\"interval_s\":%d,\"khs\":[", HISTORY_PERIOD_ms / 1000);
   for (uint8_t i = 0; i < s_historyCount; i++) {
     const uint16_t v = s_history[(s_historyHead + HISTORY_LEN - s_historyCount + i) % HISTORY_LEN];
-    if (i) out += ',';
-    out += v / 10;
-    out += '.';
-    out += v % 10;
+    if (i) w.write(",", 1);
+    w.writePrintf("%u.%u", v / 10U, v % 10U);
   }
-  out += F("]}");
-  webCfgServer.sendHeader("Cache-Control", "no-store");
-  sendCorsJson(200, out);
+  w.write("],\"ping_ms\":[");
+  for (uint8_t i = 0; i < s_historyCount; i++) {
+    const int16_t p = s_histPing[(s_historyHead + HISTORY_LEN - s_historyCount + i) % HISTORY_LEN];
+    if (i) w.write(",", 1);
+    w.writePrintf("%d", (int)p);
+  }
+  w.write("],\"rej\":[");
+  for (uint8_t i = 0; i < s_historyCount; i++) {
+    const uint16_t r = s_histRej[(s_historyHead + HISTORY_LEN - s_historyCount + i) % HISTORY_LEN];
+    if (i) w.write(",", 1);
+    w.writePrintf("%u", (unsigned)r);
+  }
+  w.write("]}");
+  w.finish();
 }
 
 static void handleMonitor()

@@ -341,6 +341,9 @@ body.stale #pan-mon .card{opacity:.5;transition:opacity .3s}
     </div>
     <p class="sub" style="margin:0 0 10px">Select a compiled <code>.bin</code> firmware image once to push across online peers (2 concurrent uploads at a time).</p>
     <div class="fsec">
+      <label style="font-size:13px">Target Board Profile
+        <select id="fota-board" style="width:100%;margin:4px 0 8px"><option value="">All boards (check against this miner)</option></select>
+      </label>
       <label style="font-size:13px">Firmware Binary (<code>.bin</code>)</label>
       <input type="file" id="fota-file" accept=".bin" autofocus style="width:100%;margin-top:6px">
     </div>
@@ -486,11 +489,11 @@ function update(j){
   live.push(j.hashrate_khs||0);if(live.length>40)live.shift();
 }
 
-var hist=[],step=30,live=[],drawColors=null;
+var hist=[],histPing=[],histRej=[],step=30,live=[],drawColors=null;
 function getDrawColors(){
   if(!drawColors){
     var cs=getComputedStyle(document.documentElement);
-    drawColors={col:cs.getPropertyValue('--acc').trim(),mut:cs.getPropertyValue('--mut').trim(),grd:cs.getPropertyValue('--grid').trim()};
+    drawColors={col:cs.getPropertyValue('--acc').trim(),mut:cs.getPropertyValue('--mut').trim(),grd:cs.getPropertyValue('--grid').trim(),warn:cs.getPropertyValue('--warn').trim()||'#f59e0b',bad:cs.getPropertyValue('--bad').trim()||'#ef4444'};
   }
   return drawColors;
 }
@@ -520,9 +523,36 @@ function draw(){
   g.beginPath();for(var i=0;i<n;i++){var xx=L+i*dx,yv=y(data[i]);i?g.lineTo(xx,yv):g.moveTo(xx,yv)}
   g.strokeStyle=col;g.lineWidth=2;g.lineJoin='round';g.stroke();
   g.lineTo(W,H-B);g.lineTo(L,H-B);g.closePath();var gr=g.createLinearGradient(0,T,0,H-B);gr.addColorStop(0,col+'55');gr.addColorStop(1,col+'00');g.fillStyle=gr;g.fill();
+  var pingNote='';
+  if(data===hist&&histPing.length===n){
+    var pVals=histPing.filter(function(p){return p>=0});
+    if(pVals.length>1){
+      var pMx=Math.max.apply(null,pVals),pSum=pVals.reduce(function(a,b){return a+b},0);
+      if(pMx<50)pMx=50;
+      g.save();g.beginPath();var started=false;
+      for(var j=0;j<n;j++){
+        if(histPing[j]<0){started=false;continue}
+        var px=L+j*dx,py=T+(H-T-B)*(1-histPing[j]/pMx);
+        started?g.lineTo(px,py):g.moveTo(px,py);started=true;
+      }
+      g.setLineDash([3,3]);g.strokeStyle=dc.warn;g.lineWidth=1.2;g.stroke();g.restore();
+      pingNote='ping '+Math.round(pSum/pVals.length)+' ms';
+    }
+  }
+  var rejSum=0;
+  if(data===hist&&histRej.length===n){
+    for(var m=0;m<n;m++){
+      if(histRej[m]>0){
+        rejSum+=histRej[m];
+        var rx=L+m*dx,rh=Math.min(H-T-B,6+histRej[m]*4);
+        g.fillStyle=dc.bad;g.fillRect(rx-1.5,H-B-rh,3,rh);
+      }
+    }
+  }
   g.fillStyle=mut;g.textAlign='left';g.textBaseline='alphabetic';
   var span=data===hist?Math.round((n-1)*step/60):Math.round((n-1)*3/60);
-  g.fillText(data===hist?'−'+span+' '+t('min'):t('live'),L,H-4);g.textAlign='right';g.fillText(t('now'),W,H-4);
+  var leftLbl=(data===hist?'−'+span+' '+t('min'):t('live'))+(pingNote?' · '+pingNote:'')+(rejSum?' · '+rejSum+' rej':'');
+  g.fillText(leftLbl,L,H-4);g.textAlign='right';g.fillText(t('now'),W,H-4);
 }
 
 function getJSON(url,ms){
@@ -596,7 +626,7 @@ function poll(){
 function history(){
   clearTimeout(histTimer);
   if(document.hidden)return;
-  getJSON('/api/history',5000).then(function(h){step=h.interval_s||30;hist=h.khs||[];if(activeTab==='mon')draw()},function(){})
+  getJSON('/api/history',5000).then(function(h){step=h.interval_s||30;hist=h.khs||[];histPing=h.ping_ms||[];histRej=h.rej||[];if(activeTab==='mon')draw()},function(){})
   .then(function(){histTimer=setTimeout(history,30000)})}
 
 /* ---------------- Fleet Persistence & Management ---------------- */
@@ -1058,22 +1088,46 @@ $('btn-bcast-go').addEventListener('click',async function(){
   }));
 });
 
+function applyOtaBoardFilter(){
+  var sel=$('fota-board').value;
+  [].forEach.call($('fota-targets').querySelectorAll('input[type=checkbox]'),function(cb){
+    var b=cb.dataset.board||'';
+    cb.checked=!sel||!b||b===sel;
+  });
+}
+$('fota-board').addEventListener('change',applyOtaBoardFilter);
+
 function renderOtaTargets(){
   var box=$('fota-targets');
   box.textContent='';
   var peers=onlinePeers();
   if(!peers.length){box.textContent='No online miners detected. Run Auto-Scan or check Fleet tab first.';return}
+  var sel=$('fota-board'),prev=sel.value;
+  sel.innerHTML='<option value="">All boards (check against this miner)</option>';
+  var boards={};
   peers.forEach(function(p){
     var host=(peerData[p]&&peerData[p].status&&peerData[p].status.hostname)||p;
     var ver=(peerData[p]&&peerData[p].status&&peerData[p].status.version)||'';
     var r=document.createElement('div');r.className='res-row';
     var lbl=document.createElement('label');lbl.style.display='flex';lbl.style.alignItems='center';lbl.style.gap='6px';lbl.style.cursor='pointer';
     var cb=document.createElement('input');cb.type='checkbox';cb.checked=true;cb.dataset.peer=p;
-    lbl.appendChild(cb);
-    lbl.appendChild(document.createTextNode(host+' ('+p+') '+(ver?'['+ver+']':'')));
+    var txt=document.createTextNode(host+' ('+p+') '+(ver?'['+ver+']':''));
+    lbl.appendChild(cb);lbl.appendChild(txt);
     var st=document.createElement('span');st.id='fota-st-'+p;st.textContent='Ready';
     r.appendChild(lbl);r.appendChild(st);
     box.appendChild(r);
+    getJSON(peerBaseUrl(p)+'/api/system/update',2000).then(function(info){
+      if(info&&info.boardModel){
+        cb.dataset.board=info.boardModel;
+        txt.textContent=host+' ('+p+') '+(ver?'['+ver+'] ':'')+'['+info.boardModel+']';
+        if(!boards[info.boardModel]){
+          boards[info.boardModel]=1;
+          var opt=document.createElement('option');opt.value=info.boardModel;opt.textContent=info.boardModel;
+          sel.appendChild(opt);
+          if(prev===info.boardModel){sel.value=prev;applyOtaBoardFilter()}
+        }
+      }
+    },function(){});
   });
 }
 
@@ -1126,11 +1180,13 @@ $('btn-fota-go').addEventListener('click',async function(){
   if(!confirm('Push '+f.name+' to '+cbs.length+' miner(s) (2 concurrent uploads at a time)?'))return;
   $('btn-fota-go').disabled=true;
   var pw=$('fota-auth').value;
-  var expectedBoard='';
-  try{
-    var localInfo=await getJSON('/api/system/update',2500);
-    if(localInfo&&localInfo.boardModel)expectedBoard=localInfo.boardModel;
-  }catch(e){}
+  var expectedBoard=$('fota-board').value||'';
+  if(!expectedBoard){
+    try{
+      var localInfo=await getJSON('/api/system/update',2500);
+      if(localInfo&&localInfo.boardModel)expectedBoard=localInfo.boardModel;
+    }catch(e){}
+  }
   var queue=cbs.map(function(cb){return cb.dataset.peer});
   queue.forEach(function(p){var el=$('fota-st-'+p);if(el)el.textContent='Queued'});
 
