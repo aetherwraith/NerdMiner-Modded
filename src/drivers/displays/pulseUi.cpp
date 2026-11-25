@@ -5,9 +5,14 @@
 
 #include <TFT_eSPI.h>
 #include <WiFi.h>
+#include <Preferences.h>
 #include "OpenFontRender.h"
 #include "currency.h"
 #include "monitor.h"
+#include "../storage/storage.h"
+#include "../storage/nvMemory.h"
+
+extern TSettings Settings;
 
 const PulseAccent PULSE_ACCENTS[] = {
     {RGB565(34, 225, 255), RGB565(140, 92, 255)}, // ice / violet
@@ -167,6 +172,65 @@ void pulseDrawStatusBadge(TFT_eSPI &d, OpenFontRender &render, const char *label
   render.setFontSize(fontSize);
   render.setAlignment(Align::TopCenter);
   render.drawString(label, cx + cw / 2, y + (h - (int)fontSize) / 2 - 1, col, pillBg);
+}
+
+void pulseLoadUiPrefs(const char *ns, int &accentIdx, uint16_t &cAcc, uint16_t &cAlt,
+                      int &savedAccent, int &savedPage, int &restorePage)
+{
+  Preferences p;
+  if (!p.begin(ns, true))
+    return;
+  accentIdx = p.getUChar("accent", 0) % PULSE_ACCENT_COUNT;
+  int page = p.getUChar("page", 0);
+  p.end();
+  cAcc = PULSE_ACCENTS[accentIdx].main;
+  cAlt = PULSE_ACCENTS[accentIdx].alt;
+  savedAccent = accentIdx;
+  savedPage = restorePage = page;
+}
+
+void pulseSaveUiPrefs(const char *ns, int accentIdx, int page, int &savedAccent, int &savedPage)
+{
+  if (page == savedPage && accentIdx == savedAccent)
+    return;
+  Preferences p;
+  if (p.begin(ns, false))
+  {
+    p.putUChar("accent", accentIdx);
+    p.putUChar("page", page);
+    p.end();
+  }
+  savedAccent = accentIdx;
+  savedPage = page;
+}
+
+void pulsePersistFlip(nvMemory &nvMem, bool flipped)
+{
+  Settings.flipDisplay = flipped;
+  TSettings stored;
+  if (nvMem.loadConfig(&stored))
+  {
+    stored.flipDisplay = flipped;
+    nvMem.saveConfig(&stored);
+  }
+}
+
+void pulseNoteHashrate(float kh, float &lastKh, float *hist, int histN, uint8_t &histCount,
+                       unsigned long &histLastMs, unsigned long histEveryMs, uint32_t &histEpoch)
+{
+  lastKh = kh;
+  unsigned long now = millis();
+  if (histCount != 0 && now - histLastMs < histEveryMs)
+    return;
+  histLastMs = now;
+  if (histCount < histN)
+    hist[histCount++] = kh;
+  else
+  {
+    memmove(hist, hist + 1, (histN - 1) * sizeof(float));
+    hist[histN - 1] = kh;
+  }
+  histEpoch++;
 }
 
 #endif

@@ -242,11 +242,13 @@ static void otaWorkerTask(void *param) {
   // Write the validated first chunk
   Update.write(buffer, firstChunkSize);
   size_t writtenTotal = firstChunkSize;
+  int lastReportedPercent = (totalBytes > 0) ? (int)((writtenTotal * 100ULL) / totalBytes) : 0;
+  size_t lastReportedBytes = writtenTotal;
   {
     std::lock_guard<std::mutex> lock(s_otaMutex);
     s_otaStatus.bytesWritten = writtenTotal;
     if (totalBytes > 0) {
-      s_otaStatus.progressPercent = (int)((writtenTotal * 100ULL) / totalBytes);
+      s_otaStatus.progressPercent = lastReportedPercent;
     }
   }
 
@@ -268,10 +270,16 @@ static void otaWorkerTask(void *param) {
           break;
         }
         writtenTotal += written;
-        std::lock_guard<std::mutex> lock(s_otaMutex);
-        s_otaStatus.bytesWritten = writtenTotal;
-        if (totalBytes > 0) {
-          s_otaStatus.progressPercent = (int)((writtenTotal * 100ULL) / totalBytes);
+        int newPct = (totalBytes > 0) ? (int)((writtenTotal * 100ULL) / totalBytes) : 0;
+        if ((totalBytes > 0 && newPct != lastReportedPercent) ||
+            (writtenTotal - lastReportedBytes >= 16384)) {
+          std::lock_guard<std::mutex> lock(s_otaMutex);
+          s_otaStatus.bytesWritten = writtenTotal;
+          if (totalBytes > 0) {
+            s_otaStatus.progressPercent = newPct;
+          }
+          lastReportedPercent = newPct;
+          lastReportedBytes = writtenTotal;
         }
       }
     } else {
@@ -314,6 +322,7 @@ static void otaWorkerTask(void *param) {
     if (Update.end(true)) {
       {
         std::lock_guard<std::mutex> lock(s_otaMutex);
+        s_otaStatus.bytesWritten = writtenTotal;
         s_otaStatus.state = OTA_STATE_SUCCESS;
         s_otaStatus.progressPercent = 100;
       }
@@ -367,6 +376,7 @@ static bool fetchGitHubRelease(const char* repo, DynamicJsonDocument &doc) {
     return false;
   }
 
+  http.useHTTP10(true);
   int httpCode = 0;
   {
     HW_SHA_REQUEST();
@@ -382,13 +392,7 @@ static bool fetchGitHubRelease(const char* repo, DynamicJsonDocument &doc) {
     return false;
   }
 
-  String payload = http.getString();
-  http.end();
-  if (payload.isEmpty()) {
-    return false;
-  }
-
-  // Filter keys to minimize JSON memory usage and use const char* reader ONLY
+  // Filter keys to minimize JSON memory usage and stream directly from socket
   StaticJsonDocument<256> filter;
   filter["tag_name"] = true;
   filter["name"] = true;
@@ -397,7 +401,8 @@ static bool fetchGitHubRelease(const char* repo, DynamicJsonDocument &doc) {
   filter["assets"][0]["browser_download_url"] = true;
   filter["assets"][0]["size"] = true;
 
-  DeserializationError err = deserializeJson(doc, payload.c_str(), DeserializationOption::Filter(filter));
+  DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
   Serial.printf("[OTA] JSON parse result: %s\n", err.c_str());
   return (err == DeserializationError::Ok);
 }
@@ -521,25 +526,27 @@ static void handleOtaPage(WebServer &server) {
 
 static void handleApiGetUpdate(WebServer &server) {
   OtaStatus st = getOtaStatus();
-  String json;
-  json.reserve(480);
-  json += "{\"state\":" + String((int)st.state);
-  json += ",\"progress\":" + String(st.progressPercent);
-  json += ",\"bytesWritten\":" + String((unsigned long)st.bytesWritten);
-  json += ",\"totalBytes\":" + String((unsigned long)st.totalBytes);
-  json += ",\"runningPartition\":\"" + jsonEscape(st.runningPartition) + "\"";
-  json += ",\"nextPartition\":\"" + jsonEscape(st.nextPartition) + "\"";
-  json += ",\"hasDualOta\":" + String(st.hasDualOta ? "true" : "false");
-  json += ",\"boardModel\":\"" + jsonEscape(st.boardModel) + "\"";
-  json += ",\"currentVersion\":\"" + jsonEscape(st.currentVersion) + "\"";
-  json += ",\"latestVersion\":\"" + jsonEscape(st.latestVersion) + "\"";
-  json += ",\"hasUpdate\":" + String(st.hasUpdate ? "true" : "false");
-  json += ",\"releaseUrl\":\"" + jsonEscape(st.releaseUrl) + "\"";
-  json += ",\"downloadUrl\":\"" + jsonEscape(st.downloadUrl) + "\"";
-  json += ",\"error\":\"" + jsonEscape(st.errorMessage) + "\"}";
+  char buf[1024];
+  snprintf(buf, sizeof(buf),
+           "{\"state\":%d,\"progress\":%d,\"bytesWritten\":%lu,\"totalBytes\":%lu,"
+           "\"runningPartition\":\"%s\",\"nextPartition\":\"%s\",\"hasDualOta\":%s,"
+           "\"boardModel\":\"%s\",\"currentVersion\":\"%s\",\"latestVersion\":\"%s\","
+           "\"hasUpdate\":%s,\"releaseUrl\":\"%s\",\"downloadUrl\":\"%s\",\"error\":\"%s\"}",
+           (int)st.state, st.progressPercent,
+           (unsigned long)st.bytesWritten, (unsigned long)st.totalBytes,
+           jsonEscape(st.runningPartition).c_str(),
+           jsonEscape(st.nextPartition).c_str(),
+           st.hasDualOta ? "true" : "false",
+           jsonEscape(st.boardModel).c_str(),
+           jsonEscape(st.currentVersion).c_str(),
+           jsonEscape(st.latestVersion).c_str(),
+           st.hasUpdate ? "true" : "false",
+           jsonEscape(st.releaseUrl).c_str(),
+           jsonEscape(st.downloadUrl).c_str(),
+           jsonEscape(st.errorMessage).c_str());
 
   server.sendHeader("Cache-Control", "no-store");
-  sendCorsJson(200, json);
+  sendCorsJson(200, buf);
 }
 
 static void handleApiPostUpdate(WebServer &server) {
@@ -561,16 +568,19 @@ static void handleApiPostUpdate(WebServer &server) {
   bool ok = (targetUrl.length() > 0) ? startUrlOta(targetUrl) : startGitHubOta("latest");
   OtaStatus st = getOtaStatus();
 
-  String json;
-  json.reserve(192);
-  json += "{\"success\":" + String(ok ? "true" : "false");
-  json += ",\"message\":\"" + String(ok ? "OTA update initiated" : "Failed to start OTA update") + "\"";
+  char buf[384];
   if (!ok && st.errorMessage.length() > 0) {
-    json += ",\"error\":\"" + jsonEscape(st.errorMessage) + "\"";
+    snprintf(buf, sizeof(buf),
+             "{\"success\":false,\"message\":\"Failed to start OTA update\",\"error\":\"%s\"}",
+             jsonEscape(st.errorMessage).c_str());
+  } else {
+    snprintf(buf, sizeof(buf),
+             "{\"success\":%s,\"message\":\"%s\"}",
+             ok ? "true" : "false",
+             ok ? "OTA update initiated" : "Failed to start OTA update");
   }
-  json += "}";
 
-  sendCorsJson(ok ? 200 : 400, json);
+  sendCorsJson(ok ? 200 : 400, buf);
 }
 
 static void handleApiCheckUpdate(WebServer &server) {
@@ -580,21 +590,33 @@ static void handleApiCheckUpdate(WebServer &server) {
   bool ok = checkGitHubUpdate();
   OtaStatus st = getOtaStatus();
 
-  String json;
-  json.reserve(384);
-  json += "{\"success\":" + String(ok ? "true" : "false");
-  json += ",\"currentVersion\":\"" + jsonEscape(st.currentVersion) + "\"";
-  json += ",\"latestVersion\":\"" + jsonEscape(st.latestVersion) + "\"";
-  json += ",\"hasUpdate\":" + String(st.hasUpdate ? "true" : "false");
-  json += ",\"downloadUrl\":\"" + jsonEscape(st.downloadUrl) + "\"";
-  json += ",\"releaseUrl\":\"" + jsonEscape(st.releaseUrl) + "\"";
-  json += ",\"releaseNotes\":\"" + jsonEscape(st.releaseNotes) + "\"";
+  char buf[1024];
   if (!ok) {
-    json += ",\"error\":\"" + jsonEscape(st.errorMessage) + "\"";
+    snprintf(buf, sizeof(buf),
+             "{\"success\":false,\"currentVersion\":\"%s\",\"latestVersion\":\"%s\","
+             "\"hasUpdate\":%s,\"downloadUrl\":\"%s\",\"releaseUrl\":\"%s\","
+             "\"releaseNotes\":\"%s\",\"error\":\"%s\"}",
+             jsonEscape(st.currentVersion).c_str(),
+             jsonEscape(st.latestVersion).c_str(),
+             st.hasUpdate ? "true" : "false",
+             jsonEscape(st.downloadUrl).c_str(),
+             jsonEscape(st.releaseUrl).c_str(),
+             jsonEscape(st.releaseNotes).c_str(),
+             jsonEscape(st.errorMessage).c_str());
+  } else {
+    snprintf(buf, sizeof(buf),
+             "{\"success\":true,\"currentVersion\":\"%s\",\"latestVersion\":\"%s\","
+             "\"hasUpdate\":%s,\"downloadUrl\":\"%s\",\"releaseUrl\":\"%s\","
+             "\"releaseNotes\":\"%s\"}",
+             jsonEscape(st.currentVersion).c_str(),
+             jsonEscape(st.latestVersion).c_str(),
+             st.hasUpdate ? "true" : "false",
+             jsonEscape(st.downloadUrl).c_str(),
+             jsonEscape(st.releaseUrl).c_str(),
+             jsonEscape(st.releaseNotes).c_str());
   }
-  json += "}";
 
-  sendCorsJson(ok ? 200 : 500, json);
+  sendCorsJson(ok ? 200 : 500, buf);
 }
 
 void setup_ota(WebServer &server) {

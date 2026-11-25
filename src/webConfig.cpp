@@ -202,17 +202,6 @@ static bool sameOrigin()
   return true;
 }
 
-static String htmlEscape(const String &in)
-{
-  String out = in;
-  out.replace("&", "&amp;");
-  out.replace("\"", "&quot;");
-  out.replace("<", "&lt;");
-  out.replace(">", "&gt;");
-  out.replace("'", "&#39;"); // the page puts every value between single quotes
-  return out;
-}
-
 // The settings as the page should show them: what is in use, or what was
 // saved and is still waiting for the stratum or monitor task to apply it.
 TSettings currentSettings()
@@ -795,6 +784,14 @@ void sendCorsJson(int code, const String &json)
   s_corsAdded = false;
 }
 
+static void beginChunkedCorsJson(int code = 200)
+{
+  ensureCorsHeaders();
+  webCfgServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webCfgServer.send(code, "application/json", "");
+  s_corsAdded = false;
+}
+
 bool handleCorsOptions(void)
 {
   if (webCfgServer.method() != HTTP_OPTIONS)
@@ -942,17 +939,20 @@ static void handleTimezoneEndpoint()
   bool dstActive = false;
   getTimezoneFields(s.Timezone, label, posix, localTime, dstActive);
 
-  String json;
-  json.reserve(320);
-  json += "{\"timezone\":\"" + jsonEscape(s.Timezone) + "\"";
-  json += ",\"label\":\"" + jsonEscape(label) + "\"";
-  json += ",\"posix\":\"" + jsonEscape(posix) + "\"";
-  json += ",\"localTime\":\"" + jsonEscape(localTime) + "\"";
-  json += ",\"localDate\":\"" + jsonEscape(getDate()) + "\"";
-  json += ",\"dstActive\":" + String(dstActive ? "true" : "false");
-  json += "}";
-
-  sendCorsJson(200, json);
+  beginChunkedCorsJson(200);
+  ChunkedWriter w;
+  w.write("{\"timezone\":\"");
+  w.writeJsonEscaped(s.Timezone.c_str());
+  w.write("\",\"label\":\"");
+  w.writeJsonEscaped(label.c_str());
+  w.write("\",\"posix\":\"");
+  w.writeJsonEscaped(posix.c_str());
+  w.write("\",\"localTime\":\"");
+  w.writeJsonEscaped(localTime.c_str());
+  w.write("\",\"localDate\":\"");
+  w.writeJsonEscaped(getDate().c_str());
+  w.writePrintf("\",\"dstActive\":%s}", dstActive ? "true" : "false");
+  w.finish();
 }
 
 static void handleTimezonesList()
@@ -1038,23 +1038,20 @@ static void handleLedEndpoint()
   if (!ok) return;
 
   const TSettings s = currentSettings();
-  String json;
-  json.reserve(256);
-  json += "{";
+  char buf[256];
 #ifdef HAS_RGB_LED
-  json += "\"ledMode\":" + String(s.ledMode);
-  json += ",\"ledModeName\":\"" + String(ledModeName((uint8_t)s.ledMode)) + "\"";
-  json += ",\"ledColor\":" + String(s.ledColor);
-  json += ",\"ledColorHex\":\"" + ledColorHex(s.ledColor) + "\"";
-  json += ",\"ledBrightness\":" + String(s.ledBrightness);
-  json += ",\"ledScreenOff\":" + String(s.ledScreenOff ? "true" : "false");
+  snprintf(buf, sizeof(buf),
+           "{\"ledMode\":%d,\"ledModeName\":\"%s\",\"ledColor\":%lu,"
+           "\"ledColorHex\":\"%s\",\"ledBrightness\":%d,\"ledScreenOff\":%s}",
+           s.ledMode, ledModeName((uint8_t)s.ledMode), (unsigned long)s.ledColor,
+           ledColorHex(s.ledColor).c_str(), s.ledBrightness,
+           s.ledScreenOff ? "true" : "false");
 #elif defined(NO_DISPLAY)
-  json += "\"statusLed\":" + String(s.statusLed ? "true" : "false");
+  snprintf(buf, sizeof(buf), "{\"statusLed\":%s}", s.statusLed ? "true" : "false");
 #else
-  json += "\"supported\":false";
+  snprintf(buf, sizeof(buf), "{\"supported\":false}");
 #endif
-  json += "}";
-  sendCorsJson(200, json);
+  sendCorsJson(200, buf);
 }
 
 static void handleDisplayEndpoint()
@@ -1120,25 +1117,24 @@ static void handleDisplayEndpoint()
   if (!ok) return;
 
   const TSettings s = currentSettings();
-  String json;
-  json.reserve(420);
-  json += "{\"brightness\":" + String(s.Brightness);
-  json += ",\"autoBrightness\":" + String(s.autoBrightness ? "true" : "false");
-  json += ",\"screenTimeout\":" + String(s.ScreenTimeout);
-  json += ",\"nightDim\":" + String(s.nightDim ? "true" : "false");
-  json += ",\"nightBrightness\":" + String(s.NightBrightness);
-  json += ",\"nightFade\":" + String(s.NightFade);
-  json += ",\"city\":\"" + jsonEscape(findCityName(s.Latitude, s.Longitude)) + "\"";
-  json += ",\"latitude\":" + String(s.Latitude, 4);
-  json += ",\"longitude\":" + String(s.Longitude, 4);
+  beginChunkedCorsJson(200);
+  ChunkedWriter w;
+  w.writePrintf("{\"brightness\":%d,\"autoBrightness\":%s,\"screenTimeout\":%d,"
+                "\"nightDim\":%s,\"nightBrightness\":%d,\"nightFade\":%d,\"city\":\"",
+                s.Brightness, s.autoBrightness ? "true" : "false", s.ScreenTimeout,
+                s.nightDim ? "true" : "false", s.NightBrightness, s.NightFade);
+  w.writeJsonEscaped(findCityName(s.Latitude, s.Longitude).c_str());
+  w.writePrintf("\",\"latitude\":%.4f,\"longitude\":%.4f", s.Latitude, s.Longitude);
 #ifdef HAS_BACKLIGHT_CONTROL
-  json += ",\"nightDimStatus\":\"" + jsonEscape(nightDimStatus()) + "\"";
+  w.write(",\"nightDimStatus\":\"");
+  w.writeJsonEscaped(nightDimStatus().c_str());
+  w.write("\"", 1);
 #endif
-  json += ",\"screenLit\":" + String(screenLit() ? "true" : "false");
-  json += ",\"invertColors\":" + String(s.invertColors ? "true" : "false");
-  json += ",\"flipDisplay\":" + String(s.flipDisplay ? "true" : "false");
-  json += "}";
-  sendCorsJson(200, json);
+  w.writePrintf(",\"screenLit\":%s,\"invertColors\":%s,\"flipDisplay\":%s}",
+                screenLit() ? "true" : "false",
+                s.invertColors ? "true" : "false",
+                s.flipDisplay ? "true" : "false");
+  w.finish();
 }
 
 static void handlePoolEndpoint()
@@ -1151,20 +1147,21 @@ static void handlePoolEndpoint()
   if (!ok) return;
 
   const TSettings s = currentSettings();
-  String json;
-  json.reserve(512);
-  json += "{\"pool\":\"" + jsonEscape(s.PoolAddress) + "\"";
-  json += ",\"port\":" + String(s.PoolPort);
-  json += ",\"wallet\":\"" + jsonEscape(String(s.BtcWallet)) + "\"";
-  json += ",\"poolPassword\":\"" + String(s.PoolPassword[0] != '\0' ? "********" : "") + "\"";
-  json += ",\"backupPool\":\"" + jsonEscape(s.BackupPoolAddress) + "\"";
-  json += ",\"backupPort\":" + String(s.BackupPoolPort);
-  json += ",\"backupPoolPassword\":\"" + String(s.BackupPoolPassword[0] != '\0' ? "********" : "") + "\"";
-  json += ",\"activePool\":\"" + jsonEscape(activePoolAddress()) + "\"";
-  json += ",\"activePort\":" + String(activePoolPort());
-  json += ",\"onBackupPool\":" + String(onBackupPool() ? "true" : "false");
-  json += "}";
-  sendCorsJson(200, json);
+  beginChunkedCorsJson(200);
+  ChunkedWriter w;
+  w.write("{\"pool\":\"");
+  w.writeJsonEscaped(s.PoolAddress.c_str());
+  w.writePrintf("\",\"port\":%d,\"wallet\":\"", s.PoolPort);
+  w.writeJsonEscaped(s.BtcWallet);
+  w.writePrintf("\",\"poolPassword\":\"%s\",\"backupPool\":\"",
+                s.PoolPassword[0] != '\0' ? "********" : "");
+  w.writeJsonEscaped(s.BackupPoolAddress.c_str());
+  w.writePrintf("\",\"backupPort\":%d,\"backupPoolPassword\":\"%s\",\"activePool\":\"",
+                s.BackupPoolPort, s.BackupPoolPassword[0] != '\0' ? "********" : "");
+  w.writeJsonEscaped(activePoolAddress().c_str());
+  w.writePrintf("\",\"activePort\":%d,\"onBackupPool\":%s}",
+                activePoolPort(), onBackupPool() ? "true" : "false");
+  w.finish();
 }
 
 static void handleMqttEndpoint()
@@ -1177,16 +1174,16 @@ static void handleMqttEndpoint()
   if (!ok) return;
 
   const TSettings s = currentSettings();
-  String json;
-  json.reserve(320);
-  json += "{\"mqttEnabled\":" + String(s.MqttEnabled ? "true" : "false");
-  json += ",\"mqttHost\":\"" + jsonEscape(s.MqttHost) + "\"";
-  json += ",\"mqttPort\":" + String(s.MqttPort);
-  json += ",\"mqttUser\":\"" + jsonEscape(s.MqttUser) + "\"";
-  json += ",\"mqttTopic\":\"" + jsonEscape(s.MqttTopic) + "\"";
-  json += ",\"mqttConnected\":" + String(mqttConnected() ? "true" : "false");
-  json += "}";
-  sendCorsJson(200, json);
+  beginChunkedCorsJson(200);
+  ChunkedWriter w;
+  w.writePrintf("{\"mqttEnabled\":%s,\"mqttHost\":\"", s.MqttEnabled ? "true" : "false");
+  w.writeJsonEscaped(s.MqttHost.c_str());
+  w.writePrintf("\",\"mqttPort\":%d,\"mqttUser\":\"", s.MqttPort);
+  w.writeJsonEscaped(s.MqttUser.c_str());
+  w.write("\",\"mqttTopic\":\"");
+  w.writeJsonEscaped(s.MqttTopic.c_str());
+  w.writePrintf("\",\"mqttConnected\":%s}", mqttConnected() ? "true" : "false");
+  w.finish();
 }
 
 static void handleIdentify()
@@ -1219,13 +1216,13 @@ static void handleIdentify()
     host = String(Settings.Hostname);
   }
 
-  String json;
-  json.reserve(160);
-  json += "{\"success\":true";
-  json += ",\"identifying\":" + String(isIdentifying() ? "true" : "false");
-  json += ",\"durationMs\":" + String((unsigned long)durationMs);
-  json += ",\"hostname\":\"" + jsonEscape(host) + "\"}";
-  sendCorsJson(200, json);
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "{\"success\":true,\"identifying\":%s,\"durationMs\":%lu,\"hostname\":\"%s\"}",
+           isIdentifying() ? "true" : "false",
+           (unsigned long)durationMs,
+           jsonEscape(host).c_str());
+  sendCorsJson(200, buf);
 }
 
 static void handleProbe()
@@ -1245,22 +1242,15 @@ static void handleProbe()
     host = String(Settings.Hostname);
   }
 
-  String json;
-  json.reserve(224);
-  json += "{\"hr\":" + String(hr_hs);
-  json += ",\"ut\":" + String((unsigned long)getUpTime());
-  json += ",\"ebd\":\"" + String(best_diff_str) + "\"";
-  json += ",\"sbd\":\"" + String(sess_diff_str) + "\"";
-  json += ",\"temp\":" + String(temperatureRead(), 1);
-  json += ",\"acc\":" + String(st.accepted);
-  json += ",\"rej\":" + String(st.rejected);
-  json += ",\"rc\":" + String(getStratumReconnects());
-  json += ",\"nerdminer\":true";
-  json += ",\"host\":\"" + jsonEscape(host) + "\"";
-  json += ",\"ver\":\"" + String(CURRENT_VERSION) + "\"";
-  json += "}";
-
-  sendCorsJson(200, json);
+  char buf[384];
+  snprintf(buf, sizeof(buf),
+           "{\"hr\":%lu,\"ut\":%lu,\"ebd\":\"%s\",\"sbd\":\"%s\",\"temp\":%.1f,"
+           "\"acc\":%u,\"rej\":%u,\"rc\":%u,\"nerdminer\":true,\"host\":\"%s\",\"ver\":\"%s\"}",
+           (unsigned long)hr_hs, (unsigned long)getUpTime(),
+           best_diff_str, sess_diff_str, temperatureRead(),
+           st.accepted, st.rejected, getStratumReconnects(),
+           jsonEscape(host).c_str(), CURRENT_VERSION);
+  sendCorsJson(200, buf);
 }
 
 static void handleStatus()
@@ -1275,55 +1265,45 @@ static void handleStatus()
   float temp = temperatureRead();
   const MinerStatus m = getMinerStatus();
   const TSettings s = currentSettings();
-
-  String json;
-  json.reserve(1024);
-  json += "{\"nerdminer\":true";
-  json += ",\"hostname\":\"" + jsonEscape(String(s.Hostname)) + "\"";
-  json += ",\"version\":\"" + String(CURRENT_VERSION) + "\"";
-  json += ",\"deviceModel\":\"NerdMiner v2\"";
-  json += ",\"khash\":" + String(khs, 2);
-  json += ",\"hashRate\":" + String(khs, 2);
-  json += ",\"validShares\":" + String(shares);
-  json += ",\"invalidShares\":" + String(rejects);
-  json += ",\"sharesAccepted\":" + String(m.accepted);
-  json += ",\"sharesRejected\":" + String(m.rejected);
-  json += ",\"validBlocks\":" + String(valids);
-  json += ",\"blockFound\":" + String(valids > 0 ? "true" : "false");
-  json += ",\"bestDiff\":\"" + String(best_diff_str) + "\"";
-  json += ",\"bestSessionDiff\":\"" + String(sess_diff_str) + "\"";
-  json += ",\"uptime\":" + String((unsigned long)getUpTime());
-  json += ",\"poolDiff\":" + String(m.poolDifficulty);
-  if (m.pingMs >= 0)
-    json += ",\"pingMs\":" + String((long)m.pingMs);
-  json += ",\"stratumURL\":\"" + jsonEscape(activePoolAddress()) + "\"";
-  json += ",\"stratumPort\":" + String(activePoolPort());
-  json += ",\"stratumUser\":\"" + jsonEscape(String(s.BtcWallet)) + "\"";
-  json += ",\"onBackupPool\":" + String(onBackupPool() ? "true" : "false");
-  json += ",\"temp\":" + String(temp, 1);
-  json += ",\"reset_reason\":\"" + jsonEscape(String(getResetReasonStr())) + "\"";
-  json += ",\"network_difficulty\":" + String(getNetworkDifficulty(), 2);
   const uint32_t discMs = getPoolDisconnectedSinceMs();
-  json += ",\"pool_disconnected_s\":" + String(discMs ? (unsigned long)((millis() - discMs) / 1000UL) : 0UL);
-  json += ",\"stratum_reconnects\":" + String(getStratumReconnects());
-  json += ",\"thermal_throttled\":" + String(getThermalThrottled() ? "true" : "false");
-  json += ",\"frequency\":" + String(getCpuFrequencyMhz());
-  json += ",\"macAddr\":\"" + WiFi.macAddress() + "\"";
-  json += ",\"freeHeap\":" + String(ESP.getFreeHeap());
-  json += ",\"gitRepo\":\"aetherwraith/NerdMiner-Modded\"";
-  json += ",\"changelogUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
-  json += ",\"releaseNotesUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
-  json += ",\"firmwareStatus\":{\"familyKey\":\"nerdminer\"";
-  json += ",\"currentVersion\":\"" + String(CURRENT_VERSION) + "\"";
-  json += ",\"latestVersion\":\"" + String(CURRENT_VERSION) + "\"";
-  json += ",\"hasUpdate\":false";
-  json += ",\"changelogUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
-  json += ",\"releaseNotesUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\"";
-  json += ",\"releaseName\":\"NerdMiner Modded " + String(CURRENT_VERSION) + "\"";
-  json += ",\"isNativeHardwareStatus\":true}";
-  json += "}";
 
-  sendCorsJson(200, json);
+  beginChunkedCorsJson(200);
+  ChunkedWriter w;
+  w.write("{\"nerdminer\":true,\"hostname\":\"");
+  w.writeJsonEscaped(s.Hostname);
+  w.writePrintf("\",\"version\":\"%s\",\"deviceModel\":\"NerdMiner v2\","
+                "\"khash\":%.2f,\"hashRate\":%.2f,\"validShares\":%u,\"invalidShares\":%u,"
+                "\"sharesAccepted\":%u,\"sharesRejected\":%u,\"validBlocks\":%u,\"blockFound\":%s,"
+                "\"bestDiff\":\"%s\",\"bestSessionDiff\":\"%s\",\"uptime\":%lu,\"poolDiff\":%.10g",
+                CURRENT_VERSION, khs, khs, shares, rejects,
+                m.accepted, m.rejected, valids, valids > 0 ? "true" : "false",
+                best_diff_str, sess_diff_str, (unsigned long)getUpTime(), m.poolDifficulty);
+  if (m.pingMs >= 0)
+    w.writePrintf(",\"pingMs\":%ld", (long)m.pingMs);
+  w.write(",\"stratumURL\":\"");
+  w.writeJsonEscaped(activePoolAddress().c_str());
+  w.writePrintf("\",\"stratumPort\":%d,\"stratumUser\":\"", activePoolPort());
+  w.writeJsonEscaped(s.BtcWallet);
+  w.writePrintf("\",\"onBackupPool\":%s,\"temp\":%.1f,\"reset_reason\":\"",
+                onBackupPool() ? "true" : "false", temp);
+  w.writeJsonEscaped(getResetReasonStr());
+  w.writePrintf("\",\"network_difficulty\":%.2f,\"pool_disconnected_s\":%lu,"
+                "\"stratum_reconnects\":%u,\"thermal_throttled\":%s,\"frequency\":%u,"
+                "\"macAddr\":\"%s\",\"freeHeap\":%u,"
+                "\"gitRepo\":\"aetherwraith/NerdMiner-Modded\","
+                "\"changelogUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\","
+                "\"releaseNotesUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\","
+                "\"firmwareStatus\":{\"familyKey\":\"nerdminer\",\"currentVersion\":\"%s\","
+                "\"latestVersion\":\"%s\",\"hasUpdate\":false,"
+                "\"changelogUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\","
+                "\"releaseNotesUrl\":\"https://github.com/aetherwraith/NerdMiner-Modded/releases\","
+                "\"releaseName\":\"NerdMiner Modded %s\",\"isNativeHardwareStatus\":true}}",
+                getNetworkDifficulty(),
+                discMs ? (unsigned long)((millis() - discMs) / 1000UL) : 0UL,
+                getStratumReconnects(), getThermalThrottled() ? "true" : "false",
+                getCpuFrequencyMhz(), WiFi.macAddress().c_str(), ESP.getFreeHeap(),
+                CURRENT_VERSION, CURRENT_VERSION, CURRENT_VERSION);
+  w.finish();
 }
 
 static void handleSystemRestart()

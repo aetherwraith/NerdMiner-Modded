@@ -19,6 +19,7 @@ public:
     bool deleteConfig();
     static bool parseJsonConfig(const JsonDocument& json, TSettings* Settings);
     static void fillConfigJson(JsonDocument& doc, const TSettings& s, bool spiffsKeys = false, bool maskSecrets = false);
+    static void printConfigMasked(JsonDocument& json);
 private:
     bool init();
     bool Initialized_;

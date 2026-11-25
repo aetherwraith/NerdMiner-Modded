@@ -102,11 +102,18 @@ inline bool pulseIsShareFlashing(unsigned long shareFlashUntil)
     defined(ES3C35P_DISPLAY) || defined(TDISPLAY_PULSE) || defined(ESP32_4IN_ST7796_DISPLAY)
 class TFT_eSPI;
 class OpenFontRender;
+class nvMemory;
 
 void pulsePanel(TFT_eSPI &d, int x, int y, int w, int h, int r, uint16_t fill, uint16_t edge, uint16_t behind);
 void pulseGradBar(TFT_eSPI &d, int x, int y, int w, int h, uint16_t cAlt, uint16_t cAcc);
 void pulseDrawStatusBadge(TFT_eSPI &d, OpenFontRender &render, const char *label, int cx, int y,
                           int cw, int h, int r, unsigned fontSize, uint16_t col, uint16_t bg);
+void pulseLoadUiPrefs(const char *ns, int &accentIdx, uint16_t &cAcc, uint16_t &cAlt,
+                      int &savedAccent, int &savedPage, int &restorePage);
+void pulseSaveUiPrefs(const char *ns, int accentIdx, int page, int &savedAccent, int &savedPage);
+void pulsePersistFlip(nvMemory &nvMem, bool flipped);
+void pulseNoteHashrate(float kh, float &lastKh, float *hist, int histN, uint8_t &histCount,
+                       unsigned long &histLastMs, unsigned long histEveryMs, uint32_t &histEpoch);
 #endif
 
 #endif // PULSE_UI_H

@@ -20,23 +20,9 @@ nvMemory::nvMemory() : Initialized_(false){};
 // the default address).
 #define JSON_CONFIG_TMP JSON_CONFIG_FILE ".tmp"
 
-static String readFileToString(File &f)
-{
-    String out;
-    out.reserve(640);
-    char buf[128];
-    size_t n = 0;
-    while ((n = f.readBytes(buf, sizeof(buf) - 1)) > 0)
-    {
-        buf[n] = '\0';
-        out += buf;
-    }
-    return out;
-}
-
 // The config as JSON on the serial log, without the passwords in it.
 // Modifies json in-place (call after reading from or writing to json).
-static void printConfigMasked(JsonDocument &json)
+void nvMemory::printConfigMasked(JsonDocument &json)
 {
     for (const char *key : {JSON_SPIFFS_KEY_POOLPASS, JSON_SPIFFS_KEY_BACKUPPOOLPASS, JSON_SPIFFS_KEY_WEBPASSWORD,
                             JSON_SPIFFS_KEY_MQTTPASS, JSON_KEY_PASW, JSON_KEY_POOLPASS,
@@ -169,11 +155,8 @@ bool nvMemory::saveConfig(TSettings* Settings)
             Serial.println("SPIFS: Failed to open config file for writing");
             return false;
         }
-        String raw;
-        raw.reserve(768);
-        serializeJson(json, raw);
-        const size_t expected = raw.length();
-        const size_t written = configFile.write((const uint8_t *)raw.c_str(), expected);
+        const size_t expected = measureJson(json);
+        const size_t written = serializeJson(json, configFile);
         configFile.close();
         printConfigMasked(json);
         if (written == 0 || written != expected)
@@ -212,18 +195,22 @@ static bool hasAnyKey(const JsonDocument& doc, std::initializer_list<const char*
     return false;
 }
 
-static String getJsonString(const JsonDocument& doc, std::initializer_list<const char*> keys)
+static String getJsonString(const JsonDocument& doc, std::initializer_list<const char*> keys, bool* matched = nullptr)
 {
     for (const char* k : keys) {
-        if (k && doc.containsKey(k)) return doc[k].as<String>();
+        if (k && doc.containsKey(k)) {
+            if (matched) *matched = true;
+            return doc[k].as<String>();
+        }
     }
     return "";
 }
 
-static int getJsonInt(const JsonDocument& doc, int defaultVal, std::initializer_list<const char*> keys)
+static int getJsonInt(const JsonDocument& doc, int defaultVal, std::initializer_list<const char*> keys, bool* matched = nullptr)
 {
     for (const char* k : keys) {
         if (k && doc.containsKey(k)) {
+            if (matched) *matched = true;
             JsonVariantConst v = doc[k];
             if (v.is<const char*>()) return (int)String(v.as<const char*>()).toInt();
             return v.as<int>();
@@ -232,10 +219,11 @@ static int getJsonInt(const JsonDocument& doc, int defaultVal, std::initializer_
     return defaultVal;
 }
 
-static float getJsonFloat(const JsonDocument& doc, float defaultVal, std::initializer_list<const char*> keys)
+static float getJsonFloat(const JsonDocument& doc, float defaultVal, std::initializer_list<const char*> keys, bool* matched = nullptr)
 {
     for (const char* k : keys) {
         if (k && doc.containsKey(k)) {
+            if (matched) *matched = true;
             JsonVariantConst v = doc[k];
             if (v.is<const char*>()) return String(v.as<const char*>()).toFloat();
             return v.as<float>();
@@ -244,10 +232,11 @@ static float getJsonFloat(const JsonDocument& doc, float defaultVal, std::initia
     return defaultVal;
 }
 
-static bool getJsonBool(const JsonDocument& doc, bool defaultVal, std::initializer_list<const char*> keys)
+static bool getJsonBool(const JsonDocument& doc, bool defaultVal, std::initializer_list<const char*> keys, bool* matched = nullptr)
 {
     for (const char* k : keys) {
         if (k && doc.containsKey(k)) {
+            if (matched) *matched = true;
             JsonVariantConst v = doc[k];
             if (v.is<bool>()) return v.as<bool>();
             if (v.is<int>() || v.is<long>() || v.is<unsigned int>()) return v.as<long>() != 0;
@@ -273,16 +262,19 @@ static bool isMaskedSecret(const String &s)
 bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
 {
     if (!Settings) return false;
+    bool matched = false;
 
     // WiFi credentials (supported from SDCard, SPIFFS, CLI, or API)
     const bool hasWifiSsidKey = hasAnyKey(json, {JSON_KEY_SSID, "ssid", "wifiSSID", "wifissid", "wifi_ssid"});
-    String ssid = getJsonString(json, {JSON_KEY_SSID, "ssid", "wifiSSID", "wifissid", "wifi_ssid"});
+    if (hasWifiSsidKey) matched = true;
+    String ssid = getJsonString(json, {JSON_KEY_SSID, "ssid", "wifiSSID", "wifissid", "wifi_ssid"}, &matched);
     ssid.trim();
     if (ssid.length() > 0) Settings->WifiSSID = ssid;
 
-    String pw = getJsonString(json, {JSON_KEY_PASW, "wifiPW", "wifipw", "wifiPass", "wifipass", "wifiPassword", "wifi_pass"});
+    String pw = getJsonString(json, {JSON_KEY_PASW, "wifiPW", "wifipw", "wifiPass", "wifipass", "wifiPassword", "wifi_pass"}, &matched);
     if (pw.isEmpty() && hasWifiSsidKey && json.containsKey("password")) {
         pw = json["password"].as<String>();
+        matched = true;
     }
     if (pw.length() > 0 && !isMaskedSecret(pw)) Settings->WifiPW = pw;
 
@@ -301,18 +293,19 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     };
 
     // Pool connection (supports "stratum+tcp://host:port" or "host" + "port")
-    String pool = getJsonString(json, {JSON_SPIFFS_KEY_POOLURL, JSON_KEY_POOLURL, "pool", "poolUrl", "poolurl", "stratum", "stratumURL", "PrimaryPool"});
+    String pool = getJsonString(json, {JSON_SPIFFS_KEY_POOLURL, JSON_KEY_POOLURL, "pool", "poolUrl", "poolurl", "stratum", "stratumURL", "PrimaryPool"}, &matched);
     pool.trim();
     if (pool.length() > 0) {
         Settings->PoolAddress = parsePoolStr(pool, Settings->PoolPort);
     }
 
-    Settings->PoolPort = constrain(getJsonInt(json, Settings->PoolPort, {JSON_SPIFFS_KEY_POOLPORT, JSON_KEY_POOLPORT, "port", "poolPort", "poolport", "stratumPort"}), 0, 65535);
+    Settings->PoolPort = constrain(getJsonInt(json, Settings->PoolPort, {JSON_SPIFFS_KEY_POOLPORT, JSON_KEY_POOLPORT, "port", "poolPort", "poolport", "stratumPort"}, &matched), 0, 65535);
 
     // Pool credentials
     const char* passKey = nullptr;
     if (hasAnyKey(json, {JSON_SPIFFS_KEY_POOLPASS, JSON_KEY_POOLPASS, "poolPass", "poolpass", "pass", "stratumPassword", "PrimaryPassword"}, &passKey) ||
         (!hasWifiSsidKey && hasAnyKey(json, {"password"}, &passKey))) {
+        matched = true;
         String pass = json[passKey].as<String>();
         if (!isMaskedSecret(pass)) {
             strncpy(Settings->PoolPassword, pass.c_str(), sizeof(Settings->PoolPassword) - 1);
@@ -320,7 +313,7 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
         }
     }
 
-    String wallet = getJsonString(json, {JSON_SPIFFS_KEY_WALLETID, JSON_KEY_WALLETID, "wallet", "btcWallet", "btcwallet", "user", "btc", "stratumUser", "PrimaryAddress"});
+    String wallet = getJsonString(json, {JSON_SPIFFS_KEY_WALLETID, JSON_KEY_WALLETID, "wallet", "btcWallet", "btcwallet", "user", "btc", "stratumUser", "PrimaryAddress"}, &matched);
     wallet.trim();
     if (wallet.length() > 0) {
         strncpy(Settings->BtcWallet, wallet.c_str(), sizeof(Settings->BtcWallet) - 1);
@@ -330,12 +323,14 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     // Backup Pool
     const char* bpoolKey = nullptr;
     if (hasAnyKey(json, {JSON_SPIFFS_KEY_BACKUPPOOLURL, "backupPool", "backuppool", "bpool", "fallbackStratumURL", "SecondaryPool"}, &bpoolKey)) {
+        matched = true;
         Settings->BackupPoolAddress = parsePoolStr(json[bpoolKey].as<String>(), Settings->BackupPoolPort);
     }
-    Settings->BackupPoolPort = constrain(getJsonInt(json, Settings->BackupPoolPort, {JSON_SPIFFS_KEY_BACKUPPOOLPORT, "backupPort", "backupport", "bport", "fallbackStratumPort", "SecondaryPort"}), 0, 65535);
+    Settings->BackupPoolPort = constrain(getJsonInt(json, Settings->BackupPoolPort, {JSON_SPIFFS_KEY_BACKUPPOOLPORT, "backupPort", "backupport", "bport", "fallbackStratumPort", "SecondaryPort"}, &matched), 0, 65535);
 
     const char* bpassKey = nullptr;
     if (hasAnyKey(json, {JSON_SPIFFS_KEY_BACKUPPOOLPASS, "backupPoolPassword", "backuppoolpassword", "backupPass", "backuppass", "bpass", "bpoolpass", "fallbackStratumPassword", "SecondaryPassword"}, &bpassKey)) {
+        matched = true;
         String bpass = json[bpassKey].as<String>();
         if (!isMaskedSecret(bpass)) {
             strlcpy(Settings->BackupPoolPassword, bpass.c_str(), sizeof(Settings->BackupPoolPassword));
@@ -343,7 +338,7 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     }
 
     // Web UI password
-    String webPass = getJsonString(json, {JSON_SPIFFS_KEY_WEBPASSWORD, "webPass", "webpass", "WebPassword"});
+    String webPass = getJsonString(json, {JSON_SPIFFS_KEY_WEBPASSWORD, "webPass", "webpass", "WebPassword"}, &matched);
     if (webPass.length() > 0 && !isMaskedSecret(webPass)) {
         Settings->WebPassword = webPass;
     } else if (Settings->WebPassword.isEmpty()) {
@@ -351,10 +346,11 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     }
 
     // MQTT settings
-    Settings->MqttEnabled = getJsonBool(json, Settings->MqttEnabled, {JSON_SPIFFS_KEY_MQTTENABLED, "mqttEnabled", "mqttenabled", "mqtt"});
-    Settings->MqttPort = constrain(getJsonInt(json, Settings->MqttPort, {JSON_SPIFFS_KEY_MQTTPORT, "mqttPort", "mqttport", "mqport"}), 1, 65535);
+    Settings->MqttEnabled = getJsonBool(json, Settings->MqttEnabled, {JSON_SPIFFS_KEY_MQTTENABLED, "mqttEnabled", "mqttenabled", "mqtt"}, &matched);
+    Settings->MqttPort = constrain(getJsonInt(json, Settings->MqttPort, {JSON_SPIFFS_KEY_MQTTPORT, "mqttPort", "mqttport", "mqport"}, &matched), 1, 65535);
     const char* mqHostKey = nullptr;
     if (hasAnyKey(json, {JSON_SPIFFS_KEY_MQTTHOST, "mqttHost", "mqtthost", "mqhost"}, &mqHostKey)) {
+        matched = true;
         String h = json[mqHostKey].as<String>();
         h.trim();
         if (h.startsWith("mqtt://")) h = h.substring(7);
@@ -371,10 +367,12 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     }
     const char* mqUserKey = nullptr;
     if (hasAnyKey(json, {JSON_SPIFFS_KEY_MQTTUSER, "mqttUser", "mqttuser", "mquser"}, &mqUserKey)) {
+        matched = true;
         Settings->MqttUser = json[mqUserKey].as<String>();
     }
     const char* mqPassKey = nullptr;
     if (hasAnyKey(json, {JSON_SPIFFS_KEY_MQTTPASS, "mqttPass", "mqttpass", "mqpass", "mqttPassword"}, &mqPassKey)) {
+        matched = true;
         String mp = json[mqPassKey].as<String>();
         if (!isMaskedSecret(mp)) {
             Settings->MqttPass = mp;
@@ -382,12 +380,13 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     }
     const char* mqTopicKey = nullptr;
     if (hasAnyKey(json, {JSON_SPIFFS_KEY_MQTTTOPIC, "mqttTopic", "mqtttopic", "mqtopic"}, &mqTopicKey)) {
+        matched = true;
         Settings->MqttTopic = json[mqTopicKey].as<String>();
         Settings->MqttTopic.trim();
     }
 
     // Hostname (explicit or fallback to worker suffix from wallet if not yet set)
-    String host = getJsonString(json, {JSON_SPIFFS_KEY_HOSTNAME, "hostname", "Hostname", "hostName", "host"});
+    String host = getJsonString(json, {JSON_SPIFFS_KEY_HOSTNAME, "hostname", "Hostname", "hostName", "host"}, &matched);
     host.trim();
     if (host.length() > 0) {
         strncpy(Settings->Hostname, host.c_str(), sizeof(Settings->Hostname) - 1);
@@ -401,32 +400,32 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     }
 
     // Timezone
-    String tz = getJsonString(json, {JSON_SPIFFS_KEY_TIMEZONE, JSON_KEY_TIMEZONE, "timezone", "tz", "posix"});
+    String tz = getJsonString(json, {JSON_SPIFFS_KEY_TIMEZONE, JSON_KEY_TIMEZONE, "timezone", "tz", "posix"}, &matched);
     if (tz.length() > 0) Settings->Timezone = tz;
 
     // Currency
-    String cur = getJsonString(json, {JSON_SPIFFS_KEY_CURRENCY, JSON_KEY_CURRENCY, "currency", "cur"});
+    String cur = getJsonString(json, {JSON_SPIFFS_KEY_CURRENCY, JSON_KEY_CURRENCY, "currency", "cur"}, &matched);
     if (cur.length() > 0) Settings->Currency = currencyFor(cur).code;
 
     // Booleans
-    Settings->saveStats = getJsonBool(json, Settings->saveStats, {JSON_SPIFFS_KEY_STATS2NV, JSON_KEY_STATS2NV, "savestats", "saveStats", "stats"});
-    Settings->invertColors = getJsonBool(json, Settings->invertColors, {JSON_SPIFFS_KEY_INVCOLOR, JSON_KEY_INVCOLOR, "invert", "invertColors", "invertcolors"});
-    Settings->flipDisplay = getJsonBool(json, Settings->flipDisplay, {JSON_SPIFFS_KEY_FLIPDISPLAY, JSON_KEY_FLIPDISPLAY, "flip", "flipDisplay", "flipdisplay"});
-    Settings->autoBrightness = getJsonBool(json, Settings->autoBrightness, {JSON_SPIFFS_KEY_AUTOBRIGHTNESS, JSON_KEY_AUTOBRIGHTNESS, "autobrightness", "autoBrightness", "autobright", "auto_brightness"});
+    Settings->saveStats = getJsonBool(json, Settings->saveStats, {JSON_SPIFFS_KEY_STATS2NV, JSON_KEY_STATS2NV, "savestats", "saveStats", "stats"}, &matched);
+    Settings->invertColors = getJsonBool(json, Settings->invertColors, {JSON_SPIFFS_KEY_INVCOLOR, JSON_KEY_INVCOLOR, "invert", "invertColors", "invertcolors"}, &matched);
+    Settings->flipDisplay = getJsonBool(json, Settings->flipDisplay, {JSON_SPIFFS_KEY_FLIPDISPLAY, JSON_KEY_FLIPDISPLAY, "flip", "flipDisplay", "flipdisplay"}, &matched);
+    Settings->autoBrightness = getJsonBool(json, Settings->autoBrightness, {JSON_SPIFFS_KEY_AUTOBRIGHTNESS, JSON_KEY_AUTOBRIGHTNESS, "autobrightness", "autoBrightness", "autobright", "auto_brightness"}, &matched);
 
     // Display & timeouts
-    Settings->Brightness = constrain(getJsonInt(json, Settings->Brightness, {JSON_SPIFFS_KEY_BRIGHTNESS, JSON_KEY_BRIGHTNESS, "brightness", "bright"}), 0, 255);
-    int legacySec = getJsonInt(json, -1, {"screenOffTimeout", "screen_off_timeout", "screenOff"});
+    Settings->Brightness = constrain(getJsonInt(json, Settings->Brightness, {JSON_SPIFFS_KEY_BRIGHTNESS, JSON_KEY_BRIGHTNESS, "brightness", "bright"}, &matched), 0, 255);
+    int legacySec = getJsonInt(json, -1, {"screenOffTimeout", "screen_off_timeout", "screenOff"}, &matched);
     if (legacySec >= 0) {
         Settings->ScreenTimeout = constrain((legacySec + 59) / 60, 0, 1440);
     }
-    Settings->ScreenTimeout = constrain(getJsonInt(json, Settings->ScreenTimeout, {JSON_SPIFFS_KEY_SCREENTIMEOUT, "screenTimeout", "ScreenTimeout", "timeout", "screenoff"}), 0, 1440);
-    Settings->nightDim = getJsonBool(json, Settings->nightDim, {JSON_SPIFFS_KEY_NIGHTDIM, "nightDim", "nightdim"});
-    Settings->NightBrightness = constrain(getJsonInt(json, Settings->NightBrightness, {JSON_SPIFFS_KEY_NIGHTBRIGHTNESS, "nightBrightness", "NightBrightness", "nightbright", "nightbrightness"}), 1, 255);
-    Settings->NightFade = constrain(getJsonInt(json, Settings->NightFade, {JSON_SPIFFS_KEY_NIGHTFADE, "nightFade", "NightFade", "nightfade"}), 1, 240);
+    Settings->ScreenTimeout = constrain(getJsonInt(json, Settings->ScreenTimeout, {JSON_SPIFFS_KEY_SCREENTIMEOUT, "screenTimeout", "ScreenTimeout", "timeout", "screenoff"}, &matched), 0, 1440);
+    Settings->nightDim = getJsonBool(json, Settings->nightDim, {JSON_SPIFFS_KEY_NIGHTDIM, "nightDim", "nightdim"}, &matched);
+    Settings->NightBrightness = constrain(getJsonInt(json, Settings->NightBrightness, {JSON_SPIFFS_KEY_NIGHTBRIGHTNESS, "nightBrightness", "NightBrightness", "nightbright", "nightbrightness"}, &matched), 1, 255);
+    Settings->NightFade = constrain(getJsonInt(json, Settings->NightFade, {JSON_SPIFFS_KEY_NIGHTFADE, "nightFade", "NightFade", "nightfade"}, &matched), 1, 240);
 
     // City (accepts "lat,lon" or a city name from kCities)
-    String city = getJsonString(json, {"city", "City"});
+    String city = getJsonString(json, {"city", "City"}, &matched);
     city.trim();
     if (city.length() > 0) {
         int comma = city.indexOf(',');
@@ -443,14 +442,15 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
             }
         }
     }
-    Settings->Latitude = constrain(getJsonFloat(json, Settings->Latitude, {JSON_SPIFFS_KEY_LATITUDE, "latitude", "lat"}), -90.0f, 90.0f);
-    Settings->Longitude = constrain(getJsonFloat(json, Settings->Longitude, {JSON_SPIFFS_KEY_LONGITUDE, "longitude", "lon"}), -180.0f, 180.0f);
+    Settings->Latitude = constrain(getJsonFloat(json, Settings->Latitude, {JSON_SPIFFS_KEY_LATITUDE, "latitude", "lat"}, &matched), -90.0f, 90.0f);
+    Settings->Longitude = constrain(getJsonFloat(json, Settings->Longitude, {JSON_SPIFFS_KEY_LONGITUDE, "longitude", "lon"}, &matched), -180.0f, 180.0f);
 
     // Status LED & RGB LED (parsed unconditionally since fields exist on TSettings across all targets)
-    Settings->statusLed = getJsonBool(json, Settings->statusLed, {JSON_SPIFFS_KEY_STATUSLED, "statusLed", "statusled", "led"});
+    Settings->statusLed = getJsonBool(json, Settings->statusLed, {JSON_SPIFFS_KEY_STATUSLED, "statusLed", "statusled", "led"}, &matched);
 
     for (const char* k : {JSON_SPIFFS_KEY_LEDMODE, "ledmode", "ledModeName", "mode"}) {
         if (json.containsKey(k)) {
+            matched = true;
             if (json[k].is<const char*>()) {
                 String m = json[k].as<String>();
                 m.trim();
@@ -467,6 +467,7 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
     }
     for (const char* k : {JSON_SPIFFS_KEY_LEDCOLOR, "ledColorHex", "ledcolorhex", "ledcolor", "color"}) {
         if (json.containsKey(k)) {
+            matched = true;
             if (json[k].is<const char*>()) {
                 String c = json[k].as<String>();
                 c.trim();
@@ -496,11 +497,11 @@ bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings)
             break;
         }
     }
-    Settings->ledBrightness = constrain(getJsonInt(json, Settings->ledBrightness, {JSON_SPIFFS_KEY_LEDBRIGHTNESS, "ledbright", "ledbrightness", "led_brightness"}), 1, 255);
-    Settings->ledScreenOff = getJsonBool(json, Settings->ledScreenOff, {JSON_SPIFFS_KEY_LEDSCREENOFF, "ledscreen", "ledscreenoff", "led_screen_off"});
-    Settings->TempLimit = constrain(getJsonInt(json, Settings->TempLimit, {JSON_SPIFFS_KEY_TEMPLIMIT, "tempLimit", "templimit", "temp_limit"}), 0, 95);
+    Settings->ledBrightness = constrain(getJsonInt(json, Settings->ledBrightness, {JSON_SPIFFS_KEY_LEDBRIGHTNESS, "ledbright", "ledbrightness", "led_brightness"}, &matched), 1, 255);
+    Settings->ledScreenOff = getJsonBool(json, Settings->ledScreenOff, {JSON_SPIFFS_KEY_LEDSCREENOFF, "ledscreen", "ledscreenoff", "led_screen_off"}, &matched);
+    Settings->TempLimit = constrain(getJsonInt(json, Settings->TempLimit, {JSON_SPIFFS_KEY_TEMPLIMIT, "tempLimit", "templimit", "temp_limit"}, &matched), 0, 95);
 
-    return true;
+    return matched;
 }
 
 /// @brief Load settings from config file located in SPIFFS.
@@ -524,11 +525,9 @@ bool nvMemory::loadConfig(TSettings* Settings)
             if (configFile)
             {
                 Serial.println("SPIFS: Loading config file");
-                String raw = readFileToString(configFile);
-                configFile.close();
-
                 DynamicJsonDocument json(3072); // room for the MQTT fields too
-                DeserializationError error = deserializeJson(json, raw.c_str());
+                DeserializationError error = deserializeJson(json, configFile);
+                configFile.close();
                 if (!error)
                 {
                     bool ok = parseJsonConfig(json, Settings);
@@ -589,6 +588,7 @@ bool nvMemory::loadConfig(TSettings* Settings) { return false; }
 bool nvMemory::deleteConfig() { return false; }
 bool nvMemory::parseJsonConfig(const JsonDocument& json, TSettings* Settings) { return false; }
 void nvMemory::fillConfigJson(JsonDocument& doc, const TSettings& s, bool spiffsKeys, bool maskSecrets) {}
+void nvMemory::printConfigMasked(JsonDocument& json) {}
 bool nvMemory::init() { return false; }
 
 #endif //NVMEM_TYPE

@@ -244,16 +244,19 @@ String getBlockHeight(void){
 
 unsigned long mBTCUpdate = 0;
 
+static String formatCachedBTCpriceFor(const CurrencyInfo &cur){
+    char price_buffer[24];
+    snprintf(price_buffer, sizeof(price_buffer), "%s%u", cur.prefix, bitcoin_price);
+    return String(price_buffer);
+}
+
 static String formatCachedBTCprice(void){
     String curCode;
     {
         std::lock_guard<std::mutex> lock(g_settingsMutex);
         curCode = Settings.Currency;
     }
-    const CurrencyInfo &cur = currencyFor(curCode);
-    char price_buffer[24];
-    snprintf(price_buffer, sizeof(price_buffer), "%s%u", cur.prefix, bitcoin_price);
-    return String(price_buffer);
+    return formatCachedBTCpriceFor(currencyFor(curCode));
 }
 
 String getBTCprice(void){
@@ -298,7 +301,7 @@ String getBTCprice(void){
         }
     }  
   
-    return formatCachedBTCprice();
+    return formatCachedBTCpriceFor(cur);
 }
 
 unsigned long mPoolUpdate = 0;
@@ -371,14 +374,21 @@ static bool utcNow(int64_t &utc, bool seedRtc = true)
   return false;
 }
 
-long currentDstOffset(void)
+static bool getLocalTm(struct tm &timeinfo, bool sync)
 {
   int64_t utc;
-  if (!utcNow(utc, false))
-    return 0;
-  time_t t = (time_t)utc;
-  struct tm timeinfo;
+  if (!utcNow(utc, sync))
+    return false;
+  const time_t t = (time_t)utc;
   localtime_r(&t, &timeinfo);
+  return true;
+}
+
+long currentDstOffset(void)
+{
+  struct tm timeinfo;
+  if (!getLocalTm(timeinfo, false))
+    return 0;
   return timeinfo.tm_isdst > 0 ? 3600 : 0;
 }
 
@@ -396,12 +406,9 @@ uint32_t getBlockHeightValue(void) { return mHeightUpdate != 0 ? s_blockHeight :
 // Local date and time WITHOUT ever starting an NTP request: for the web server task.
 bool getLocalClock(int &hour, int &minute, int &second, int &day, int &month, int &year)
 {
-  int64_t utc;
-  if (!utcNow(utc, false)) // web server task: never touches the RTC chip itself
-    return false;
-  time_t t = (time_t)utc;
   struct tm timeinfo;
-  localtime_r(&t, &timeinfo);
+  if (!getLocalTm(timeinfo, false)) // web server task: never touches the RTC chip itself
+    return false;
   hour = timeinfo.tm_hour;
   minute = timeinfo.tm_min;
   second = timeinfo.tm_sec;
@@ -413,11 +420,8 @@ bool getLocalClock(int &hour, int &minute, int &second, int &day, int &month, in
 unsigned int getBTCpriceValue(void) { return bitcoin_price; }
 
 void getTime(unsigned long* currentHours, unsigned long* currentMinutes, unsigned long* currentSeconds){
-  int64_t utc;
-  if (utcNow(utc, true)) {
-    time_t t = (time_t)utc;
-    struct tm timeinfo;
-    localtime_r(&t, &timeinfo);
+  struct tm timeinfo;
+  if (getLocalTm(timeinfo, true)) {
     *currentHours = timeinfo.tm_hour;
     *currentMinutes = timeinfo.tm_min;
     *currentSeconds = timeinfo.tm_sec;
@@ -438,11 +442,8 @@ bool getUtcTime(time_t &utc, bool sync){
 }
 
 String getDate(){
-  int64_t utc;
-  if (utcNow(utc, true)) {
-    time_t t = (time_t)utc;
-    struct tm timeinfo;
-    localtime_r(&t, &timeinfo);
+  struct tm timeinfo;
+  if (getLocalTm(timeinfo, true)) {
     char currentDate[20];
     snprintf(currentDate, sizeof(currentDate), "%02d/%02d/%04d", timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
     return String(currentDate);
@@ -700,7 +701,7 @@ static bool heliosJudgeAnswer(int httpCode, int workers) {
     return true;
 }
 
-String getPoolAPIUrl(void) {
+static String getPoolAPIUrlImpl(int *styleOut) {
     std::lock_guard<std::mutex> lock(s_poolApiMutex);
     // The pool being mined on: the main one, or the backup while it is down
     const String pool = activePoolAddress();
@@ -780,7 +781,18 @@ String getPoolAPIUrl(void) {
     }
     poolApiStyle = style;
     poolAPIUrl = url;
+    if (styleOut) *styleOut = style;
     return url;
+}
+
+String getPoolAPIUrl(void) {
+    return getPoolAPIUrlImpl(nullptr);
+}
+
+static String formatPoolSuffix(double val) {
+    char buf[16] = {0};
+    suffix_string(val, buf, sizeof(buf), 0);
+    return String(buf);
 }
 
 pool_data getPoolData(void){
@@ -820,9 +832,7 @@ pool_data getPoolData(void){
               apiStyle = poolApiStyle;
           }
           if (apiUrl.isEmpty() || (heliosPool && heliosRegionStale())) {
-              apiUrl = getPoolAPIUrl();
-              std::lock_guard<std::mutex> lock(s_poolApiMutex);
-              apiStyle = poolApiStyle;
+              apiUrl = getPoolAPIUrlImpl(&apiStyle);
           }
           Serial.println("Pool API : " + apiUrl+btcWallet);
           http.begin(client, apiUrl+btcWallet);
@@ -859,9 +869,7 @@ pool_data getPoolData(void){
                 if (doc.containsKey("hashrate1hr")) pData.workersHash = doc["hashrate1hr"].as<String>();
                 if (doc.containsKey("bestever")) {
                   temp = doc["bestever"].as<double>();
-                  char best_diff_string[16] = {0};
-                  suffix_string(temp, best_diff_string, 16, 0);
-                  pData.bestDifficulty = String(best_diff_string);
+                  pData.bestDifficulty = formatPoolSuffix(temp);
                 }
                 doc.clear();
               } else if (apiStyle == POOL_API_HMPOOL) {
@@ -885,14 +893,10 @@ pool_data getPoolData(void){
                   totalhashs += worker["hashrate"].as<double>();
                 }
                 pData.workersCount = activeWorkers;
-                char totalhashs_s[16] = {0};
-                suffix_string(totalhashs, totalhashs_s, 16, 0);
-                pData.workersHash = String(totalhashs_s);
+                pData.workersHash = formatPoolSuffix(totalhashs);
                 if (doc.containsKey("best_share_difficulty")) {
                   temp = doc["best_share_difficulty"].as<double>();
-                  char best_diff_string[16] = {0};
-                  suffix_string(temp, best_diff_string, 16, 0);
-                  pData.bestDifficulty = String(best_diff_string);
+                  pData.bestDifficulty = formatPoolSuffix(temp);
                 }
                 doc.clear();
               } else {
@@ -914,15 +918,11 @@ pool_data getPoolData(void){
                   Serial.print(" - "+worker["hashRate"].as<String>()+": ");
                   Serial.println(totalhashs); */
                 }
-                char totalhashs_s[16] = {0};
-                suffix_string(totalhashs, totalhashs_s, 16, 0);
-                pData.workersHash = String(totalhashs_s);
+                pData.workersHash = formatPoolSuffix(totalhashs);
 
                 if (doc.containsKey("bestDifficulty")) {
-                temp = doc["bestDifficulty"].as<double>();
-                char best_diff_string[16] = {0};
-                suffix_string(temp, best_diff_string, 16, 0);
-                pData.bestDifficulty = String(best_diff_string);
+                  temp = doc["bestDifficulty"].as<double>();
+                  pData.bestDifficulty = formatPoolSuffix(temp);
                 }
                 doc.clear();
               }
@@ -985,9 +985,15 @@ void poolSettingsChanged(void) {
 
 void applyPendingSettings(void) {
     String tz;
+    bool currencyChanged = false;
     {
         std::lock_guard<std::mutex> lock(g_settingsMutex);
         tz = Settings.Timezone;
+        if (s_newCurrency) {
+            Settings.Currency = s_newCurrency;
+            s_newCurrency = nullptr;
+            currencyChanged = true;
+        }
     }
     if (tz != s_appliedTimezone) {
         String posixTz = getPosixTz(tz);
@@ -997,15 +1003,6 @@ void applyPendingSettings(void) {
         Serial.printf("Applied updated timezone: %s (POSIX: %s)\n", tz.c_str(), posixTz.c_str());
     }
 
-    bool currencyChanged = false;
-    {
-        std::lock_guard<std::mutex> lock(g_settingsMutex);
-        if (s_newCurrency) {
-            Settings.Currency = s_newCurrency;
-            s_newCurrency = nullptr;
-            currencyChanged = true;
-        }
-    }
     if (currencyChanged) {
         bitcoin_price = 0; // the last figure is in the old currency
         mBTCUpdate = 0;    // fetch the price again next time it's shown

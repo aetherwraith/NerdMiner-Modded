@@ -15,15 +15,45 @@
 #endif
 #endif
 
+static inline void waitIfPaused(bool checkTlsPause)
+{
+  while (g_otaUpdating)
+  {
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  if (checkTlsPause)
+  {
+    while (g_tlsPauseCount.load(std::memory_order_acquire) > 0)
+    {
+      esp_task_wdt_reset();
+      vTaskDelay(1);
+    }
+  }
+}
+
+static inline bool claimActiveJob(std::atomic<uint32_t> &nextIdx, uint32_t chunk, uint32_t limit,
+                                  uint32_t &idxOut, ActiveJob &jobOut)
+{
+  std::lock_guard<std::mutex> lock(s_job_mutex);
+  const uint8_t slot = s_activeJobSlot;
+  if (slot >= 2)
+    return false;
+  const uint32_t claimed = nextIdx.fetch_add(chunk, std::memory_order_relaxed);
+  if (claimed >= limit)
+    return false;
+  jobOut = s_jobs[slot];
+  idxOut = claimed;
+  return true;
+}
+
 void minerWorkerSw(void * task_id)
 {
   unsigned int miner_id = (uint32_t)task_id;
   Serial.printf("[MINER] %d Started minerWorkerSw Task!\n", miner_id);
 
   uint8_t hash[32];
-  uint32_t midstate[8];
-  uint32_t bake[16];
-  uint8_t tail[16];
+  ActiveJob aj;
   uint32_t wdt_counter = 0;
   #ifdef DEBUG_MINING
   volatile uint32_t *myDebugCounter = &debugHashesSw[miner_id & 1];
@@ -31,41 +61,18 @@ void minerWorkerSw(void * task_id)
 
   while (1)
   {
-    while (g_otaUpdating) {
-      esp_task_wdt_reset();
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
+    waitIfPaused(false);
 
-    uint32_t job_id = 0, nonce_base = 0, sw_idx = 0;
-    double job_difficulty = 0.0;
-    bool has_job = false;
-    {
-      std::lock_guard<std::mutex> lock(s_job_mutex);
-      const uint8_t slot = s_activeJobSlot;
-      if (slot < 2)
-      {
-        const uint32_t claimed = s_swNextIndex.fetch_add(NONCE_PER_JOB_SW, std::memory_order_relaxed);
-        if (claimed < 0x80000000u - NONCE_PER_JOB_SW)
-        {
-          const ActiveJob &aj = s_jobs[slot];
-          job_id = aj.id;
-          nonce_base = aj.nonce_base;
-          job_difficulty = aj.difficulty;
-          memcpy(midstate, aj.midstate, sizeof(midstate));
-          memcpy(bake, aj.bake, sizeof(bake));
-          memcpy(tail, aj.tail, sizeof(tail));
-          sw_idx = claimed;
-          has_job = true;
-        }
-      }
-    }
+    uint32_t sw_idx = 0;
+    const bool has_job = claimActiveJob(s_swNextIndex, NONCE_PER_JOB_SW, 0x80000000u - NONCE_PER_JOB_SW,
+                                        sw_idx, aj);
 
     if (has_job)
     {
       uint32_t done = NONCE_PER_JOB_SW;
       for (uint32_t outer = 0; outer < NONCE_PER_JOB_SW; outer += 128)
       {
-        if (s_working_current_job_id.load(std::memory_order_relaxed) != job_id)
+        if (s_working_current_job_id.load(std::memory_order_relaxed) != aj.id)
         {
           done = outer;
           break;
@@ -73,22 +80,22 @@ void minerWorkerSw(void * task_id)
         for (uint32_t inner = 0; inner < 128; ++inner)
         {
           const uint32_t n = outer + inner;
-          const uint32_t nonce = swNonce(nonce_base, sw_idx + n);
-          ((uint32_t *)(tail + 12))[0] = nonce;
+          const uint32_t nonce = swNonce(aj.nonce_base, sw_idx + n);
+          ((uint32_t *)(aj.tail + 12))[0] = nonce;
           #ifdef DEBUG_MINING
           (*myDebugCounter)++;
           #endif
 #if defined(NERD_SW_ASM)
-          if (nerd_sha256d_prefilter(midstate, tail, bake) &&
-              nerd_sha256d_baked(midstate, tail, bake, hash))
+          if (nerd_sha256d_prefilter(aj.midstate, aj.tail, aj.bake) &&
+              nerd_sha256d_baked(aj.midstate, aj.tail, aj.bake, hash))
 #else
-          if (nerd_sha256d_baked(midstate, tail, bake, hash))
+          if (nerd_sha256d_baked(aj.midstate, aj.tail, aj.bake, hash))
 #endif
           {
             const double diff_hash = diff_from_target(hash);
             updateBestDiff(diff_hash);
-            if (diff_hash > job_difficulty)
-              submitShareResult(job_id, nonce, diff_hash, hash);
+            if (diff_hash > aj.difficulty)
+              submitShareResult(aj.id, nonce, diff_hash, hash);
           }
         }
       }
@@ -186,7 +193,7 @@ static inline void nerd_sha_hal_wait_idle()
 }
 
 #if defined(PIPELINED_S3_MINING) && defined(CONFIG_IDF_TARGET_ESP32S3)
-static uint32_t __attribute__((noinline, optimize("O2")))
+static uint32_t IRAM_ATTR __attribute__((noinline, optimize("O2")))
 s3_pl_mine(const uint32_t *mid, const uint32_t *tail, uint32_t nonce, uint32_t count, bool *hit)
 {
   volatile uint32_t *const text = (volatile uint32_t *)SHA_TEXT_BASE;
@@ -295,10 +302,7 @@ void minerWorkerHw(void * task_id)
   Serial.printf("[MINER] %d Started minerWorkerHw Task!\n", miner_id);
 
   uint8_t hash[32];
-  uint32_t digest_mid[8];
-  uint32_t sw_mid[8];
-  uint32_t sw_bake[16];
-  uint8_t sha_buffer[16];
+  ActiveJob aj;
   uint32_t wdt_counter = 0;
 
 #if defined(PIPELINED_S3_MINING) && defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -308,39 +312,11 @@ void minerWorkerHw(void * task_id)
 
   while (1)
   {
-    while (g_otaUpdating) {
-      esp_task_wdt_reset();
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    while (g_tlsPauseCount.load(std::memory_order_acquire) > 0) {
-      esp_task_wdt_reset();
-      vTaskDelay(1);
-    }
+    waitIfPaused(true);
 
-    uint32_t job_id = 0, nonce_base = 0, hw_idx = 0;
-    double job_difficulty = 0.0;
-    bool has_job = false;
-    {
-      std::lock_guard<std::mutex> lock(s_job_mutex);
-      const uint8_t slot = s_activeJobSlot;
-      if (slot < 2)
-      {
-        const uint32_t claimed = s_hwNextIndex.fetch_add(NONCE_PER_JOB_HW, std::memory_order_relaxed);
-        if (claimed < 0x80000000u - NONCE_PER_JOB_HW)
-        {
-          const ActiveJob &aj = s_jobs[slot];
-          job_id = aj.id;
-          nonce_base = aj.nonce_base;
-          job_difficulty = aj.difficulty;
-          memcpy(digest_mid, aj.hw_midstate, sizeof(digest_mid));
-          memcpy(sw_mid, aj.midstate, sizeof(sw_mid));
-          memcpy(sw_bake, aj.bake, sizeof(sw_bake));
-          memcpy(sha_buffer, aj.tail, sizeof(sha_buffer));
-          hw_idx = claimed;
-          has_job = true;
-        }
-      }
-    }
+    uint32_t hw_idx = 0;
+    const bool has_job = claimActiveJob(s_hwNextIndex, NONCE_PER_JOB_HW, 0x80000000u - NONCE_PER_JOB_HW,
+                                        hw_idx, aj);
 
     if (has_job)
     {
@@ -360,17 +336,17 @@ void minerWorkerHw(void * task_id)
           if (want > end_pos - pos)
             want = end_pos - pos;
           bool hit = false;
-          pos += s3_pl_mine(digest_mid, (const uint32_t *)sha_buffer, hwNonce(nonce_base, hw_idx + pos), want, &hit);
+          pos += s3_pl_mine(aj.hw_midstate, (const uint32_t *)aj.tail, hwNonce(aj.nonce_base, hw_idx + pos), want, &hit);
 
           if (hit)
           {
             #ifdef DEBUG_MINING
             debugPipelinedHits++;
             #endif
-            const uint32_t cand = hwNonce(nonce_base, hw_idx + pos - 1);
-            ((uint32_t *)(sha_buffer + 12))[0] = cand;
+            const uint32_t cand = hwNonce(aj.nonce_base, hw_idx + pos - 1);
+            ((uint32_t *)(aj.tail + 12))[0] = cand;
             uint8_t sw_hash[32];
-            bool confirmed = nerd_sha256d_baked(sw_mid, sha_buffer, sw_bake, sw_hash);
+            bool confirmed = nerd_sha256d_baked(aj.midstate, aj.tail, aj.bake, sw_hash);
             #ifdef DEBUG_MINING
             if (confirmed)
               debugPipelinedRealHits++;
@@ -379,16 +355,16 @@ void minerWorkerHw(void * task_id)
             #endif
             const double cand_diff = confirmed && isSha256Valid(sw_hash) ? diff_from_target(sw_hash) : 0.0;
             updateBestDiff(cand_diff);
-            if (cand_diff > job_difficulty)
+            if (cand_diff > aj.difficulty)
             {
               #ifdef DEBUG_MINING
               debugPipelinedAccepted++;
               #endif
-              submitShareResult(job_id, cand, cand_diff, sw_hash);
+              submitShareResult(aj.id, cand, cand_diff, sw_hash);
             }
           }
 
-          if (s_working_current_job_id.load(std::memory_order_relaxed) != job_id ||
+          if (s_working_current_job_id.load(std::memory_order_relaxed) != aj.id ||
               g_tlsPauseCount.load(std::memory_order_acquire) > 0)
           {
             end_pos = pos;
@@ -422,12 +398,12 @@ void minerWorkerHw(void * task_id)
         uint32_t done = NONCE_PER_JOB_HW;
         for (uint32_t i = 0; i < NONCE_PER_JOB_HW; ++i)
         {
-          const uint32_t n = hwNonce(nonce_base, hw_idx + i);
+          const uint32_t n = hwNonce(aj.nonce_base, hw_idx + i);
           #ifdef DEBUG_MINING
           debugHashesHw++;
           #endif
-          nerd_sha_ll_write_digest(digest_mid);
-          nerd_sha_ll_fill_text_block_sha256(sha_buffer, n);
+          nerd_sha_ll_write_digest(aj.hw_midstate);
+          nerd_sha_ll_fill_text_block_sha256(aj.tail, n);
           REG_WRITE(SHA_CONTINUE_REG, 1);
 
           sha_ll_load(SHA2_256);
@@ -442,12 +418,12 @@ void minerWorkerHw(void * task_id)
             if (isSha256Valid(hash))
             {
               updateBestDiff(diff_hash);
-              if (diff_hash > job_difficulty)
-                submitShareResult(job_id, n, diff_hash, hash);
+              if (diff_hash > aj.difficulty)
+                submitShareResult(aj.id, n, diff_hash, hash);
             }
           }
           if ((uint8_t)(i & 0xFF) == 0 &&
-              (s_working_current_job_id.load(std::memory_order_relaxed) != job_id ||
+              (s_working_current_job_id.load(std::memory_order_relaxed) != aj.id ||
                g_tlsPauseCount.load(std::memory_order_acquire) > 0))
           {
             done = i + 1;
@@ -519,7 +495,7 @@ static inline void nerd_sha_ll_fill_text_block_sha256(const void *input_text)
         reg_addr_buf[i] = data_words[i];
 }
 
-static inline void nerd_sha_ll_fill_text_block_sha256_upper(const void *input_text, uint32_t nonce)
+static inline void nerd_sha_ll_fill_text_block_sha256_upper(const void *input_text, uint32_t nonce, bool bswapNonce = true)
 {
     uint32_t *data_words = (uint32_t *)input_text;
     uint32_t *reg_addr_buf = (uint32_t *)(SHA_TEXT_BASE);
@@ -527,7 +503,7 @@ static inline void nerd_sha_ll_fill_text_block_sha256_upper(const void *input_te
     reg_addr_buf[0]  = data_words[0];
     reg_addr_buf[1]  = data_words[1];
     reg_addr_buf[2]  = data_words[2];
-    reg_addr_buf[3]  = __builtin_bswap32(nonce);
+    reg_addr_buf[3]  = bswapNonce ? __builtin_bswap32(nonce) : nonce;
     reg_addr_buf[4]  = 0x80000000;
     for (int i = 5; i < 15; ++i)
         reg_addr_buf[i] = 0x00000000;
@@ -585,7 +561,7 @@ static uint32_t pl_mine_plain(volatile uint32_t *sha_base, pl_ctx_t *ctx)
     sha_ll_start_block(SHA2_256);
 
     nerd_sha_hal_wait_idle();
-    nerd_sha_ll_fill_text_block_sha256_upper(ctx->hdr + 16, __builtin_bswap32(ctx->nonce));
+    nerd_sha_ll_fill_text_block_sha256_upper(ctx->hdr + 16, ctx->nonce, false);
     sha_ll_continue_block(SHA2_256);
 
     nerd_sha_hal_wait_idle();
@@ -693,10 +669,7 @@ void minerWorkerHw(void * task_id)
   #ifndef PIPELINED_ASM_MINING
   uint8_t hash[32];
   #endif
-  uint8_t sha_buffer[80];
-  uint32_t sw_mid[8];
-  uint32_t sw_bake[16];
-  uint8_t sw_tail[16];
+  ActiveJob aj;
 
   #ifdef PIPELINED_ASM_MINING
   uint32_t pipelined_swapped_cursor = 0;
@@ -710,42 +683,22 @@ void minerWorkerHw(void * task_id)
 
   while (1)
   {
-    while (g_otaUpdating) {
-      esp_task_wdt_reset();
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    while (g_tlsPauseCount.load(std::memory_order_acquire) > 0) {
-      esp_task_wdt_reset();
-      vTaskDelay(1);
-    }
+    waitIfPaused(true);
 
-    uint32_t job_id = 0, nonce_base = 0, hw_idx = 0;
-    double job_difficulty = 0.0;
-    bool has_job = false;
-    {
-      std::lock_guard<std::mutex> lock(s_job_mutex);
-      const uint8_t slot = s_activeJobSlot;
-      if (slot < 2)
-      {
-        const uint32_t claimed = s_hwNextIndex.fetch_add(NONCE_PER_JOB_HW, std::memory_order_relaxed);
-        if (claimed < 0x7F000000u - NONCE_PER_JOB_HW)
-        {
-          const ActiveJob &aj = s_jobs[slot];
-          job_id = aj.id;
-          nonce_base = aj.nonce_base;
-          job_difficulty = aj.difficulty;
-          memcpy(sha_buffer, aj.sha_buffer_swap, sizeof(sha_buffer));
-          memcpy(sw_mid, aj.midstate, sizeof(sw_mid));
-          memcpy(sw_bake, aj.bake, sizeof(sw_bake));
-          memcpy(sw_tail, aj.tail, sizeof(sw_tail));
-          hw_idx = claimed;
-          has_job = true;
-        }
-      }
-    }
+    uint32_t hw_idx = 0;
+    const bool has_job = claimActiveJob(s_hwNextIndex, NONCE_PER_JOB_HW, 0x7F000000u - NONCE_PER_JOB_HW,
+                                        hw_idx, aj);
 
     if (has_job)
     {
+      if (s_working_current_job_id.load(std::memory_order_relaxed) != aj.id ||
+          g_tlsPauseCount.load(std::memory_order_acquire) > 0)
+      {
+        if (g_tlsPauseCount.load(std::memory_order_acquire) > 0)
+          vTaskDelay(1);
+      }
+      else
+      {
       #ifdef DEBUG_MINING
       if (debugChunkEndUs != 0)
       {
@@ -762,18 +715,18 @@ void minerWorkerHw(void * task_id)
       esp_sha_lock_engine(SHA2_256);
 #ifdef PIPELINED_ASM_MINING
       {
-        if (job_id != pipelined_last_job_id)
+        if (aj.id != pipelined_last_job_id)
         {
-          pipelined_last_job_id = job_id;
-          pipelined_swapped_cursor = __builtin_bswap32(nonce_base) | 0x80000000u;
+          pipelined_last_job_id = aj.id;
+          pipelined_swapped_cursor = __builtin_bswap32(aj.nonce_base) | 0x80000000u;
         }
 
-        memcpy(s_pl_ctx.hdr, sha_buffer, sizeof(s_pl_ctx.hdr));
+        memcpy(s_pl_ctx.hdr, aj.sha_buffer_swap, sizeof(s_pl_ctx.hdr));
         s_pl_ctx.nonce = pipelined_swapped_cursor;
         s_pl_ctx.budget = NONCE_PER_JOB_HW;
         s_pl_ctx.pad = 0x80000000u;
         s_pl_ctx.run = 1;
-        if (s_working_current_job_id.load(std::memory_order_relaxed) != job_id ||
+        if (s_working_current_job_id.load(std::memory_order_relaxed) != aj.id ||
             g_tlsPauseCount.load(std::memory_order_acquire) > 0)
           s_pl_ctx.run = 0;
 
@@ -790,9 +743,9 @@ void minerWorkerHw(void * task_id)
           #endif
 
           uint32_t cand_native_pl = __builtin_bswap32(s_pl_ctx.nonce - 1);
-          ((uint32_t *)(sw_tail + 12))[0] = cand_native_pl;
+          ((uint32_t *)(aj.tail + 12))[0] = cand_native_pl;
           uint8_t sw_hash[32];
-          bool confirmed = nerd_sha256d_baked(sw_mid, sw_tail, sw_bake, sw_hash);
+          bool confirmed = nerd_sha256d_baked(aj.midstate, aj.tail, aj.bake, sw_hash);
           pl_health(confirmed);
           #ifdef DEBUG_MINING
           if (confirmed)
@@ -803,12 +756,12 @@ void minerWorkerHw(void * task_id)
 
           const double cand_diff = confirmed && isSha256Valid(sw_hash) ? diff_from_target(sw_hash) : 0.0;
           updateBestDiff(cand_diff);
-          if (cand_diff > job_difficulty)
+          if (cand_diff > aj.difficulty)
           {
             #ifdef DEBUG_MINING
             debugPipelinedAccepted++;
             #endif
-            submitShareResult(job_id, cand_native_pl, cand_diff, sw_hash);
+            submitShareResult(aj.id, cand_native_pl, cand_diff, sw_hash);
           }
 
           #ifdef DEBUG_MINING
@@ -829,15 +782,15 @@ void minerWorkerHw(void * task_id)
         uint32_t done = NONCE_PER_JOB_HW;
         for (uint32_t i = 0; i < NONCE_PER_JOB_HW; ++i)
         {
-          const uint32_t nonce = hwNonce(nonce_base, hw_idx + i);
+          const uint32_t nonce = hwNonce(aj.nonce_base, hw_idx + i);
           #ifdef DEBUG_MINING
           debugHashesHw++;
           #endif
-          nerd_sha_ll_fill_text_block_sha256(sha_buffer);
+          nerd_sha_ll_fill_text_block_sha256(aj.sha_buffer_swap);
           sha_ll_start_block(SHA2_256);
 
           nerd_sha_hal_wait_idle();
-          nerd_sha_ll_fill_text_block_sha256_upper(sha_buffer + 64, nonce);
+          nerd_sha_ll_fill_text_block_sha256_upper(aj.sha_buffer_swap + 16, nonce);
           sha_ll_continue_block(SHA2_256);
 
           nerd_sha_hal_wait_idle();
@@ -855,12 +808,12 @@ void minerWorkerHw(void * task_id)
             if (isSha256Valid(hash))
             {
               updateBestDiff(diff_hash);
-              if (diff_hash > job_difficulty)
-                submitShareResult(job_id, nonce, diff_hash, hash);
+              if (diff_hash > aj.difficulty)
+                submitShareResult(aj.id, nonce, diff_hash, hash);
             }
           }
           if ((uint8_t)(i & 0xFF) == 0 &&
-              (s_working_current_job_id.load(std::memory_order_relaxed) != job_id ||
+              (s_working_current_job_id.load(std::memory_order_relaxed) != aj.id ||
                g_tlsPauseCount.load(std::memory_order_acquire) > 0))
           {
             done = i + 1;
@@ -879,6 +832,7 @@ void minerWorkerHw(void * task_id)
       #ifdef DEBUG_MINING
       debugChunkEndUs = esp_timer_get_time();
       #endif
+      }
     } else
       vTaskDelay(2 / portTICK_PERIOD_MS);
 

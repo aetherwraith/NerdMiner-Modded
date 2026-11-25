@@ -35,8 +35,8 @@
 #include "rgbLed.h"
 #include "pulseUi.h"
 
-#define WIDTH 130
-#define HEIGHT 170
+#define WIDTH 320
+#define HEIGHT 240
 
 extern nvMemory nvMem;
 extern monitor_data mMonitor;
@@ -243,19 +243,7 @@ static int uiStatus() { return pulseUiStatus(mMonitor.NerdStatus, lastKh); }
 
 static void noteHashrate(float kh)
 {
-  lastKh = kh;
-  unsigned long now = millis();
-  if (histCount != 0 && now - histLastMs < HIST_EVERY_MS)
-    return;
-  histLastMs = now;
-  if (histCount < HIST_N)
-    hist[histCount++] = kh;
-  else
-  {
-    memmove(hist, hist + 1, (HIST_N - 1) * sizeof(float));
-    hist[HIST_N - 1] = kh;
-  }
-  histEpoch++;
+  pulseNoteHashrate(kh, lastKh, hist, HIST_N, histCount, histLastMs, HIST_EVERY_MS, histEpoch);
 }
 
 // -------------------------------------------------------------- gauge ring --
@@ -318,8 +306,7 @@ static void drawHeader(const HdrV &h)
   }
   int cw = textW(label, 9) + 14;
   int cx = wm + 10;
-  wgt.fillSmoothRoundRect(cx, 6, cw, 15, 7, mix565(C_BG, col, 46), C_BG);
-  text(wgt, label, cx + cw / 2, 8, 9, col, mix565(C_BG, col, 46), Align::TopCenter);
+  pulseDrawStatusBadge(wgt, render, label, cx, 6, cw, 15, 7, 9, col, C_BG);
 
   // time (right)
   text(wgt, h.time.c_str(), W - 8, 5, 14, C_TEXT, C_BG, Align::TopRight);
@@ -759,32 +746,12 @@ static int restorePage = 0; // applied on the first data tick (the monitor reset
 
 static void loadUiPrefs()
 {
-  Preferences p;
-  if (!p.begin(UI_PREFS_NS, true))
-    return; // namespace not created yet: defaults
-  accentIdx = p.getUChar("accent", 0) % ACCENT_COUNT;
-  int page = p.getUChar("page", 0);
-  p.end();
-  cAcc = PULSE_ACCENTS[accentIdx].main;
-  cAlt = PULSE_ACCENTS[accentIdx].alt;
-  savedAccent = accentIdx;
-  savedPage = restorePage = page;
+  pulseLoadUiPrefs(UI_PREFS_NS, accentIdx, cAcc, cAlt, savedAccent, savedPage, restorePage);
 }
 
 static void saveUiPrefs()
 {
-  int page = currentDisplayDriver->current_cyclic_screen;
-  if (page == savedPage && accentIdx == savedAccent)
-    return;
-  Preferences p;
-  if (p.begin(UI_PREFS_NS, false))
-  {
-    p.putUChar("accent", accentIdx);
-    p.putUChar("page", page);
-    p.end();
-  }
-  savedAccent = accentIdx;
-  savedPage = page;
+  pulseSaveUiPrefs(UI_PREFS_NS, accentIdx, currentDisplayDriver->current_cyclic_screen, savedAccent, savedPage);
 }
 
 // -------------------------------------------------------------- live data --
@@ -1044,7 +1011,7 @@ static void updateAutoBrightness(unsigned long now)
   targetPwm = constrain(targetPwm, 10, 255);
   if (getThermalThrottled())
   {
-    const int thermalCap = Settings.NightBrightness > 0 ? min(Settings.Brightness, Settings.NightBrightness) : min(Settings.Brightness, 40);
+    const int thermalCap = thermalBacklightCap();
     if (targetPwm > thermalCap)
       targetPwm = thermalCap;
   }
@@ -1160,13 +1127,7 @@ void esp32_2432S028R_AlternateScreenState(void)
 // (the in-memory Settings can hold portal defaults that must not be saved).
 static void persistFlip(bool flipped)
 {
-  Settings.flipDisplay = flipped;
-  TSettings stored;
-  if (nvMem.loadConfig(&stored))
-  {
-    stored.flipDisplay = flipped;
-    nvMem.saveConfig(&stored);
-  }
+  pulsePersistFlip(nvMem, flipped);
 }
 
 void esp32_2432S028R_AlternateRotation(void)

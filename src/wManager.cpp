@@ -422,6 +422,13 @@ void wifiManagerProcess() {
     }
 
     if (newStatus == WL_CONNECTED) {
+        static uint32_t s_mdnsLastCheckMs = 0;
+        const uint32_t nowMs = millis();
+        if (s_mdnsStarted && nowMs - s_mdnsLastCheckMs < 2000) {
+            return;
+        }
+        s_mdnsLastCheckMs = nowMs;
+
         char rawHost[sizeof(Settings.Hostname)];
         {
             std::lock_guard<std::mutex> lock(g_settingsMutex);

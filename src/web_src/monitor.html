@@ -486,13 +486,29 @@ function update(j){
   live.push(j.hashrate_khs||0);if(live.length>40)live.shift();
 }
 
-var hist=[],step=30,live=[];
+var hist=[],step=30,live=[],drawColors=null;
+function getDrawColors(){
+  if(!drawColors){
+    var cs=getComputedStyle(document.documentElement);
+    drawColors={col:cs.getPropertyValue('--acc').trim(),mut:cs.getPropertyValue('--mut').trim(),grd:cs.getPropertyValue('--grid').trim()};
+  }
+  return drawColors;
+}
+if(window.matchMedia){
+  try{
+    var mq=window.matchMedia('(prefers-color-scheme:light)');
+    if(mq.addEventListener)mq.addEventListener('change',function(){drawColors=null;if(activeTab==='mon')draw()});
+  }catch(e){}
+}
 function draw(){
   var cv=$('cv'),r=cv.getBoundingClientRect(),dp=window.devicePixelRatio||1;
-  if(!r.width)return;cv.width=r.width*dp;cv.height=r.height*dp;
+  if(!r.width)return;
+  var nw=Math.round(r.width*dp),nh=Math.round(r.height*dp);
+  if(cv.width!==nw)cv.width=nw;
+  if(cv.height!==nh)cv.height=nh;
   var g=cv.getContext('2d');g.setTransform(dp,0,0,dp,0,0);
-  var W=r.width,H=r.height,L=44,B=18,T=8,cs=getComputedStyle(document.documentElement);
-  var data=hist.length>1?hist:live,col=cs.getPropertyValue('--acc').trim(),mut=cs.getPropertyValue('--mut').trim(),grd=cs.getPropertyValue('--grid').trim();
+  var W=r.width,H=r.height,L=44,B=18,T=8,dc=getDrawColors();
+  var data=hist.length>1?hist:live,col=dc.col,mut=dc.mut,grd=dc.grd;
   g.clearRect(0,0,W,H);g.font='11px system-ui,sans-serif';g.fillStyle=mut;
   if(data.length<2){g.fillText(t('collecting'),L,H/2);return}
   var mx=Math.max.apply(null,data),mn=Math.min.apply(null,data);if(mx-mn<mx*0.1){mn=Math.max(0,mx*0.9)}if(mx<=mn)mx=mn+1;
@@ -673,20 +689,24 @@ $('btn-scan').addEventListener('click',async function(){
   $('btn-scan').disabled=true;
   var found=0,done=0;
   set('scan-msg','Scanning '+pfx+'1–254 (0 / 254)…');
-  var ips=[];
-  for(var i=1;i<=254;i++)ips.push(pfx+i);
-  for(var b=0;b<ips.length;b+=25){
-    var batch=ips.slice(b,b+25);
-    await Promise.all(batch.map(function(ip){
-      return getJSON('http://'+ip+'/probe',1200).then(function(d){
+  var queue=[];
+  for(var i=1;i<=254;i++)queue.push(pfx+i);
+  async function scanWorker(){
+    while(queue.length){
+      var ip=queue.shift();
+      await getJSON('http://'+ip+'/probe',1200).then(function(d){
         if(d&&(d.nerdminer===true||(typeof d.hr==='number'&&typeof d.ut==='number'))){
           var selfIp=(ip===localWifiIp&&fleetPeers.indexOf(normPeer(location.host||location.hostname))>=0);
           if(!selfIp&&fleetPeers.indexOf(ip)<0){fleetPeers.push(ip);found++}
         }
-      },function(){}).then(function(){done++});
-    }));
-    set('scan-msg','Scanning '+pfx+'1–254… '+done+' / 254 ('+found+' new found)');
+      },function(){});
+      done++;
+      if(done%5===0||done===254)set('scan-msg','Scanning '+pfx+'1–254… '+done+' / 254 ('+found+' new found)');
+    }
   }
+  var workers=[];
+  for(var w=0;w<25;w++)workers.push(scanWorker());
+  await Promise.all(workers);
   savePeers();
   scanning=false;
   $('btn-scan').disabled=false;
@@ -996,12 +1016,12 @@ $('btn-bcast-go').addEventListener('click',async function(){
   }
   if($('bc-disp-en').checked){
     var brVal=parseInt($('bc-br').value,10);
-    payload.brightness=(!isNaN(brVal)&&brVal!==undefined&&brVal!==null)?brVal:250;
+    payload.brightness=!isNaN(brVal)?brVal:250;
     var toVal=parseInt($('bc-to').value,10);
-    payload.screenTimeout=(!isNaN(toVal)&&toVal!==undefined&&toVal!==null)?toVal:0;
+    payload.screenTimeout=!isNaN(toVal)?toVal:0;
     payload.nightDim=$('bc-nd').value==='1';
     var nbrVal=parseInt($('bc-nbr').value,10);
-    payload.nightBrightness=(!isNaN(nbrVal)&&nbrVal!==undefined&&nbrVal!==null)?nbrVal:40;
+    payload.nightBrightness=!isNaN(nbrVal)?nbrVal:40;
   }
   if($('bc-loc-en').checked){
     if($('bc-tz').value.trim())payload.timezone=$('bc-tz').value.trim();
@@ -1057,7 +1077,26 @@ function renderOtaTargets(){
   });
 }
 
-function uploadFirmwareToPeer(peer,file,pw,stEl){
+async function uploadFirmwareToPeer(peer,file,pw,stEl,expectedBoard){
+  if(stEl)stEl.textContent='Preflight…';
+  try{
+    var info=await getJSON(peerBaseUrl(peer)+'/api/system/update',2500);
+    if(info){
+      if(info.hasDualOta===false){
+        if(stEl)stEl.textContent='❌ No Dual-OTA';
+        return;
+      }
+      if(expectedBoard&&info.boardModel&&info.boardModel!==expectedBoard){
+        if(stEl)stEl.textContent='❌ Board mismatch ('+info.boardModel+')';
+        return;
+      }
+    }
+  }catch(e){
+    if(e&&e.message&&e.message.indexOf('HTTP 404')<0&&e.message.indexOf('HTTP ')===0){
+      if(stEl)stEl.textContent='❌ Preflight '+e.message;
+      return;
+    }
+  }
   return new Promise(function(resolve){
     var xhr=new XMLHttpRequest();
     xhr.open('POST',peerBaseUrl(peer)+'/update',true);
@@ -1087,6 +1126,11 @@ $('btn-fota-go').addEventListener('click',async function(){
   if(!confirm('Push '+f.name+' to '+cbs.length+' miner(s) (2 concurrent uploads at a time)?'))return;
   $('btn-fota-go').disabled=true;
   var pw=$('fota-auth').value;
+  var expectedBoard='';
+  try{
+    var localInfo=await getJSON('/api/system/update',2500);
+    if(localInfo&&localInfo.boardModel)expectedBoard=localInfo.boardModel;
+  }catch(e){}
   var queue=cbs.map(function(cb){return cb.dataset.peer});
   queue.forEach(function(p){var el=$('fota-st-'+p);if(el)el.textContent='Queued'});
 
@@ -1095,7 +1139,7 @@ $('btn-fota-go').addEventListener('click',async function(){
       var p=queue.shift();
       var el=$('fota-st-'+p);
       if(el)el.textContent='Starting…';
-      await uploadFirmwareToPeer(p,f,pw,el);
+      await uploadFirmwareToPeer(p,f,pw,el,expectedBoard);
     }
   }
   await Promise.all([worker(),worker()]);

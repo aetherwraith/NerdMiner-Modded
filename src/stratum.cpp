@@ -190,8 +190,11 @@ bool tx_mining_auth(WiFiClient& client, const char * user, const char * pass, un
     // Authorize
     id = getNextId(id);
     auth_id = id; // the pool's answer to this id says whether it took the wallet
+    char escUser[192], escPass[192];
+    jsonEscapeTo(user ? user : "", escUser, sizeof(escUser));
+    jsonEscapeTo(pass ? pass : "", escPass, sizeof(escPass));
     snprintf(payload, sizeof(payload), "{\"params\": [\"%s\", \"%s\"], \"id\": %lu, \"method\": \"mining.authorize\"}\n",
-      jsonEscape(String(user ? user : "")).c_str(), jsonEscape(String(pass ? pass : "")).c_str(), id);
+      escUser, escPass, id);
     
     Serial.printf("[WORKER] ==> Autorize work\n");
     // Not the payload itself: it holds the pool password
@@ -201,8 +204,6 @@ bool tx_mining_auth(WiFiClient& client, const char * user, const char * pass, un
         Serial.println("[WORKER] Authorize write failed");
         return false;
     }
-
-    vTaskDelay(200 / portTICK_PERIOD_MS); //Small delay
 
     // The answer is parsed with the other messages in the stratum loop
     // (runStratumWorker, auth_id).
@@ -388,13 +389,16 @@ bool tx_mining_submit(WiFiClient& client, const mining_subscribe& mWorker, const
     // Submit
     id = getNextId(id);
     submit_id = id;
+    char escName[192], escJobId[192];
+    jsonEscapeTo(mWorker.wName, escName, sizeof(escName));
+    jsonEscapeTo(mJob.job_id.c_str(), escJobId, sizeof(escJobId));
     if (useVersionBits) {
         char vbitsHex[9];
         snprintf(vbitsHex, sizeof(vbitsHex), "%08lx", (unsigned long)versionBits);
         snprintf(payload, sizeof(payload), "{\"id\":%lu,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]}\n",
             id,
-            jsonEscape(String(mWorker.wName)).c_str(),
-            jsonEscape(mJob.job_id).c_str(),
+            escName,
+            escJobId,
             mWorker.extranonce2.c_str(),
             mJob.ntime.c_str(),
             nonceHex,
@@ -403,8 +407,8 @@ bool tx_mining_submit(WiFiClient& client, const mining_subscribe& mWorker, const
     } else {
         snprintf(payload, sizeof(payload), "{\"id\":%lu,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]}\n",
             id,
-            jsonEscape(String(mWorker.wName)).c_str(),
-            jsonEscape(mJob.job_id).c_str(),
+            escName,
+            escJobId,
             mWorker.extranonce2.c_str(),
             mJob.ntime.c_str(),
             nonceHex

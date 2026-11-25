@@ -80,59 +80,61 @@ static std::vector<String> tokenize(const String &line)
 
 static void printHelp(void)
 {
-  Serial.println(F("\n================ NerdMiner USB Serial CLI ================"));
-  Serial.println(F("Status & Inspection:"));
-  Serial.println(F("  status                      - Display miner status, hashrate, ping, IP, heap"));
-  Serial.println(F("  probe                       - Print compact JSON probe for automated tooling"));
-  Serial.println(F("  identify [seconds]          - Flash screen & LED to physically locate miner"));
-  Serial.println(F("  config [get]                - Display current configuration in JSON format"));
-  Serial.println(F("  timezones [query]           - List supported timezones (optional search filter)"));
-  Serial.println();
-  Serial.println(F("Configuration Commands:"));
-  Serial.println(F("  set wifi <ssid> <pass>      - Configure WiFi network credentials and reboot"));
-  Serial.println(F("  set pool <host> [port]      - Set stratum mining pool host & port (applied live)"));
-  Serial.println(F("  set port <port>             - Set stratum mining pool port (applied live)"));
-  Serial.println(F("  set wallet <address>        - Set BTC payout address / worker (applied live)"));
-  Serial.println(F("  set pass <password>         - Set stratum pool password (default 'x')"));
-  Serial.println(F("  set bpool <host> [port]     - Set backup pool host & port (applied live)"));
-  Serial.println(F("  set bport <port>            - Set backup pool port (applied live)"));
-  Serial.println(F("  set bpass <password>        - Set backup pool password (applied live)"));
-  Serial.println(F("  set hostname <name>         - Set device network/DHCP hostname (applied live)"));
-  Serial.println(F("  set tz <timezone>           - Set timezone (e.g. Europe/London or POSIX string)"));
-  Serial.println(F("  set currency <currency>     - Set fiat price currency (e.g. usd, eur, gbp)"));
-  Serial.println(F("  set savestats <0|1>         - Enable (1) or disable (0) saving stats to flash"));
-  Serial.println(F("  set brightness <0-255>      - Set screen backlight brightness (0-255)"));
-  Serial.println(F("  set autobrightness <0|1>    - Enable (1) or disable (0) LDR auto-brightness"));
-  Serial.println(F("  set timeout <minutes>       - Backlight idle timeout (0 = never off)"));
-  Serial.println(F("  set nightdim <0|1>          - Enable (1) or disable (0) sunset/sunrise night dim"));
-  Serial.println(F("  set nightbright <1-255>     - Set night dim target brightness (1-255)"));
-  Serial.println(F("  set nightfade <1-240>       - Set night dim fade duration in minutes (1-240)"));
-  Serial.println(F("  set city <name>             - Set location by city name for sunset/sunrise"));
-  Serial.println(F("  set lat <deg> / lon <deg>   - Set latitude / longitude in decimal degrees"));
-  Serial.println(F("  set ledmode <off|status|on> - Set rear RGB LED mode (0=off, 1=status, 2=steady)"));
-  Serial.println(F("  set ledcolor <#rrggbb|name> - Set rear RGB LED color (e.g. #ff0000 or red)"));
-  Serial.println(F("  set ledbright <1-255>       - Set rear RGB LED brightness (1-255)"));
-  Serial.println(F("  set ledscreen <0|1>         - Turn LED off when screen is off (0|1)"));
-  Serial.println(F("  set mqtt <0|1>              - Enable (1) or disable (0) MQTT publishing"));
-  Serial.println(F("  set mqtthost <host>         - Set MQTT broker address (IP or hostname)"));
-  Serial.println(F("  set mqttport <port>         - Set MQTT broker port (default 1883)"));
-  Serial.println(F("  set mqttuser <user>         - Set MQTT broker username"));
-  Serial.println(F("  set mqttpass <pass>         - Set MQTT broker password"));
-  Serial.println(F("  set mqtttopic <topic>       - Set MQTT topic prefix"));
-  Serial.println(F("  set webpass <password>      - Set Web UI admin password"));
-  Serial.println(F("  set invert <0|1>            - Invert display colors (reboot required)"));
-  Serial.println(F("  set flip <0|1>              - Flip display 180 deg (reboot required)"));
-  Serial.println(F("  config json <json_payload>  - Apply entire configuration from JSON payload"));
-  Serial.println();
-  Serial.println(F("  ota status                  - Show OTA partitions and update status"));
-  Serial.println(F("  ota check                   - Check GitHub Releases for new version"));
-  Serial.println(F("  ota update [url|version]    - Download and flash OTA update in background"));
-  Serial.println(F("  save                        - Persist current settings to SPIFFS (/config.json)"));
-  Serial.println(F("  reset                       - Factory reset (erase config & WiFi credentials)"));
-  Serial.println(F("  restart | reboot            - Restart the device"));
-  Serial.println(F("  help                        - Show this command reference"));
-  Serial.println(F("Note: 'config set <key> <val>' is supported as an alias for 'set <key> <val>'."));
-  Serial.println(F("=========================================================="));
+  Serial.print(F(R"(
+================ NerdMiner USB Serial CLI ================
+Status & Inspection:
+  status                      - Display miner status, hashrate, ping, IP, heap
+  probe                       - Print compact JSON probe for automated tooling
+  identify [seconds]          - Flash screen & LED to physically locate miner
+  config [get]                - Display current configuration in JSON format
+  timezones [query]           - List supported timezones (optional search filter)
+
+Configuration Commands:
+  set wifi <ssid> <pass>      - Configure WiFi network credentials and reboot
+  set pool <host> [port]      - Set stratum mining pool host & port (applied live)
+  set port <port>             - Set stratum mining pool port (applied live)
+  set wallet <address>        - Set BTC payout address / worker (applied live)
+  set pass <password>         - Set stratum pool password (default 'x')
+  set bpool <host> [port]     - Set backup pool host & port (applied live)
+  set bport <port>            - Set backup pool port (applied live)
+  set bpass <password>        - Set backup pool password (applied live)
+  set hostname <name>         - Set device network/DHCP hostname (applied live)
+  set tz <timezone>           - Set timezone (e.g. Europe/London or POSIX string)
+  set currency <currency>     - Set fiat price currency (e.g. usd, eur, gbp)
+  set savestats <0|1>         - Enable (1) or disable (0) saving stats to flash
+  set brightness <0-255>      - Set screen backlight brightness (0-255)
+  set autobrightness <0|1>    - Enable (1) or disable (0) LDR auto-brightness
+  set timeout <minutes>       - Backlight idle timeout (0 = never off)
+  set nightdim <0|1>          - Enable (1) or disable (0) sunset/sunrise night dim
+  set nightbright <1-255>     - Set night dim target brightness (1-255)
+  set nightfade <1-240>       - Set night dim fade duration in minutes (1-240)
+  set city <name>             - Set location by city name for sunset/sunrise
+  set lat <deg> / lon <deg>   - Set latitude / longitude in decimal degrees
+  set ledmode <off|status|on> - Set rear RGB LED mode (0=off, 1=status, 2=steady)
+  set ledcolor <#rrggbb|name> - Set rear RGB LED color (e.g. #ff0000 or red)
+  set ledbright <1-255>       - Set rear RGB LED brightness (1-255)
+  set ledscreen <0|1>         - Turn LED off when screen is off (0|1)
+  set mqtt <0|1>              - Enable (1) or disable (0) MQTT publishing
+  set mqtthost <host>         - Set MQTT broker address (IP or hostname)
+  set mqttport <port>         - Set MQTT broker port (default 1883)
+  set mqttuser <user>         - Set MQTT broker username
+  set mqttpass <pass>         - Set MQTT broker password
+  set mqtttopic <topic>       - Set MQTT topic prefix
+  set webpass <password>      - Set Web UI admin password
+  set invert <0|1>            - Invert display colors (reboot required)
+  set flip <0|1>              - Flip display 180 deg (reboot required)
+  config json <json_payload>  - Apply entire configuration from JSON payload
+
+  ota status                  - Show OTA partitions and update status
+  ota check                   - Check GitHub Releases for new version
+  ota update [url|version]    - Download and flash OTA update in background
+  save                        - Persist current settings to SPIFFS (/config.json)
+  reset                       - Factory reset (erase config & WiFi credentials)
+  restart | reboot            - Restart the device
+  help                        - Show this command reference
+Note: 'config set <key> <val>' is supported as an alias for 'set <key> <val>'.
+==========================================================
+)"));
 }
 
 static void cmdShowStatus(void)
@@ -253,50 +255,16 @@ static void handleConfigJson(const String &jsonStr)
 
 static void handleTimezones(const std::vector<String> &args)
 {
-  String q = (args.size() >= 2) ? args[1] : "";
-  q.toLowerCase();
+  const char *q = (args.size() >= 2 && args[1].length() > 0) ? args[1].c_str() : nullptr;
   Serial.println(F("\nAvailable Timezones:"));
   int count = 0;
   for (int i = 0; i < kTimeZoneCount; i++) {
-    String id = kTimeZones[i].id;
-    String lbl = kTimeZones[i].label;
-    String idLower = id;
-    idLower.toLowerCase();
-    String lblLower = lbl;
-    lblLower.toLowerCase();
-    if (q.length() == 0 || idLower.indexOf(q) >= 0 || lblLower.indexOf(q) >= 0) {
+    if (!q || strcasestr(kTimeZones[i].id, q) || strcasestr(kTimeZones[i].label, q)) {
       Serial.printf("  %-30s - %s\n", kTimeZones[i].id, kTimeZones[i].label);
       count++;
     }
   }
   Serial.printf("Total matching: %d\n", count);
-}
-
-static bool isSupportedSetKey(const String &key)
-{
-  static const char *const kValidKeys[] = {
-    "ssid", "wifissid", "wifipass", "wifipw", "wifipassword",
-    "pool", "poolurl", "stratum", "port", "poolport",
-    "wallet", "btcwallet", "user", "btc",
-    "pass", "poolpass", "poolpassword", "password",
-    "bpool", "backuppool", "bport", "backupport",
-    "bpass", "bpoolpass", "backuppass", "backuppoolpassword",
-    "hostname", "host", "tz", "timezone", "currency", "cur",
-    "savestats", "stats", "brightness", "bright",
-    "autobrightness", "autobright", "timeout", "screenoff", "screentimeout",
-    "nightdim", "nightbright", "nightbrightness", "nightfade",
-    "city", "lat", "latitude", "lon", "longitude",
-    "led", "statusled", "ledmode", "mode", "ledcolor", "ledcolorhex", "color",
-    "ledbright", "ledbrightness", "ledscreen", "ledscreenoff",
-    "mqtt", "mqttenabled", "mqtthost", "mqhost", "mqttport", "mqport",
-    "mqttuser", "mquser", "mqttpass", "mqpass", "mqtttopic", "mqtopic",
-    "webpass", "webpassword", "invert", "invertcolors", "flip", "flipdisplay",
-    "templimit"
-  };
-  for (const char *k : kValidKeys) {
-    if (key == k) return true;
-  }
-  return false;
 }
 
 static void cmdSetKey(const std::vector<String> &args)
@@ -328,11 +296,6 @@ static void cmdSetKey(const std::vector<String> &args)
     return;
   }
 
-  if (!isSupportedSetKey(key)) {
-    Serial.printf("[ERROR] Unknown setting key '%s'. Type 'help' for available keys.\n", key.c_str());
-    return;
-  }
-
   if ((key == "port" || key == "poolport" || key == "bport" || key == "backupport" || key == "mqttport" || key == "mqport") &&
       (args[2].toInt() <= 0 || args[2].toInt() > 65535)) {
     Serial.println(F("[ERROR] Invalid port number (must be 1-65535)"));
@@ -350,7 +313,10 @@ static void cmdSetKey(const std::vector<String> &args)
     doc["backupPort"] = args[3].toInt();
   }
 
-  nvMemory::parseJsonConfig(doc, &next);
+  if (!nvMemory::parseJsonConfig(doc, &next)) {
+    Serial.printf("[ERROR] Unknown setting key '%s'. Type 'help' for available keys.\n", key.c_str());
+    return;
+  }
   bool poolChanged = false;
   bool restart = applyLiveSettings(before, next, poolChanged);
 

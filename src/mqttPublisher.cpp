@@ -192,9 +192,14 @@ static void startClient()
   Serial.printf("[MQTT] connecting to %s, topic %s\n", s_uri.c_str(), s_base.c_str());
 }
 
+static void publish(const char *topic, const char *payload, size_t len, bool retain)
+{
+  esp_mqtt_client_publish(s_client, topic, payload, (int)len, 1, retain ? 1 : 0);
+}
+
 static void publish(const String &topic, const String &payload, bool retain)
 {
-  esp_mqtt_client_publish(s_client, topic.c_str(), payload.c_str(), payload.length(), 1, retain ? 1 : 0);
+  publish(topic.c_str(), payload.c_str(), payload.length(), retain);
 }
 
 // One Home Assistant sensor reading a field of the state message.
@@ -223,9 +228,11 @@ static void announceSensor(const char *key, const char *name, const char *tpl, c
   dev["mdl"] = ESP.getChipModel();
   dev["sw"] = CURRENT_VERSION;
   dev["cu"] = "http://" + WiFi.localIP().toString() + "/";
-  String out;
-  serializeJson(d, out);
-  publish(String(MQTT_DISCOVERY_PREFIX "/sensor/") + s_node + "/" + key + "/config", out, true);
+  char out[1024];
+  const size_t n = serializeJson(d, out, sizeof(out));
+  char topic[128];
+  snprintf(topic, sizeof(topic), "%s/sensor/%s/%s/config", MQTT_DISCOVERY_PREFIX, s_node.c_str(), key);
+  publish(topic, out, n, true);
 }
 
 static void announceButton(const char *id, const char *name, const char *payload, const char *icon)
@@ -245,9 +252,11 @@ static void announceButton(const char *id, const char *name, const char *payload
   dev["mdl"] = ESP.getChipModel();
   dev["sw"] = CURRENT_VERSION;
   dev["cu"] = "http://" + WiFi.localIP().toString() + "/";
-  String out;
-  serializeJson(d, out);
-  publish(String(MQTT_DISCOVERY_PREFIX "/button/") + s_node + "/" + id + "/config", out, true);
+  char out[768];
+  const size_t n = serializeJson(d, out, sizeof(out));
+  char topic[128];
+  snprintf(topic, sizeof(topic), "%s/button/%s/%s/config", MQTT_DISCOVERY_PREFIX, s_node.c_str(), id);
+  publish(topic, out, n, true);
 }
 
 static void announce()
@@ -283,9 +292,9 @@ static void publishState()
 {
   DynamicJsonDocument doc(2560);
   fillMinerStatusJson(doc);
-  String out;
-  serializeJson(doc, out);
-  publish(s_base + "/state", out, false);
+  static char out[2560];
+  const size_t n = serializeJson(doc, out, sizeof(out));
+  publish((s_base + "/state").c_str(), out, n, false);
 }
 
 static void handleCommand(String cmd)

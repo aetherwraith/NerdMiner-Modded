@@ -255,34 +255,18 @@ static float lastKh = 0;
 
 // The header follows what is actually happening: hashing whenever the hash
 // counter moves, even while the pool connection is being made again.
-static int uiStatus()
-{
-  if (mMonitor.NerdStatus == NM_waitingConfig)
-    return NM_waitingConfig;
-  return (WiFi.status() == WL_CONNECTED && lastKh > 0) ? NM_hashing : NM_Connecting;
-}
+static int uiStatus() { return pulseUiStatus(mMonitor.NerdStatus, lastKh); }
 
 static void noteHashrate(float kh)
 {
-  lastKh = kh;
-  unsigned long now = millis();
-  if (histCount != 0 && now - histLastMs < HIST_EVERY_MS)
-    return;
-  histLastMs = now;
-  if (histCount < HIST_N)
-    hist[histCount++] = kh;
-  else
-  {
-    memmove(hist, hist + 1, (HIST_N - 1) * sizeof(float));
-    hist[HIST_N - 1] = kh;
-  }
-  histEpoch++;
+  pulseNoteHashrate(kh, lastKh, hist, HIST_N, histCount, histLastMs, HIST_EVERY_MS, histEpoch);
 }
 
 // -------------------------------------------------------------- gauge ring --
 
 static void gaugeDraw(TFT_eSPI &d, float v)
 {
+  const bool flash = isShareFlashing();
   float pos = v * G_SEGS;
   for (int i = 0; i < G_SEGS; i++)
   {
@@ -291,7 +275,7 @@ static void gaugeDraw(TFT_eSPI &d, float v)
     if (lvl == segLvl[i])
       continue;
     segLvl[i] = lvl;
-    uint16_t full = mix565(cAlt, cAcc, (uint8_t)(i * 255 / (G_SEGS - 1)));
+    uint16_t full = flash ? C_GOLD : mix565(cAlt, cAcc, (uint8_t)(i * 255 / (G_SEGS - 1)));
     uint16_t col = lvl == 0 ? C_TRACK : (lvl == 4 ? full : mix565(C_TRACK, full, lvl * 64));
     int a0 = 45 + i * 9; // 270 degree sweep, gap at 6 o'clock
     d.drawArc(G_CX, G_CY, G_R, G_RI, a0, a0 + 7, col, C_BG, true);
@@ -338,8 +322,7 @@ static void drawHeader(const HdrV &h)
   }
   int cw = textW(label, 9) + 10;
   int cx = wm + 6;
-  wgt.fillSmoothRoundRect(cx, 3, cw, 12, 6, mix565(C_BG, col, 46), C_BG);
-  text(wgt, label, cx + cw / 2, 4, 9, col, mix565(C_BG, col, 46), Align::TopCenter);
+  pulseDrawStatusBadge(wgt, render, label, cx, 3, cw, 12, 6, 9, col, C_BG);
 
   // time (right), wifi bars left of it
   text(wgt, h.time.c_str(), W - 3, 2, 13, C_TEXT, C_BG, Align::TopRight);
@@ -783,32 +766,12 @@ static int restorePage = 0; // applied on the first data tick (the monitor reset
 
 static void loadUiPrefs()
 {
-  Preferences p;
-  if (!p.begin(UI_PREFS_NS, true))
-    return; // namespace not created yet: defaults
-  accentIdx = p.getUChar("accent", 0) % ACCENT_COUNT;
-  int page = p.getUChar("page", 0);
-  p.end();
-  cAcc = PULSE_ACCENTS[accentIdx].main;
-  cAlt = PULSE_ACCENTS[accentIdx].alt;
-  savedAccent = accentIdx;
-  savedPage = restorePage = page;
+  pulseLoadUiPrefs(UI_PREFS_NS, accentIdx, cAcc, cAlt, savedAccent, savedPage, restorePage);
 }
 
 static void saveUiPrefs()
 {
-  int page = currentDisplayDriver->current_cyclic_screen;
-  if (page == savedPage && accentIdx == savedAccent)
-    return;
-  Preferences p;
-  if (p.begin(UI_PREFS_NS, false))
-  {
-    p.putUChar("accent", accentIdx);
-    p.putUChar("page", page);
-    p.end();
-  }
-  savedAccent = accentIdx;
-  savedPage = page;
+  pulseSaveUiPrefs(UI_PREFS_NS, accentIdx, currentDisplayDriver->current_cyclic_screen, savedAccent, savedPage);
 }
 
 // Right button double click (NerdMinerV2.ino.cpp): next accent colour. Only
@@ -1118,13 +1081,7 @@ void tDisplayPulse_AlternateScreenState(void)
 // uses. Load a fresh copy first so only this one value changes.
 static void persistFlip(bool flipped)
 {
-  Settings.flipDisplay = flipped;
-  TSettings stored;
-  if (nvMem.loadConfig(&stored))
-  {
-    stored.flipDisplay = flipped;
-    nvMem.saveConfig(&stored);
-  }
+  pulsePersistFlip(nvMem, flipped);
 }
 
 // Left/front button double click: only records the request, the monitor task
@@ -1189,11 +1146,20 @@ void tDisplayPulse_AnimateCurrentScreen(unsigned long frame)
   if (isIdentifying() || !uiLive || uiScreen < 0)
     return;
   drawPulse(frame);
-  if (uiScreen == SCR_MINE && (fabsf(gaugeTarget - gaugeShown) > 0.002f || isShareFlashing() != s_lastRingFlash))
+  if (uiScreen == SCR_MINE)
   {
-    s_lastRingFlash = isShareFlashing();
-    gaugeShown += (gaugeTarget - gaugeShown) * 0.3f; // ease toward the measured rate
-    gaugeDraw(out(), gaugeShown);
+    const bool flash = isShareFlashing();
+    if (flash != s_lastRingFlash)
+    {
+      s_lastRingFlash = flash;
+      memset(segLvl, 0xFF, sizeof(segLvl));
+      gaugeDraw(out(), gaugeShown);
+    }
+    else if (fabsf(gaugeTarget - gaugeShown) > 0.002f)
+    {
+      gaugeShown += (gaugeTarget - gaugeShown) * 0.3f; // ease toward the measured rate
+      gaugeDraw(out(), gaugeShown);
+    }
   }
 }
 

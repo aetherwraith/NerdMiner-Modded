@@ -40,6 +40,7 @@ bool wakeScreen();                 // backlight back on if it was off; true if i
 void sleepScreen();                // turn backlight off immediately
 void backlightTick();              // monitor task, once a second
 int backlightLevel();              // duty to light the screen with right now (day, night or in between)
+int thermalBacklightCap();         // maximum backlight duty allowed while thermally throttled
 String nightDimStatus();           // one line for the settings page: sun state, sunrise, sunset
 inline bool screenLit() { return ledcRead(0) > 0; } // backlight on: someone may be looking
 #else

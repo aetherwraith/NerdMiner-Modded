@@ -18,11 +18,9 @@
 #include "wManager.h"
 #include <atomic>
 #include <mutex>
-#include <list>
 #include <stddef.h> // offsetof (saved stats record)
 #include <string.h>
 #include <time.h>
-#include <map>
 #include "mbedtls/sha256.h"
 #include "i2c_master.h"
 #include <esp_timer.h>
@@ -142,8 +140,6 @@ static portMUX_TYPE s_bestDiffMux = portMUX_INITIALIZER_UNLOCKED;
 
 void updateBestDiff(double diff)
 {
-  if (!(diff > s_sessionBestDiff) && !(diff > best_diff))
-    return;
   portENTER_CRITICAL(&s_bestDiffMux);
   if (diff > s_sessionBestDiff)
     s_sessionBestDiff = diff;
@@ -378,7 +374,7 @@ static bool mainPoolAnswers(void)
   if (!WiFi.hostByName(mainAddr.c_str(), ip))
     return false;
   WiFiClient probe;
-  const bool ok = probe.connect(ip, mainPort, 3000);
+  const bool ok = probe.connect(ip, mainPort, 1000);
   probe.stop();
   return ok;
 }
@@ -747,7 +743,11 @@ struct JobResult
   uint8_t hash[32];
 };
 
-std::list<std::shared_ptr<JobResult>> s_job_result_list;
+#define JOB_RESULT_RING_SIZE 64
+static JobResult s_jobResultRing[JOB_RESULT_RING_SIZE];
+static uint8_t s_jobResultHead = 0;
+static uint8_t s_jobResultTail = 0;
+static uint8_t s_jobResultCount = 0;
 std::atomic<uint32_t> s_working_current_job_id{0xFFFFFFFFu};
 
 static inline void notifyStratumTask(void)
@@ -759,15 +759,18 @@ static inline void notifyStratumTask(void)
 
 void submitShareResult(uint32_t jobId, uint32_t nonce, double diff, const uint8_t hash[32])
 {
-  std::shared_ptr<JobResult> share = std::make_shared<JobResult>();
-  share->id = jobId;
-  share->nonce = nonce;
-  share->difficulty = diff;
-  memcpy(share->hash, hash, 32);
   {
     std::lock_guard<std::mutex> lock(s_job_mutex);
-    if (s_job_result_list.size() < 256)
-      s_job_result_list.push_back(share);
+    if (s_jobResultCount < JOB_RESULT_RING_SIZE)
+    {
+      JobResult &share = s_jobResultRing[s_jobResultTail];
+      share.id = jobId;
+      share.nonce = nonce;
+      share.difficulty = diff;
+      memcpy(share.hash, hash, 32);
+      s_jobResultTail = (s_jobResultTail + 1) % JOB_RESULT_RING_SIZE;
+      s_jobResultCount++;
+    }
   }
   notifyStratumTask();
 }
@@ -796,18 +799,33 @@ TlsPauseGuard::~TlsPauseGuard()
   g_tlsPauseCount.fetch_sub(1, std::memory_order_release);
 }
 
-struct Submition
+#define SUBMITION_RING_SIZE 32
+struct SubmitionSlot
 {
+  uint32_t id;
   double diff;
   bool is32bit;
   bool isValid;
+  bool active;
 };
 
-static void MiningJobStop(uint32_t &job_pool, std::map<uint32_t, std::shared_ptr<Submition>> &submition_map)
+static SubmitionSlot *findSubmition(SubmitionSlot ring[SUBMITION_RING_SIZE], unsigned long id)
+{
+  for (size_t i = 0; i < SUBMITION_RING_SIZE; ++i)
+  {
+    if (ring[i].active && ring[i].id == (uint32_t)id)
+      return &ring[i];
+  }
+  return nullptr;
+}
+
+static void MiningJobStop(uint32_t &job_pool, SubmitionSlot submition_ring[SUBMITION_RING_SIZE], uint8_t &submition_head)
 {
   {
     std::lock_guard<std::mutex> lock(s_job_mutex);
-    s_job_result_list.clear();
+    s_jobResultHead = 0;
+    s_jobResultTail = 0;
+    s_jobResultCount = 0;
     s_activeJobSlot = 0xFF;
     s_working_current_job_id.store(0xFFFFFFFFu, std::memory_order_relaxed);
   }
@@ -815,7 +833,8 @@ static void MiningJobStop(uint32_t &job_pool, std::map<uint32_t, std::shared_ptr
   s_pl_ctx.run = 0;
 #endif
   job_pool = 0xFFFFFFFF;
-  submition_map.clear();
+  memset(submition_ring, 0, sizeof(SubmitionSlot) * SUBMITION_RING_SIZE);
+  submition_head = 0;
   memset(s_submitSentRing, 0, sizeof(s_submitSentRing));
   mMonitor.NerdStatus = NM_Connecting; // back to NM_hashing with the next job
 }
@@ -843,7 +862,8 @@ void runStratumWorker(void *name) {
   Serial.printf("### [Total Heap / Free heap / Min free heap]: %d / %d / %d \n", ESP.getHeapSize(), ESP.getFreeHeap(), ESP.getMinFreeHeap());
   #endif
 
-  std::map<uint32_t, std::shared_ptr<Submition>> s_submition_map;
+  SubmitionSlot s_submition_ring[SUBMITION_RING_SIZE] = {};
+  uint8_t s_submition_head = 0;
 
 #ifdef I2C_SLAVE
   std::vector<uint8_t> i2c_slave_vector;
@@ -879,7 +899,7 @@ void runStratumWorker(void *name) {
 
   auto dropPool = [&]() {
     resetSocket();
-    MiningJobStop(job_pool, s_submition_map);
+    MiningJobStop(job_pool, s_submition_ring, s_submition_head);
     currentPoolDifficulty = DEFAULT_DIFFICULTY;
     setPoolDifficulty(currentPoolDifficulty);
     s_lastPingMs = -1;
@@ -914,46 +934,56 @@ void runStratumWorker(void *name) {
   bool adaptiveDiffSent = false;
 
   auto drainAndSubmitResults = [&]() {
-    std::list<std::shared_ptr<JobResult>> job_result_list;
-    if (job_pool != 0xFFFFFFFF)
+    if (job_pool == 0xFFFFFFFF)
+      return;
+    bool more = true;
+    while (more)
     {
-      std::lock_guard<std::mutex> lock(s_job_mutex);
-      job_result_list.splice(job_result_list.end(), s_job_result_list);
-    }
-    while (!job_result_list.empty())
-    {
-      std::shared_ptr<JobResult> res = job_result_list.front();
-      job_result_list.pop_front();
-
-      updateBestDiff(res->difficulty);
-      if (res->difficulty > currentPoolDifficulty && job_pool == res->id)
+      JobResult batch[16];
+      uint8_t batchCount = 0;
       {
-        if (!client.connected())
+        std::lock_guard<std::mutex> lock(s_job_mutex);
+        while (s_jobResultCount > 0 && batchCount < 16)
         {
-          s_stratumConnected = false;
-          break;
+          batch[batchCount++] = s_jobResultRing[s_jobResultHead];
+          s_jobResultHead = (s_jobResultHead + 1) % JOB_RESULT_RING_SIZE;
+          s_jobResultCount--;
         }
-        unsigned long sumbit_id = 0;
-        tx_mining_submit(client, mWorker, mJob, res->nonce, sumbit_id, 0, mWorker.version_rolling_enabled);
-        const uint32_t sentNow = millis();
-        mLastTXtoPool = sentNow;
-        s_submitSentRing[s_submitSentHead] = {sumbit_id, sentNow};
-        s_submitSentHead = (s_submitSentHead + 1) & 7;
+        more = (s_jobResultCount > 0);
+      }
+      for (uint8_t idx = 0; idx < batchCount; ++idx)
+      {
+        const JobResult &res = batch[idx];
+        updateBestDiff(res.difficulty);
+        if (res.difficulty > currentPoolDifficulty && job_pool == res.id)
+        {
+          if (!client.connected())
+          {
+            s_stratumConnected = false;
+            return;
+          }
+          unsigned long sumbit_id = 0;
+          tx_mining_submit(client, mWorker, mJob, res.nonce, sumbit_id, 0, mWorker.version_rolling_enabled);
+          const uint32_t sentNow = millis();
+          mLastTXtoPool = sentNow;
+          s_submitSentRing[s_submitSentHead] = {sumbit_id, sentNow};
+          s_submitSentHead = (s_submitSentHead + 1) & 7;
 
-        Serial.print("   - Current diff share: "); Serial.println(res->difficulty, 12);
-        Serial.print("   - Current pool diff : "); Serial.println(currentPoolDifficulty, 12);
-        Serial.print("   - TX SHARE: ");
-        for (size_t i = 0; i < 32; i++)
-            Serial.printf("%02x", res->hash[i]);
-        Serial.println("");
+          Serial.print("   - Current diff share: "); Serial.println(res.difficulty, 12);
+          Serial.print("   - Current pool diff : "); Serial.println(currentPoolDifficulty, 12);
+          Serial.print("   - TX SHARE: ");
+          for (size_t i = 0; i < 32; i++)
+              Serial.printf("%02x", res.hash[i]);
+          Serial.println("");
 
-        std::shared_ptr<Submition> submition = std::make_shared<Submition>();
-        submition->diff = res->difficulty;
-        submition->is32bit = (res->hash[29] == 0 && res->hash[28] == 0);
-        submition->isValid = submition->is32bit ? checkValid(res->hash, mJob.nbits.c_str()) : false;
-        s_submition_map.insert(std::make_pair(sumbit_id, submition));
-        if (s_submition_map.size() > 32)
-          s_submition_map.erase(s_submition_map.begin());
+          SubmitionSlot &slot = s_submition_ring[s_submition_head];
+          slot.id = (uint32_t)sumbit_id;
+          slot.diff = res.difficulty;
+          slot.is32bit = (res.hash[29] == 0 && res.hash[28] == 0);
+          slot.isValid = slot.is32bit ? checkValid(res.hash, mJob.nbits.c_str()) : false;
+          slot.active = true;
+          s_submition_head = (s_submition_head + 1) % SUBMITION_RING_SIZE;
+        }
       }
     }
   };
@@ -969,14 +999,14 @@ void runStratumWorker(void *name) {
     if (WiFi.status() != WL_CONNECTED) {
       s_stratumConnected = false;
       mMonitor.NerdStatus = NM_Connecting;
-      MiningJobStop(job_pool, s_submition_map);
+      MiningJobStop(job_pool, s_submition_ring, s_submition_head);
       WiFi.reconnect();
       vTaskDelay(5000 / portTICK_PERIOD_MS);
       continue;
     }
 
     if (!checkPoolConnection()) {
-      MiningJobStop(job_pool, s_submition_map);
+      MiningJobStop(job_pool, s_submition_ring, s_submition_head);
       if (poolFailed())
         continue;
       for (int s = 1 + rand() % 60; s > 0; s--) {
@@ -989,14 +1019,12 @@ void runStratumWorker(void *name) {
 
     if (!isMinerSuscribed)
     {
-      rxBuf.remove(0);
-      rxDropUntilNewline = false;
       mWorker = init_mining_subscribe();
 
       // STEP 1: Pool server connection (SUBSCRIBE + optional BIP-320 CONFIGURE)
       if (!tx_mining_subscribe(client, mWorker)) {
         resetSocket();
-        MiningJobStop(job_pool, s_submition_map);
+        MiningJobStop(job_pool, s_submition_ring, s_submition_head);
         poolFailed();
         continue;
       }
@@ -1026,7 +1054,7 @@ void runStratumWorker(void *name) {
     if (checkPoolInactivity(KEEPALIVE_TIME_ms, POOLINACTIVITY_TIME_ms)) {
       Serial.println("  Detected more than 2 min without data form stratum server. Closing socket and reopening...");
       resetSocket();
-      MiningJobStop(job_pool, s_submition_map);
+      MiningJobStop(job_pool, s_submition_ring, s_submition_head);
       poolFailed();
       continue;
     }
@@ -1036,7 +1064,7 @@ void runStratumWorker(void *name) {
       if (time_now - last_job_time >= 10 * 60 * 1000) // 10 minutes without job (wrap-safe)
       {
         resetSocket();
-        MiningJobStop(job_pool, s_submition_map);
+        MiningJobStop(job_pool, s_submition_ring, s_submition_head);
         poolFailed();
         continue;
       }
@@ -1046,6 +1074,7 @@ void runStratumWorker(void *name) {
     if (s_onBackup && millis() - s_backupSince >= POOL_FAILBACK_ms)
     {
       s_backupSince = millis();
+      drainAndSubmitResults();
       if (mainPoolAnswers())
       {
         switchPool(false, "Main pool answers again");
@@ -1076,26 +1105,39 @@ void runStratumWorker(void *name) {
         const int got = client.read(tmp, want);
         if (got <= 0)
           break;
-        bool sawNl = false;
-        for (int i = 0; i < got; ++i)
+        int i = 0;
+        if (rxDropUntilNewline)
         {
-          const char ch = (char)tmp[i];
-          if (rxDropUntilNewline)
+          while (i < got && tmp[i] != '\n')
+            ++i;
+          if (i < got)
           {
-            if (ch == '\n')
-              rxDropUntilNewline = false;
-            continue;
+            rxDropUntilNewline = false;
+            ++i; // skip '\n'
           }
+        }
+        int outLen = 0;
+        bool sawNl = false;
+        for (; i < got; ++i)
+        {
+          const uint8_t ch = tmp[i];
           if (ch == '\r')
             continue;
-          rxBuf += ch;
+          tmp[outLen++] = ch;
           if (ch == '\n')
             sawNl = true;
-          else if (!sawNl && rxBuf.length() > MAX_NOTIFY_LEN + 64)
+        }
+        if (outLen > 0)
+        {
+          if (!sawNl && rxBuf.length() + (size_t)outLen > MAX_NOTIFY_LEN + 64)
           {
             Serial.printf("[STRATUM] Line exceeded %u bytes, dropping\n", (unsigned)(MAX_NOTIFY_LEN + 64));
             rxBuf.remove(0);
             rxDropUntilNewline = true;
+          }
+          else
+          {
+            rxBuf.concat((const char *)tmp, (size_t)outLen);
           }
         }
         nl = rxBuf.indexOf('\n');
@@ -1213,7 +1255,7 @@ void runStratumWorker(void *name) {
                                       {
                                         Serial.println("Parsing error, need restart");
                                         resetSocket();
-                                        MiningJobStop(job_pool, s_submition_map);
+                                        MiningJobStop(job_pool, s_submition_ring, s_submition_head);
                                       }
                                       }
                                       break;
@@ -1259,8 +1301,8 @@ void runStratumWorker(void *name) {
                                             }
                                           }
                                         }
-                                        auto itt = s_submition_map.find(rxId);
-                                        if (itt != s_submition_map.end())
+                                        SubmitionSlot *slot = findSubmition(s_submition_ring, rxId);
+                                        if (slot)
                                         {
                                           const bool accepted = rxResult;
                                           if (accepted)
@@ -1268,23 +1310,23 @@ void runStratumWorker(void *name) {
                                           else
                                             rejects++; // "result":false without an error
 
-                                          updateBestDiff(itt->second->diff);
-                                          if (accepted || itt->second->isValid)
-                                            recordNotableShare(itt->second->diff, itt->second->isValid);
-                                          if (itt->second->is32bit && !accepted)
+                                          updateBestDiff(slot->diff);
+                                          if (accepted || slot->isValid)
+                                            recordNotableShare(slot->diff, slot->isValid);
+                                          if (slot->is32bit && !accepted)
                                             shares32Rejected++;
-                                          if (itt->second->is32bit && accepted)
+                                          if (slot->is32bit && accepted)
                                           {
                                             shares++;
                                             g_shareFoundEvents++;
                                           }
-                                          if (itt->second->isValid)
+                                          if (slot->isValid)
                                           {
                                             Serial.println("CONGRATULATIONS! Valid block found");
                                             valids++;
                                             g_blockFoundEvents++;
                                           }
-                                          s_submition_map.erase(itt);
+                                          slot->active = false;
                                         }
                                       }
                                       break;
@@ -1296,14 +1338,14 @@ void runStratumWorker(void *name) {
                                           Serial.printf("[STRATUM] The pool REFUSED the worker \"%s\": check the BTC address in the settings\n", mWorker.wName);
                                           break;
                                         }
-                                        auto itt = s_submition_map.find(rxId);
-                                        if (itt != s_submition_map.end())
+                                        SubmitionSlot *slot = findSubmition(s_submition_ring, rxId);
+                                        if (slot)
                                         {
                                           Serial.printf("Refuse submition %lu\n", rxId);
                                           rejects++;
-                                          if (itt->second->is32bit)
+                                          if (slot->is32bit)
                                             shares32Rejected++;
-                                          s_submition_map.erase(itt);
+                                          slot->active = false;
                                         }
                                       }
                                       break;
@@ -1597,9 +1639,8 @@ void runMonitor(void *name)
   uint32_t zero_hash_seconds = 0;
 
   totalKHashes = getTotalHashes() / 1000;
-  uint32_t last_update_millis = millis();
   uint32_t uptime_frac = 0;
-  statusRateSample(totalKHashes, last_update_millis);
+  statusRateSample(totalKHashes, millis());
   portENTER_CRITICAL(&s_hashMux);
   s_bootKh = totalKHashes;
   s_bootUs = s_lastSampleUs;
@@ -1613,7 +1654,6 @@ void runMonitor(void *name)
     if (mElapsed >= 1000)
     {
       mLastCheck = now_millis;
-      last_update_millis = now_millis;
 
       #ifdef DEBUG_MINING
       {
@@ -1691,9 +1731,7 @@ void runMonitor(void *name)
         if ((zero_hash_seconds % 30) == 0)
         #endif
         {
-          Serial.printf(">>> [i] Miner: newJob>%s / inRun>%s) - Client: connected>%s / subscribed>%s / wificonnected>%s\n",
-              "true",
-              isMinerSuscribed ? "true" : "false",
+          Serial.printf(">>> [i] Client: connected>%s / subscribed>%s / wificonnected>%s\n",
               s_stratumConnected ? "true" : "false",
               isMinerSuscribed ? "true" : "false",
               WiFi.status() == WL_CONNECTED ? "true" : "false");

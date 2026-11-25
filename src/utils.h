@@ -26,6 +26,7 @@ void suffix_string(double val, char *buf, size_t bufsiz, int sigdigits);
 
 // Escape a string for safe embedding inside a JSON string literal ("...").
 String jsonEscape(const String &in);
+size_t jsonEscapeTo(const char *in, char *out, size_t outSize);
 
 uint32_t crc32_reset();
 uint32_t crc32_add(uint32_t crc32, const void* data, size_t size);

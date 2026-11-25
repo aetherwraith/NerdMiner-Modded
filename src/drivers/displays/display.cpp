@@ -173,6 +173,11 @@ static bool nightDimLocationSet()
   return Settings.Latitude != 0.0f || Settings.Longitude != 0.0f;
 }
 
+int thermalBacklightCap()
+{
+  return Settings.NightBrightness > 0 ? min(Settings.Brightness, Settings.NightBrightness) : min(Settings.Brightness, 40);
+}
+
 // Blends the day and night levels by how far through the sunset (or sunrise)
 // fade the sun is, so the backlight follows the light outside instead of
 // stepping at one particular minute. Before NTP, without a location or with
@@ -189,7 +194,7 @@ static int targetBacklightLevel(bool sync)
   }
   if (getThermalThrottled())
   {
-    const int thermalCap = Settings.NightBrightness > 0 ? min(day, Settings.NightBrightness) : min(day, 40);
+    const int thermalCap = thermalBacklightCap();
     if (level > thermalCap)
       level = thermalCap;
   }
@@ -216,7 +221,7 @@ bool wakeScreen()
   int duty = backlightLevel();
   if (getThermalThrottled())
   {
-    const int thermalCap = Settings.NightBrightness > 0 ? min(Settings.Brightness, Settings.NightBrightness) : min(Settings.Brightness, 40);
+    const int thermalCap = thermalBacklightCap();
     if (duty > thermalCap || duty <= 0)
       duty = thermalCap;
   }

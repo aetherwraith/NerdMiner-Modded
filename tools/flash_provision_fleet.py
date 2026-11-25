@@ -6,6 +6,7 @@ Supports both USB serial provisioning and zero-dependency LAN fleet management
 """
 
 import argparse
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
 import http.client
@@ -70,6 +71,13 @@ def get_connected_ports():
     return sorted(glob.glob("/dev/ttyUSB*"))
 
 
+def _auth_header(auth):
+    if not auth:
+        return None
+    token = base64.b64encode(auth.encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
+
+
 def http_json(host, path, method="GET", payload=None, timeout=3.0, auth=None):
     url = f"http://{host}{path}"
     headers = {"Accept": "application/json"}
@@ -77,10 +85,9 @@ def http_json(host, path, method="GET", payload=None, timeout=3.0, auth=None):
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    if auth:
-        import base64
-        token = base64.b64encode(auth.encode("utf-8")).decode("ascii")
-        headers["Authorization"] = f"Basic {token}"
+    auth_hdr = _auth_header(auth)
+    if auth_hdr:
+        headers["Authorization"] = auth_hdr
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
@@ -219,9 +226,9 @@ def upload_ota_one(host, bin_bytes, filename="firmware.bin", auth=None, timeout=
         "Content-Length": str(len(body)),
         "Connection": "close",
     }
-    if auth:
-        import base64
-        headers["Authorization"] = "Basic " + base64.b64encode(auth.encode("utf-8")).decode("ascii")
+    auth_hdr = _auth_header(auth)
+    if auth_hdr:
+        headers["Authorization"] = auth_hdr
 
     # http.client sends headers + body without Expect: 100-continue, which ESP32 WebServer requires.
     conn = http.client.HTTPConnection(host, 80, timeout=timeout)
@@ -250,16 +257,53 @@ def _verify_probe_after_ota(host, auth=None, wait_s=35.0):
     return last_probe
 
 
-def fleet_ota(hosts, bin_path, concurrency=3, auth=None, rolling=False):
+def _infer_expected_board(bin_path):
+    """Infer PlatformIO env / boardModel when bin_path is inside .pio/build/<env>/."""
+    env_dir = os.path.dirname(os.path.abspath(bin_path))
+    build_dir = os.path.dirname(env_dir)
+    pio_dir = os.path.dirname(build_dir)
+    if os.path.basename(build_dir) == "build" and os.path.basename(pio_dir) == ".pio":
+        return os.path.basename(env_dir)
+    return None
+
+
+def _preflight_ota_check(host, expected_board=None, auth=None):
+    """Verify /api/system/update dual-OTA capability and boardModel before uploading."""
+    try:
+        info = http_json(host, "/api/system/update", timeout=2.5, auth=auth)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            # Older firmware without /api/system/update endpoint; allow upload.
+            return True, None
+        return False, f"HTTP {exc.code} on /api/system/update"
+    except Exception as exc:
+        return False, f"preflight unreachable ({exc})"
+
+    if isinstance(info, dict):
+        if info.get("hasDualOta") is False:
+            return False, "device lacks dual-OTA partition table (hasDualOta=false)"
+        board = info.get("boardModel")
+        if expected_board and board and board != expected_board:
+            return False, f"boardModel mismatch (device={board}, expected={expected_board})"
+    return True, None
+
+
+def fleet_ota(hosts, bin_path, concurrency=3, auth=None, rolling=False, expected_board=None):
     if not os.path.isfile(bin_path):
         print(f"Firmware binary not found: {bin_path}")
         return False
+    if expected_board is None:
+        expected_board = _infer_expected_board(bin_path)
     with open(bin_path, "rb") as f:
         bin_bytes = f.read()
 
     if rolling:
         print(f"Loaded {bin_path} ({len(bin_bytes):,} bytes). Rolling OTA across {len(hosts)} device(s) (1-by-1 with /probe gate)...")
         for idx, h in enumerate(hosts, start=1):
+            ok_pre, reason = _preflight_ota_check(h, expected_board=expected_board, auth=auth)
+            if not ok_pre:
+                print(f"  [ABORT] {h:<15} preflight failed: {reason}")
+                return False
             print(f"[{idx}/{len(hosts)}] {h}: uploading...")
             t0 = time.time()
             try:
@@ -287,6 +331,9 @@ def fleet_ota(hosts, bin_path, concurrency=3, auth=None, rolling=False):
     ok_hosts = []
 
     def worker(h):
+        ok_pre, reason = _preflight_ota_check(h, expected_board=expected_board, auth=auth)
+        if not ok_pre:
+            return h, 0, f"preflight failed: {reason}", 0.0
         t0 = time.time()
         status, text = upload_ota_one(h, bin_bytes, os.path.basename(bin_path), auth=auth)
         return h, status, text, time.time() - t0

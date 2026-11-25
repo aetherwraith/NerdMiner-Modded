@@ -125,15 +125,22 @@ bool checkValid(const unsigned char* hash, const char* nbitsHex) {
   return valid;
 }
 
-miner_data init_miner_data(void){
-  
-  miner_data newMinerData = {}; // valid = false until calculateMiningData is done
-  return newMinerData;
+static void bswap32_words(uint8_t *buf, size_t wordCount)
+{
+  for (size_t i = 0; i < wordCount; ++i)
+  {
+    uint8_t *w = buf + i * 4;
+    const uint8_t t0 = w[0], t1 = w[1];
+    w[0] = w[3];
+    w[3] = t0;
+    w[1] = w[2];
+    w[2] = t1;
+  }
 }
 
 miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob){
 
-  miner_data mMiner = init_miner_data();
+  miner_data mMiner = {}; // valid = false until calculateMiningData is done
 
   // The block target is not worked out here: checkValid() reads it from
   // nbits when a 32-bit share comes in. (The copy computed here was never used,
@@ -227,7 +234,6 @@ miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob
     mbedtls_sha256_starts_ret(&ctx,0);
     mbedtls_sha256_update_ret(&ctx, interResult, 32);
     mbedtls_sha256_finish_ret(&ctx, shaResult);
-    mbedtls_sha256_free(&ctx);
     free(coinbase_heap);
 
     #ifdef DEBUG_MINING
@@ -263,8 +269,6 @@ miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob
         Serial.println("");
         #endif
 
-        mbedtls_sha256_context ctx;
-        mbedtls_sha256_init(&ctx);
         mbedtls_sha256_starts_ret(&ctx,0);
         mbedtls_sha256_update_ret(&ctx, merkle_concatenated, 64);
         mbedtls_sha256_finish_ret(&ctx, interResult);
@@ -272,7 +276,6 @@ miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob
         mbedtls_sha256_starts_ret(&ctx,0);
         mbedtls_sha256_update_ret(&ctx, interResult, 32);
         mbedtls_sha256_finish_ret(&ctx, mMiner.merkle_result);
-        mbedtls_sha256_free(&ctx);
 
         #ifdef DEBUG_MINING
         Serial.print("    merkle sha         : ");
@@ -281,6 +284,7 @@ miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob
         Serial.println("");
         #endif
     }
+    mbedtls_sha256_free(&ctx);
     // Assemble the 80-byte block header directly in binary without a hex-string round-trip
     to_byte_array(mJob.version.c_str(), 8, mMiner.bytearray_blockheader);
     to_byte_array(mJob.prev_block_hash.c_str(), 64, mMiner.bytearray_blockheader + 4);
@@ -295,61 +299,10 @@ miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob
     Serial.println("");
     #endif
 
-    // reverse version
-    uint8_t buff;
-    size_t bword, bsize, boffset;
-    boffset = 0;
-    bsize = 4;
-    for (size_t j = boffset; j < boffset + (bsize/2); j++) {
-        buff = mMiner.bytearray_blockheader[j];
-        mMiner.bytearray_blockheader[j] = mMiner.bytearray_blockheader[2 * boffset + bsize - 1 - j];
-        mMiner.bytearray_blockheader[2 * boffset + bsize - 1 - j] = buff;
-    }
-
-    // reverse prev hash (4-byte word swap)
-    boffset = 4;
-    bword = 4;
-    bsize = 32;
-    for (size_t i = 1; i <= bsize / bword; i++) {
-        for (size_t j = boffset; j < boffset + bword / 2; j++) {
-            buff = mMiner.bytearray_blockheader[j];
-            mMiner.bytearray_blockheader[j] = mMiner.bytearray_blockheader[2 * boffset + bword - 1 - j];
-            mMiner.bytearray_blockheader[2 * boffset + bword - 1 - j] = buff;
-        }
-        boffset += bword;
-    }
-
-/*
-    // reverse merkle (4-byte word swap)
-    boffset = 36;
-    bword = 4;
-    bsize = 32;
-    for (size_t i = 1; i <= bsize / bword; i++) {
-        for (size_t j = boffset; j < boffset + bword / 2; j++) {
-            buff = mMiner.bytearray_blockheader[j];
-            mMiner.bytearray_blockheader[j] = mMiner.bytearray_blockheader[2 * boffset + bword - 1 - j];
-            mMiner.bytearray_blockheader[2 * boffset + bword - 1 - j] = buff;
-        }
-        boffset += bword;
-    }
-*/
-    // reverse ntime
-    boffset = 68;
-    bsize = 4;
-    for (size_t j = boffset; j < boffset + (bsize/2); j++) {
-        buff = mMiner.bytearray_blockheader[j];
-        mMiner.bytearray_blockheader[j] = mMiner.bytearray_blockheader[2 * boffset + bsize - 1 - j];
-        mMiner.bytearray_blockheader[2 * boffset + bsize - 1 - j] = buff;
-    }
-
-    // reverse difficulty
-    boffset = 72;
-    bsize = 4;
-    for (size_t j = boffset; j < boffset + (bsize/2); j++) {
-        buff = mMiner.bytearray_blockheader[j];
-        mMiner.bytearray_blockheader[j] = mMiner.bytearray_blockheader[2 * boffset + bsize - 1 - j];
-        mMiner.bytearray_blockheader[2 * boffset + bsize - 1 - j] = buff;
-    }
+    // reverse version, prev hash (8 words), ntime + nbits (2 words)
+    bswap32_words(mMiner.bytearray_blockheader, 1);
+    bswap32_words(mMiner.bytearray_blockheader + 4, 8);
+    bswap32_words(mMiner.bytearray_blockheader + 68, 2);
 
 
     #ifdef DEBUG_MINING
@@ -403,9 +356,7 @@ void suffix_string(double val, char *buf, size_t bufsiz, int sigdigits)
 	const double exa  = 1000000000000000000;
 	// minimum diff value to display
 	const double min_diff = 0.001;
-    const byte maxNdigits = 2;
 	char suffix[2] = {0,0};
-	bool decimal = true;
 	double dval;
 
 	if (val >= exa) {
@@ -457,18 +408,14 @@ void suffix_string(double val, char *buf, size_t bufsiz, int sigdigits)
     }
 
 	if (!sigdigits) {
-		if (decimal)
-        {
-            if (frac == 4)
-			    snprintf(buf, bufsiz, "%.4f%s", dval, suffix);
-            else if (frac == 3)
-			    snprintf(buf, bufsiz, "%.3f%s", dval, suffix);
-            else if (frac == 2)
-			    snprintf(buf, bufsiz, "%.2f%s", dval, suffix);
-            else
-			    snprintf(buf, bufsiz, "%.1f%s", dval, suffix);
-        } else
-			snprintf(buf, bufsiz, "%d%s", (unsigned int)dval, suffix);
+        if (frac == 4)
+			snprintf(buf, bufsiz, "%.4f%s", dval, suffix);
+        else if (frac == 3)
+			snprintf(buf, bufsiz, "%.3f%s", dval, suffix);
+        else if (frac == 2)
+			snprintf(buf, bufsiz, "%.2f%s", dval, suffix);
+        else
+			snprintf(buf, bufsiz, "%.1f%s", dval, suffix);
 	} else {
 		/* Always show sigdigits + 1, padded on right with zeroes
 		 * followed by suffix */
@@ -481,6 +428,54 @@ void suffix_string(double val, char *buf, size_t bufsiz, int sigdigits)
 }
 
 
+
+size_t jsonEscapeTo(const char *in, char *out, size_t outSize)
+{
+    if (!out || outSize == 0)
+        return 0;
+    if (!in)
+    {
+        out[0] = '\0';
+        return 0;
+    }
+    size_t j = 0;
+    for (size_t i = 0; in[i] != '\0' && j + 1 < outSize; ++i)
+    {
+        const uint8_t c = (uint8_t)in[i];
+        const char *esc = nullptr;
+        switch (c)
+        {
+            case '\\': esc = "\\\\"; break;
+            case '"':  esc = "\\\""; break;
+            case '\b': esc = "\\b";  break;
+            case '\f': esc = "\\f";  break;
+            case '\n': esc = "\\n";  break;
+            case '\r': esc = "\\r";  break;
+            case '\t': esc = "\\t";  break;
+            default: break;
+        }
+        if (esc)
+        {
+            if (j + 2 >= outSize)
+                break;
+            out[j++] = esc[0];
+            out[j++] = esc[1];
+        }
+        else if (c < 0x20)
+        {
+            if (j + 6 >= outSize)
+                break;
+            snprintf(out + j, outSize - j, "\\u%04x", (unsigned)c);
+            j += 6;
+        }
+        else
+        {
+            out[j++] = (char)c;
+        }
+    }
+    out[j] = '\0';
+    return j;
+}
 
 String jsonEscape(const String &in)
 {

@@ -548,6 +548,28 @@ static void test_v112_helpers()
   TEST_ASSERT_FALSE(parse_mining_configure("{\"id\":2,\"result\":{\"version-rolling\":false},\"error\":null}", mask));
 }
 
+static void test_v113_helpers()
+{
+  char esc[16] = {0};
+  size_t n = jsonEscapeTo("a\"b\\c\n", esc, sizeof(esc));
+  TEST_ASSERT_EQUAL_STRING("a\\\"b\\\\c\\n", esc);
+  TEST_ASSERT_EQUAL_UINT32(9, (uint32_t)n);
+
+  char trunc[6] = {0};
+  jsonEscapeTo("ab\"cd", trunc, sizeof(trunc));
+  TEST_ASSERT_EQUAL_STRING("ab\\\"c", trunc);
+
+  TSettings s{};
+  StaticJsonDocument<128> unknownDoc;
+  unknownDoc["no_such_key"] = 123;
+  TEST_ASSERT_FALSE(nvMemory::parseJsonConfig(unknownDoc, &s));
+
+  StaticJsonDocument<128> knownDoc;
+  knownDoc["hostname"] = "nm-test";
+  TEST_ASSERT_TRUE(nvMemory::parseJsonConfig(knownDoc, &s));
+  TEST_ASSERT_EQUAL_STRING("nm-test", s.Hostname);
+}
+
 int main(int, char **)
 {
   UNITY_BEGIN();
@@ -579,5 +601,6 @@ int main(int, char **)
   RUN_TEST(test_config_delete_removes_both);
   RUN_TEST(test_fill_and_parse_config_json);
   RUN_TEST(test_v112_helpers);
+  RUN_TEST(test_v113_helpers);
   return UNITY_END();
 }
