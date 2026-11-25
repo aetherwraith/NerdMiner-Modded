@@ -265,13 +265,35 @@ struct ChunkedWriter : public Print
   }
   void writePrintf(const char *fmt, ...)
   {
-    char tmp[160];
+    char tmp[256];
     va_list ap;
     va_start(ap, fmt);
+    va_list ap2;
+    va_copy(ap2, ap);
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
     if (n > 0)
-      write(tmp, (size_t)min(n, (int)sizeof(tmp) - 1));
+    {
+      if (n < (int)sizeof(tmp))
+      {
+        write(tmp, (size_t)n);
+      }
+      else
+      {
+        String dyn;
+        if (dyn.reserve((size_t)n + 1))
+        {
+          char *bufPtr = const_cast<char *>(dyn.c_str());
+          vsnprintf(bufPtr, (size_t)n + 1, fmt, ap2);
+          write(bufPtr, (size_t)n);
+        }
+        else
+        {
+          write(tmp, sizeof(tmp) - 1);
+        }
+      }
+    }
+    va_end(ap2);
   }
   void writeHtmlEscaped(const char *s)
   {
