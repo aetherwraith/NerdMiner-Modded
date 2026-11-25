@@ -55,6 +55,7 @@ This document tracks major architectural enhancements, optimizations, and featur
 | **v1.12.0** | Released | `TempLimit` thermal throttling & auto-dim, shared `pulseUi` with FNV-1a `uint32_t` widget cache keys across all 4 Pulse drivers, `/probe`-first Fleet polling, Temp/Pool badges, Solo Block-Odds, Wave Identify, Screens On/Off, and Fleet JSON Backup/Restore |
 | **v1.13.0** | Released | Zero-alloc share ring buffers & stack JSON escaping, streaming JSON/config parsing, Pulse UI & storage deduplication, Fleet OTA board/dual-OTA preflight, 25-worker LAN scanner, cached chart styles, `s_otaMutex` lock-guard check, and `IRAM_ATTR` S3 hot loop |
 | **v1.14.0** | Released | Multi-board rolling OTA profiles (`--board-dir` / `--board-map` & Fleet UI board filter) and pool latency (`ping_ms`) + rejected-share trend graphing on `/` (`/api/history` + canvas overlay) |
+| **v1.15.0** | Released | Shared `pulse480` 480×320 UI (`-2,459` lines), async GitHub OTA check, deferred non-blocking HTTP restarts, streaming `monitor.cpp` HTTPS JSON & `/api/status` + `/api/config`, MQTT `StaticJsonDocument` reuse, `isHex(const char*)`, `SDCard`/`serialCli` 3 KB JSON sizing, and `totalKHashes` / `s_restart` thread-safety fixes |
 
 ## 🔭 Next / Backlog
 *(All planned roadmap items are complete!)*

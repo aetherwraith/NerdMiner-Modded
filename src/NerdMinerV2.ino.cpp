@@ -95,8 +95,6 @@ extern monitor_data mMonitor;
 
 /**********************⚡ GLOBAL Vars *******************************/
 
-const char* ntpServer = "pool.ntp.org";
-
 /********* INIT *****/
 void setup()
 {
@@ -257,17 +255,6 @@ void setup()
 
   /******** MONITOR SETUP *****/
   setup_monitor();
-}
-
-void app_error_fault_handler(void *arg) {
-  // Get stack errors
-  char *stack = (char *)arg;
-
-  // Print the stack errors in the console
-  esp_log_write(ESP_LOG_ERROR, "APP_ERROR", "Error Stack Code:\n%s", stack);
-
-  // restart ESP32
-  esp_restart();
 }
 
 void loop() {

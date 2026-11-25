@@ -77,7 +77,6 @@ void SDCard::SD2nvMemory(nvMemory* nvMem, TSettings* Settings)
     if (loadConfigFile(Settings))
     {
         nvMem->saveConfig(Settings);
-        WiFi.begin(Settings->WifiSSID, Settings->WifiPW);
         Serial.println("SDCard: Settings transfered to internal memory. Restarting now.");
         ESP.restart();
     }
@@ -103,7 +102,7 @@ bool SDCard::loadConfigFile(TSettings* Settings)
             if (configFile)
             {
                 cardBusy_ = true;
-                StaticJsonDocument<1024> json;
+                DynamicJsonDocument json(3072);
                 DeserializationError error = deserializeJson(json, configFile);
                 configFile.close();
                 cardBusy_ = false;
@@ -112,7 +111,6 @@ bool SDCard::loadConfigFile(TSettings* Settings)
                 {
                     bool res = nvMemory::parseJsonConfig(json, Settings);
                     nvMemory::printConfigMasked(json);
-                    Serial.printf("Carteira Lida SDs:%s\n", Settings->BtcWallet);                       
                     return res;
                 }
                 else

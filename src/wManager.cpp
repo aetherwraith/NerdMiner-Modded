@@ -59,14 +59,11 @@ String readWebflasherConfig(TSettings* settings) {
         Serial.println("DEBUG: Flash erased there - no custom config");
         return "";
     }
-    String data = String((char*)buffer);
-    
-    if (data.startsWith("WEBFLASHER_CONFIG:")) {
+    if (memcmp(buffer, "WEBFLASHER_CONFIG:", 18) == 0) {
         Serial.println(F("DEBUG: Found WEBFLASHER_CONFIG marker"));
-        String jsonPart = data.substring(18);
-        
+
         StaticJsonDocument<1024> doc;
-        DeserializationError error = deserializeJson(doc, jsonPart.c_str());
+        DeserializationError error = deserializeJson(doc, (const char*)(buffer + 18));
         
         if (error == DeserializationError::Ok) {
             Serial.println(F("DEBUG: Webflasher JSON parsed successfully"));

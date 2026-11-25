@@ -441,12 +441,15 @@ def fleet_broadcast(hosts, patch, auth=None):
 
 
 def fleet_identify(hosts, duration_ms=10000, auth=None):
-    for h in hosts:
-        try:
-            res = http_json(h, "/api/identify", "POST", {"durationMs": duration_ms}, 3.0, auth)
-            print(f"  [LOCATE] {h:<15} -> {res}")
-        except Exception as exc:
-            print(f"  [ERR]    {h:<15} -> {exc}")
+    with ThreadPoolExecutor(max_workers=min(16, max(1, len(hosts)))) as ex:
+        futs = {ex.submit(http_json, h, "/api/identify", "POST", {"durationMs": duration_ms}, 3.0, auth): h for h in hosts}
+        for fut in as_completed(futs):
+            h = futs[fut]
+            try:
+                res = fut.result()
+                print(f"  [LOCATE] {h:<15} -> {res}")
+            except Exception as exc:
+                print(f"  [ERR]    {h:<15} -> {exc}")
 
 
 def flash_device(port, baud=921600):
@@ -483,29 +486,27 @@ def provision_device(port, suffix, retries=5):
     time.sleep(3.5)
     for attempt in range(1, retries + 1):
         try:
-            s = serial.Serial(port, 115200, timeout=3)
-            time.sleep(1.0)
-            if s.in_waiting:
-                s.read(s.in_waiting)
-
-            s.write(b"\n")
-            time.sleep(0.5)
-            s.read(s.in_waiting or 100)
-
-            s.write(cmd.encode("utf-8"))
-            time.sleep(2.0)
-            out = s.read(s.in_waiting or 2000).decode("utf-8", errors="replace")
-            print(f"[{port}] Config reply:\n{out.strip()}")
-
-            if "success" in out or "Restarting" in out or "applied" in out:
-                time.sleep(4.0)
-                s.write(b"\nprobe\n")
+            with serial.Serial(port, 115200, timeout=1.0) as ser:
                 time.sleep(1.0)
-                probe_out = s.read(s.in_waiting or 500).decode("utf-8", errors="replace")
-                print(f"[{port}] Probe check: {probe_out.strip()}")
-                s.close()
-                return True
-            s.close()
+                if ser.in_waiting:
+                    ser.read(ser.in_waiting)
+
+                ser.write(b"\n")
+                time.sleep(0.5)
+                ser.read(ser.in_waiting or 100)
+
+                ser.write(cmd.encode("utf-8"))
+                time.sleep(2.0)
+                out = ser.read(ser.in_waiting or 2000).decode("utf-8", errors="replace")
+                print(f"[{port}] Config reply:\n{out.strip()}")
+
+                if "success" in out or "Restarting" in out or "applied" in out:
+                    time.sleep(4.0)
+                    ser.write(b"\nprobe\n")
+                    time.sleep(1.0)
+                    probe_out = ser.read(ser.in_waiting or 500).decode("utf-8", errors="replace")
+                    print(f"[{port}] Probe check: {probe_out.strip()}")
+                    return True
         except Exception as e:
             print(f"[{port}] Attempt {attempt} failed ({e}), retrying...")
             time.sleep(2)

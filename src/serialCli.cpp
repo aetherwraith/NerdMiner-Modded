@@ -216,7 +216,7 @@ static void printConfig(void)
   const TSettings s = currentSettings();
   const TimeZoneInfo* tzInfo = findTimeZone(s.Timezone);
 
-  DynamicJsonDocument doc(2048);
+  DynamicJsonDocument doc(3072);
   nvMemory::fillConfigJson(doc, s, false, true);
   doc["timezoneLabel"] = tzInfo ? String(tzInfo->label) : s.Timezone;
   doc["timezonePosix"] = getPosixTz(s.Timezone);

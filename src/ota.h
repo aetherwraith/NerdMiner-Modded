@@ -57,9 +57,14 @@ bool startUrlOta(const String &url);
 bool startGitHubOta(const String &targetVersion = "latest");
 
 /**
- * @brief Check GitHub Releases for new firmware versions
+ * @brief Check GitHub Releases for new firmware versions (blocking)
  */
 bool checkGitHubUpdate(void);
+
+/**
+ * @brief Start an async GitHub Releases check in a background task
+ */
+bool startGitHubCheck(void);
 
 /**
  * @brief Get board model string

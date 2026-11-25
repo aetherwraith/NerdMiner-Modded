@@ -1293,7 +1293,6 @@ document.addEventListener('visibilitychange',function(){
   if(!document.hidden){poll();history();if(activeTab==='flt')pollFleet()}
 });
 window.addEventListener('resize',function(){if(activeTab==='mon')draw()});
-if(window.matchMedia){var mq=matchMedia('(prefers-color-scheme: light)');if(mq.addEventListener)mq.addEventListener('change',draw);else if(mq.addListener)mq.addListener(draw)}
 
 loadPeers();
 poll();

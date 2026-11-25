@@ -24,12 +24,19 @@ unsigned long getNextId(unsigned long id) {
     return ++id;
 }
 
-static bool isHex(const String &s)
+static bool isHex(const char *s)
 {
-    for (size_t i = 0; i < s.length(); ++i)
-        if (!isxdigit((unsigned char)s[i]))
+    if (!s)
+        return false;
+    for (; *s; ++s)
+        if (!isxdigit((unsigned char)*s))
             return false;
     return true;
+}
+
+static bool isHex(const String &s)
+{
+    return isHex(s.c_str());
 }
 
 // Only the envelope of a message (method, id, error, result) goes into a
@@ -316,7 +323,7 @@ bool parse_mining_notify(const String& line, mining_job& mJob)
         for (JsonVariantConst m : branch)
         {
           const char *h = m.as<const char *>();
-          if (!h || strlen(h) != 64 || !isHex(String(h))) { bad = "merkle_branch"; break; }
+          if (!h || strlen(h) != 64 || !isHex(h)) { bad = "merkle_branch"; break; }
         }
       if (bad)
       {

@@ -354,7 +354,8 @@ void minerWorkerHw(void * task_id)
               debugPipelinedHwSwMismatch++;
             #endif
             const double cand_diff = confirmed && isSha256Valid(sw_hash) ? diff_from_target(sw_hash) : 0.0;
-            updateBestDiff(cand_diff);
+            if (cand_diff > 0.0)
+              updateBestDiff(cand_diff);
             if (cand_diff > aj.difficulty)
             {
               #ifdef DEBUG_MINING
@@ -755,7 +756,8 @@ void minerWorkerHw(void * task_id)
           #endif
 
           const double cand_diff = confirmed && isSha256Valid(sw_hash) ? diff_from_target(sw_hash) : 0.0;
-          updateBestDiff(cand_diff);
+          if (cand_diff > 0.0)
+            updateBestDiff(cand_diff);
           if (cand_diff > aj.difficulty)
           {
             #ifdef DEBUG_MINING

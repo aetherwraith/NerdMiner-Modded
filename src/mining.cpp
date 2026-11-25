@@ -604,9 +604,16 @@ void readPoolSettings(TSettings &s)
   }
   else
   {
-    PoolChange cur;
-    storePoolChange(cur, Settings);
-    loadPoolChange(s, cur);
+    s.PoolAddress = Settings.PoolAddress;
+    s.PoolPort = Settings.PoolPort;
+    memcpy(s.BtcWallet, Settings.BtcWallet, sizeof(s.BtcWallet));
+    s.BtcWallet[sizeof(s.BtcWallet) - 1] = 0;
+    memcpy(s.PoolPassword, Settings.PoolPassword, sizeof(s.PoolPassword));
+    s.PoolPassword[sizeof(s.PoolPassword) - 1] = 0;
+    s.BackupPoolAddress = Settings.BackupPoolAddress;
+    s.BackupPoolPort = Settings.BackupPoolPort;
+    memcpy(s.BackupPoolPassword, Settings.BackupPoolPassword, sizeof(s.BackupPoolPassword));
+    s.BackupPoolPassword[sizeof(s.BackupPoolPassword) - 1] = 0;
   }
 }
 
@@ -696,7 +703,10 @@ bool checkPoolConnection(void) {
 unsigned long mStart0Hashrate = 0;
 bool checkPoolInactivity(unsigned int keepAliveTime, unsigned long inactivityTime) {
   uint64_t currentKHashes = getTotalHashes() / 1000;
-  uint64_t elapsedKHs = currentKHashes - totalKHashes;
+  portENTER_CRITICAL(&s_hashMux);
+  uint64_t lastKHashes = totalKHashes;
+  portEXIT_CRITICAL(&s_hashMux);
+  uint64_t elapsedKHs = currentKHashes - lastKHashes;
 
   uint32_t time_now = millis();
 
@@ -1607,8 +1617,9 @@ void saveStat() {
 
 void resetStat() {
     Serial.printf("[MONITOR] Resetting NVS stats\n");
-    templates = totalKHashes = elapsedKHs = upTime = shares = valids = rejects = s_sharesAccepted = 0;
+    templates = elapsedKHs = upTime = shares = valids = rejects = s_sharesAccepted = 0;
     portENTER_CRITICAL(&s_hashMux);
+    totalKHashes = 0;
     s_hashTotal = 0;
     s_sessionHashes = 0;
     s_notableCount = 0;
@@ -1638,11 +1649,12 @@ void runMonitor(void *name)
   uint32_t seconds_elapsed = 0;
   uint32_t zero_hash_seconds = 0;
 
-  totalKHashes = getTotalHashes() / 1000;
+  const uint64_t bootKh = getTotalHashes() / 1000;
   uint32_t uptime_frac = 0;
-  statusRateSample(totalKHashes, millis());
+  statusRateSample(bootKh, millis());
   portENTER_CRITICAL(&s_hashMux);
-  s_bootKh = totalKHashes;
+  totalKHashes = bootKh;
+  s_bootKh = bootKh;
   s_bootUs = s_lastSampleUs;
   portEXIT_CRITICAL(&s_hashMux);
 
@@ -1691,8 +1703,10 @@ void runMonitor(void *name)
       #endif
 
       uint64_t currentKHashes = getTotalHashes() / 1000;
+      portENTER_CRITICAL(&s_hashMux);
       elapsedKHs = (uint32_t)(currentKHashes - totalKHashes);
       totalKHashes = currentKHashes;
+      portEXIT_CRITICAL(&s_hashMux);
       statusRateSample(currentKHashes, now_millis);
 
       uptime_frac += mElapsed;

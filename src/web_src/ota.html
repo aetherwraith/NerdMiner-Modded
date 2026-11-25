@@ -106,18 +106,41 @@ code{background:var(--grid);padding:2px 6px;border-radius:4px;font-size:13px}
 
   fetch('/api/system/update',{cache:'no-store'}).then(function(r){return r.json()}).then(applyInfo).catch(function(){});
 
+  function showCheckResult(d){
+    var btn=$('btnCheck');
+    btn.disabled=false;btn.textContent='Check for Updates';
+    if(d&&d.state!==5&&d.latestVersion){
+      $('releaseInfo').hidden=false;
+      $('relTag').textContent=d.latestVersion+(d.hasUpdate?' (New!)':' (Up to date)');
+      $('relNotes').textContent=d.releaseNotes?d.releaseNotes.slice(0,180)+'…':(d.downloadUrl?'Ready to install matching board image.':'No prebuilt binary matched this board model.');
+      $('btnInstallOnline').hidden=!d.downloadUrl;
+    }else{
+      alert((d&&d.error)||'No update found');
+    }
+  }
+
+  function pollCheck(){
+    var btn=$('btnCheck');
+    btn.disabled=true;btn.textContent='Checking…';
+    setTimeout(function(){
+      fetch('/api/system/update',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
+        if(d.state===1)pollCheck();
+        else showCheckResult(d);
+      }).catch(function(e){
+        btn.disabled=false;btn.textContent='Check for Updates';
+        alert('Check failed: '+e);
+      });
+    },1000);
+  }
+
   $('btnCheck').addEventListener('click',function(){
     var btn=$('btnCheck');
     btn.disabled=true;btn.textContent='Checking…';
     fetch('/api/system/update/check',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
-      btn.disabled=false;btn.textContent='Check for Updates';
-      if(d.latestVersion){
-        $('releaseInfo').hidden=false;
-        $('relTag').textContent=d.latestVersion+(d.hasUpdate?' (New!)':' (Up to date)');
-        $('relNotes').textContent=d.releaseNotes?d.releaseNotes.slice(0,180)+'…':(d.downloadUrl?'Ready to install matching board image.':'No prebuilt binary matched this board model.');
-        $('btnInstallOnline').hidden=!d.downloadUrl;
+      if(d.state===1){
+        pollCheck();
       }else{
-        alert(d.error||'No update found');
+        showCheckResult(d);
       }
     }).catch(function(e){
       btn.disabled=false;btn.textContent='Check for Updates';
@@ -131,6 +154,8 @@ code{background:var(--grid);padding:2px 6px;border-radius:4px;font-size:13px}
       .then(function(r){return r.json()}).then(function(d){
         if(d.success)startPolling();
         else alert(d.error||d.message||'Failed to start OTA');
+      }).catch(function(e){
+        alert('Failed to start OTA: '+e);
       });
   });
 

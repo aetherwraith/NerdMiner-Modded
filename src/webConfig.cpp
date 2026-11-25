@@ -216,12 +216,24 @@ TSettings currentSettings()
   return s;
 }
 
-struct ChunkedWriter
+struct ChunkedWriter : public Print
 {
   char buf[512];
   size_t pos = 0;
 
-  void flush()
+  size_t write(uint8_t c) override
+  {
+    char ch = static_cast<char>(c);
+    write(&ch, 1);
+    return 1;
+  }
+  size_t write(const uint8_t *buffer, size_t size) override
+  {
+    if (buffer && size > 0)
+      write(reinterpret_cast<const char *>(buffer), size);
+    return size;
+  }
+  void flush() override
   {
     if (pos > 0)
     {
@@ -308,6 +320,15 @@ struct ChunkedWriter
     webCfgServer.sendContent("");
   }
 };
+
+static bool s_webRestartPending = false;
+static uint32_t s_webRestartAt = 0;
+
+static void scheduleWebRestart(uint32_t delayMs)
+{
+  s_webRestartPending = true;
+  s_webRestartAt = millis() + delayMs;
+}
 
 static void handleRoot()
 {
@@ -681,8 +702,7 @@ static void handleSave()
                      "</body></html>");
 
   saveStat(); // stats mined since the last periodic save
-  delay(1000);
-  ESP.restart();
+  scheduleWebRestart(1000);
 }
 
 bool applyLiveSettings(const TSettings &before, const TSettings &next, bool &poolChangedOut)
@@ -901,10 +921,10 @@ static void handleGetConfig()
   doc["PrimaryAddress"] = s.BtcWallet;
   doc["version"] = CURRENT_VERSION;
 
-  String json;
-  json.reserve(1400);
-  serializeJson(doc, json);
-  sendCorsJson(200, json);
+  beginChunkedCorsJson(200);
+  ChunkedWriter w;
+  serializeJson(doc, w);
+  w.finish();
 }
 
 static void handleTimezoneEndpoint()
@@ -1013,8 +1033,7 @@ static void handleConfigRoute()
     if (restart) {
       sendCorsJson(200, "{\"success\":true,\"message\":\"Settings saved. Restarting device for changes...\",\"rebootRequired\":true}");
       saveStat();
-      delay(1000);
-      ESP.restart();
+      scheduleWebRestart(1000);
     } else {
       String resp = "{\"success\":true,\"message\":\"Settings saved and applied live.\",\"rebootRequired\":false";
       if (poolChanged) resp += ",\"poolChanged\":true";
@@ -1107,8 +1126,7 @@ static void handleDisplayEndpoint()
       if (restart) {
         sendCorsJson(200, "{\"success\":true,\"message\":\"Display settings saved. Restarting device...\",\"rebootRequired\":true}");
         saveStat();
-        delay(1000);
-        ESP.restart();
+        scheduleWebRestart(1000);
         return false;
       }
     }
@@ -1317,8 +1335,7 @@ static void handleSystemRestart()
 
   sendCorsJson(200, "{\"success\":true,\"message\":\"Restarting...\"}");
   saveStat();
-  delay(500);
-  ESP.restart();
+  scheduleWebRestart(500);
 }
 
 // Miner state as JSON for Home Assistant, scripts and dashboards. No login:
@@ -1434,11 +1451,11 @@ static void handleApiStatus()
   noteWebMonitorPoll(); // the live monitor (or a script) is watching
   DynamicJsonDocument doc(2560);
   fillMinerStatusJson(doc);
-  String out;
-  out.reserve(1024);
-  serializeJson(doc, out);
   webCfgServer.sendHeader("Cache-Control", "no-store");
-  sendCorsJson(200, out);
+  beginChunkedCorsJson(200);
+  ChunkedWriter w;
+  serializeJson(doc, w);
+  w.finish();
 }
 
 // --------------------------------------------------------------------------
@@ -1588,5 +1605,9 @@ void webConfigProcess(void)
     s_corsAdded = false;
     webCfgServer.handleClient();
     otaProcess();
+  }
+  if (s_webRestartPending && (int32_t)(millis() - s_webRestartAt) >= 0) {
+    s_webRestartPending = false;
+    ESP.restart();
   }
 }

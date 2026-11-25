@@ -206,7 +206,7 @@ miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob
     #ifdef DEBUG_MINING
     Serial.print("    coinbase: "); Serial.println(coinbase_buffer);
     #endif
-    size_t str_len = strlen(coinbase_buffer)/2;
+    size_t str_len = coinbase_hex / 2;
     // Decoded in place (each byte is written behind the two digits it comes
     // from): no second buffer on the stratum task's stack.
     uint8_t *bytearray = (uint8_t *)coinbase_buffer;
@@ -250,16 +250,12 @@ miner_data calculateMiningData(mining_subscribe& mWorker, const mining_job& mJob
     byte merkle_concatenated[32 * 2];
     for (size_t k=0; k < mJob.merkle_branch.size(); k++) {
         const char* merkle_element = mJob.merkle_branch[k].c_str();
-        uint8_t bytearray[32];
-        size_t res = to_byte_array(merkle_element, 64, bytearray);
+        memcpy(merkle_concatenated, mMiner.merkle_result, 32);
+        to_byte_array(merkle_element, 64, merkle_concatenated + 32);
 
         #ifdef DEBUG_MINING
         Serial.print("    merkle element    "); Serial.print(k); Serial.print(": "); Serial.println(merkle_element);
         #endif
-        for (size_t i = 0; i < 32; i++) {
-          merkle_concatenated[i] = mMiner.merkle_result[i];
-          merkle_concatenated[32 + i] = bytearray[i];
-        }
 
         #ifdef DEBUG_MINING
         Serial.print("    merkle element    "); Serial.print(k); Serial.print(": "); Serial.println(merkle_element);

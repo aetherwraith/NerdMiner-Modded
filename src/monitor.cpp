@@ -133,18 +133,20 @@ void updateGlobalData(void){
         HTTPClient http;
         http.setTimeout(FETCH_TIMEOUT_ms);
         http.setReuse(true);
+        http.useHTTP10(true);
         try {
         http.begin(client, kGlobalHash1mUrl);
         int httpCode;
         { HW_SHA_REQUEST(); TlsPauseGuard tlsGuard; httpCode = http.GET(); }
 
         if (httpCode == HTTP_CODE_OK) {
-            String payload = http.getString();
-            StaticJsonDocument<128> filter;
-            filter["currentHashrate"] = true;
-            filter["currentDifficulty"] = true;
+            static StaticJsonDocument<128> filter;
+            if (filter.isNull()) {
+                filter["currentHashrate"] = true;
+                filter["currentDifficulty"] = true;
+            }
             StaticJsonDocument<512> doc;
-            DeserializationError err = deserializeJson(doc, payload.c_str(), DeserializationOption::Filter(filter));
+            DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
             if (!err) {
                 double curHash = doc["currentHashrate"] | 0.0;
                 if (curHash > 0.0) {
@@ -164,7 +166,6 @@ void updateGlobalData(void){
                 }
                 mGlobalUpdate = millis();
             }
-            doc.clear();
         }
         http.end();
 
@@ -173,10 +174,8 @@ void updateGlobalData(void){
         { HW_SHA_REQUEST(); TlsPauseGuard tlsGuard; httpCode = http.GET(); }
 
         if (httpCode == HTTP_CODE_OK) {
-            String payload = http.getString();
-            
             StaticJsonDocument<512> doc;
-            if (!deserializeJson(doc, payload.c_str())) {
+            if (!deserializeJson(doc, http.getStream())) {
                 if (doc.containsKey("halfHourFee")) gData.halfHourFee = doc["halfHourFee"].as<int>();
 #ifdef SCREEN_FEES_ENABLE
                 if (doc.containsKey("fastestFee"))  gData.fastestFee = doc["fastestFee"].as<int>();
@@ -186,7 +185,6 @@ void updateGlobalData(void){
 #endif
                 mGlobalUpdate = millis();
             }
-            doc.clear();
         }
         
         http.setReuse(false);
@@ -271,6 +269,7 @@ String getBTCprice(void){
         std::lock_guard<std::mutex> fetchLock(s_httpFetchMutex);
         HTTPClient http;
         http.setTimeout(FETCH_TIMEOUT_ms);
+        http.useHTTP10(true);
 
         try {
         http.begin(String(getBTCAPI) + cur.code);
@@ -278,10 +277,8 @@ String getBTCprice(void){
         { HW_SHA_REQUEST(); TlsPauseGuard tlsGuard; httpCode = http.GET(); }
 
         if (httpCode == HTTP_CODE_OK) {
-            String payload = http.getString();
-
             StaticJsonDocument<512> doc;
-            DeserializationError err = deserializeJson(doc, payload.c_str());
+            DeserializationError err = deserializeJson(doc, http.getStream());
           
             if (!err && doc.containsKey("bitcoin") && doc["bitcoin"].containsKey(cur.code)) {
                 unsigned int price = doc["bitcoin"][cur.code] | 0U;
@@ -290,8 +287,6 @@ String getBTCprice(void){
                     mBTCUpdate = millis();
                 }
             }
-
-            doc.clear();
         }
         
         http.end();
@@ -785,10 +780,6 @@ static String getPoolAPIUrlImpl(int *styleOut) {
     return url;
 }
 
-String getPoolAPIUrl(void) {
-    return getPoolAPIUrlImpl(nullptr);
-}
-
 static String formatPoolSuffix(double val) {
     char buf[16] = {0};
     suffix_string(val, buf, sizeof(buf), 0);
@@ -845,48 +836,50 @@ pool_data getPoolData(void){
           // showing abort() inside sha_hal_read_digest() when both ran
           // concurrently. TlsPauseGuard + g_hwShaMutex closes that gap; see mining.h.
           int httpCode;
+          http.useHTTP10(true);
           {
             HW_SHA_REQUEST();
             TlsPauseGuard tlsGuard;
             httpCode = http.GET();
           }
           if (httpCode == HTTP_CODE_OK) {
-              String payload = http.getString();
-              // Serial.println(payload);
               double temp;
               if (apiStyle == POOL_API_CKPOOL) {
                 // ckpool-solo family (heliospool, nerdminers.org):
                 // { "bestever": N, "workers": N, "hashrate1hr": "1041G", ... }
                 // "workers" here is already a count, and hashrate1hr is a
                 // pre-formatted SI string (e.g. "1041G"), not a raw number.
-                StaticJsonDocument<300> filter;
-                filter["bestever"] = true;
-                filter["workers"] = true;
-                filter["hashrate1hr"] = true;
+                static StaticJsonDocument<300> filter;
+                if (filter.isNull()) {
+                  filter["bestever"] = true;
+                  filter["workers"] = true;
+                  filter["hashrate1hr"] = true;
+                }
                 StaticJsonDocument<1024> doc;
-                deserializeJson(doc, payload.c_str(), DeserializationOption::Filter(filter));
+                deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
                 if (doc.containsKey("workers")) pData.workersCount = doc["workers"].as<int>();
                 if (doc.containsKey("hashrate1hr")) pData.workersHash = doc["hashrate1hr"].as<String>();
                 if (doc.containsKey("bestever")) {
                   temp = doc["bestever"].as<double>();
                   pData.bestDifficulty = formatPoolSuffix(temp);
                 }
-                doc.clear();
               } else if (apiStyle == POOL_API_HMPOOL) {
                 // hmpool: { "best_share_difficulty": N, "workers": [{"active": B, "hashrate": N}, ...] }
                 // (hmpool's top-level "best_difficulty" is the current
                 // VarDiff target, not a best-ever share, so it's not used here.)
                 // "workers" also lists ones that have gone offline
                 // ("active": false, hashrate 0); only live ones are counted.
-                StaticJsonDocument<300> filter;
-                filter["best_share_difficulty"] = true;
-                filter["workers"][0]["active"] = true;
-                filter["workers"][0]["hashrate"] = true;
+                static StaticJsonDocument<300> filter;
+                if (filter.isNull()) {
+                  filter["best_share_difficulty"] = true;
+                  filter["workers"][0]["active"] = true;
+                  filter["workers"][0]["hashrate"] = true;
+                }
                 StaticJsonDocument<2048> doc;
-                deserializeJson(doc, payload.c_str(), DeserializationOption::Filter(filter));
+                deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
                 const JsonArray& workers = doc["workers"].as<JsonArray>();
                 int activeWorkers = 0;
-                float totalhashs = 0;
+                double totalhashs = 0.0;
                 for (const JsonObject& worker : workers) {
                   if (!(worker["active"] | true)) continue;
                   activeWorkers++;
@@ -898,20 +891,21 @@ pool_data getPoolData(void){
                   temp = doc["best_share_difficulty"].as<double>();
                   pData.bestDifficulty = formatPoolSuffix(temp);
                 }
-                doc.clear();
               } else {
                 // public-pool.io, sethforprivacy, solomining, hmpool (digi, bch)
-                StaticJsonDocument<300> filter;
-                filter["bestDifficulty"] = true;
-                filter["workersCount"] = true;
-                filter["workers"][0]["sessionId"] = true;
-                filter["workers"][0]["hashRate"] = true;
+                static StaticJsonDocument<300> filter;
+                if (filter.isNull()) {
+                  filter["bestDifficulty"] = true;
+                  filter["workersCount"] = true;
+                  filter["workers"][0]["sessionId"] = true;
+                  filter["workers"][0]["hashRate"] = true;
+                }
                 StaticJsonDocument<2048> doc;
-                deserializeJson(doc, payload.c_str(), DeserializationOption::Filter(filter));
+                deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
                 //Serial.println(serializeJsonPretty(doc, Serial));
                 if (doc.containsKey("workersCount")) pData.workersCount = doc["workersCount"].as<int>();
                 const JsonArray& workers = doc["workers"].as<JsonArray>();
-                float totalhashs = 0;
+                double totalhashs = 0.0;
                 for (const JsonObject& worker : workers) {
                   totalhashs += worker["hashRate"].as<double>();
                   /* Serial.print(worker["sessionId"].as<String>()+": ");
@@ -924,7 +918,6 @@ pool_data getPoolData(void){
                   temp = doc["bestDifficulty"].as<double>();
                   pData.bestDifficulty = formatPoolSuffix(temp);
                 }
-                doc.clear();
               }
               mPoolUpdate = millis();
 #ifdef SCREEN_WORKERS_ENABLE
@@ -935,10 +928,7 @@ pool_data getPoolData(void){
 #endif
               Serial.println("\n####### Pool Data OK!");
           } else {
-              Serial.println("\n####### Pool Data HTTP Error!");
-              Serial.println(httpCode);
-              String payload = http.getString();
-              Serial.println(payload);
+              Serial.printf("\n####### Pool Data HTTP Error: %d\n", httpCode);
               // fetchDue() already set mPoolTry = now, giving a 60s retry
               // backoff without resetting mPoolUpdate to 15 minutes.
 #ifdef SCREEN_WORKERS_ENABLE

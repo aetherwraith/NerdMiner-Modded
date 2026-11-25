@@ -44,12 +44,16 @@ static const char* GITHUB_FALLBACK_REPO = "HenrysCat/NerdMiner-Modded";
 static std::mutex s_otaMutex;
 static OtaStatus s_otaStatus;
 static TaskHandle_t s_otaTaskHandle = nullptr;
+static TaskHandle_t s_checkTaskHandle = nullptr;
 static String s_targetOtaUrl = "";
 static volatile bool s_otaRebootScheduled = false;
 static unsigned long s_otaRebootTime = 0;
 static bool s_uploadRejected = false;
 static uint8_t s_uploadHeaderBuf[16];
 static size_t s_uploadHeaderLen = 0;
+static size_t s_uploadBytesWritten = 0;
+static size_t s_uploadLastReportedBytes = 0;
+static int s_uploadLastReportedPct = -1;
 
 String getBoardModel(void) {
   return String(PIOENV_NAME);
@@ -407,18 +411,7 @@ static bool fetchGitHubRelease(const char* repo, DynamicJsonDocument &doc) {
   return (err == DeserializationError::Ok);
 }
 
-bool checkGitHubUpdate(void) {
-  {
-    std::lock_guard<std::mutex> lock(s_otaMutex);
-    if (s_otaStatus.state == OTA_STATE_CHECKING ||
-        s_otaStatus.state == OTA_STATE_DOWNLOADING ||
-        s_otaStatus.state == OTA_STATE_FLASHING) {
-      return false;
-    }
-    s_otaStatus.state = OTA_STATE_CHECKING;
-    s_otaStatus.errorMessage = "";
-  }
-
+static bool runGitHubUpdateCheck(void) {
   bool wasMining = !g_otaUpdating;
   g_otaUpdating = true;
   pauseHwMinerForTls();
@@ -431,14 +424,12 @@ bool checkGitHubUpdate(void) {
   }
 
   if (!ok || !doc.containsKey("tag_name")) {
-    bool resumeMining = false;
     {
       std::lock_guard<std::mutex> lock(s_otaMutex);
       s_otaStatus.state = OTA_STATE_ERROR;
       s_otaStatus.errorMessage = "Failed to query GitHub releases API";
-      resumeMining = wasMining && s_otaStatus.state != OTA_STATE_DOWNLOADING && s_otaStatus.state != OTA_STATE_FLASHING;
     }
-    if (resumeMining) g_otaUpdating = false;
+    if (wasMining) g_otaUpdating = false;
     return false;
   }
 
@@ -482,6 +473,49 @@ bool checkGitHubUpdate(void) {
   }
   if (resumeMining) {
     g_otaUpdating = false;
+  }
+  return true;
+}
+
+bool checkGitHubUpdate(void) {
+  {
+    std::lock_guard<std::mutex> lock(s_otaMutex);
+    if (s_otaStatus.state == OTA_STATE_CHECKING ||
+        s_otaStatus.state == OTA_STATE_DOWNLOADING ||
+        s_otaStatus.state == OTA_STATE_FLASHING) {
+      return false;
+    }
+    s_otaStatus.state = OTA_STATE_CHECKING;
+    s_otaStatus.errorMessage = "";
+  }
+  return runGitHubUpdateCheck();
+}
+
+static void checkUpdateWorkerTask(void *param) {
+  (void)param;
+  runGitHubUpdateCheck();
+  s_checkTaskHandle = nullptr;
+  vTaskDelete(NULL);
+}
+
+bool startGitHubCheck(void) {
+  {
+    std::lock_guard<std::mutex> lock(s_otaMutex);
+    if (s_otaStatus.state == OTA_STATE_CHECKING) {
+      return true;
+    }
+    if (s_otaStatus.state == OTA_STATE_DOWNLOADING ||
+        s_otaStatus.state == OTA_STATE_FLASHING ||
+        s_checkTaskHandle != nullptr) {
+      return false;
+    }
+    s_otaStatus.state = OTA_STATE_CHECKING;
+    s_otaStatus.errorMessage = "";
+  }
+  BaseType_t res = xTaskCreatePinnedToCore(checkUpdateWorkerTask, "OtaCheck", 8192, NULL, 2, &s_checkTaskHandle, 0);
+  if (res != pdPASS) {
+    setOtaError("Failed to start update check task");
+    return false;
   }
   return true;
 }
@@ -587,36 +621,26 @@ static void handleApiCheckUpdate(WebServer &server) {
   if (handleCorsOptions()) return;
   if (!checkWebApiMutationAllowed()) return;
 
-  bool ok = checkGitHubUpdate();
+  bool started = startGitHubCheck();
   OtaStatus st = getOtaStatus();
 
   char buf[1024];
-  if (!ok) {
-    snprintf(buf, sizeof(buf),
-             "{\"success\":false,\"currentVersion\":\"%s\",\"latestVersion\":\"%s\","
-             "\"hasUpdate\":%s,\"downloadUrl\":\"%s\",\"releaseUrl\":\"%s\","
-             "\"releaseNotes\":\"%s\",\"error\":\"%s\"}",
-             jsonEscape(st.currentVersion).c_str(),
-             jsonEscape(st.latestVersion).c_str(),
-             st.hasUpdate ? "true" : "false",
-             jsonEscape(st.downloadUrl).c_str(),
-             jsonEscape(st.releaseUrl).c_str(),
-             jsonEscape(st.releaseNotes).c_str(),
-             jsonEscape(st.errorMessage).c_str());
-  } else {
-    snprintf(buf, sizeof(buf),
-             "{\"success\":true,\"currentVersion\":\"%s\",\"latestVersion\":\"%s\","
-             "\"hasUpdate\":%s,\"downloadUrl\":\"%s\",\"releaseUrl\":\"%s\","
-             "\"releaseNotes\":\"%s\"}",
-             jsonEscape(st.currentVersion).c_str(),
-             jsonEscape(st.latestVersion).c_str(),
-             st.hasUpdate ? "true" : "false",
-             jsonEscape(st.downloadUrl).c_str(),
-             jsonEscape(st.releaseUrl).c_str(),
-             jsonEscape(st.releaseNotes).c_str());
-  }
+  snprintf(buf, sizeof(buf),
+           "{\"success\":%s,\"state\":%d,\"currentVersion\":\"%s\",\"latestVersion\":\"%s\","
+           "\"hasUpdate\":%s,\"downloadUrl\":\"%s\",\"releaseUrl\":\"%s\","
+           "\"releaseNotes\":\"%s\",\"error\":\"%s\"}",
+           started ? "true" : "false",
+           (int)st.state,
+           jsonEscape(st.currentVersion).c_str(),
+           jsonEscape(st.latestVersion).c_str(),
+           st.hasUpdate ? "true" : "false",
+           jsonEscape(st.downloadUrl).c_str(),
+           jsonEscape(st.releaseUrl).c_str(),
+           jsonEscape(st.releaseNotes).c_str(),
+           jsonEscape(st.errorMessage).c_str());
 
-  sendCorsJson(ok ? 200 : 500, buf);
+  server.sendHeader("Cache-Control", "no-store");
+  sendCorsJson(started ? 202 : (st.state == OTA_STATE_ERROR ? 500 : 409), buf);
 }
 
 void setup_ota(WebServer &server) {
@@ -644,9 +668,8 @@ void setup_ota(WebServer &server) {
                                       "<p>Firmware written successfully. Device is restarting...</p>"
                                       "<p>Redirecting in 15 seconds...</p>"
                                       "</body></html>"));
-      saveStat();
-      delay(1000);
-      ESP.restart();
+      s_otaRebootTime = millis() + 1000;
+      s_otaRebootScheduled = true;
     }
   }, [&server]() {
     HTTPUpload &upload = server.upload();
@@ -658,6 +681,9 @@ void setup_ota(WebServer &server) {
       }
       s_uploadRejected = false;
       s_uploadHeaderLen = 0;
+      s_uploadBytesWritten = 0;
+      s_uploadLastReportedBytes = 0;
+      s_uploadLastReportedPct = 0;
       Serial.printf("[OTA] Starting upload: %s\n", upload.filename.c_str());
       {
         std::lock_guard<std::mutex> lock(s_otaMutex);
@@ -717,8 +743,7 @@ void setup_ota(WebServer &server) {
               g_otaUpdating = false;
               return;
             }
-            std::lock_guard<std::mutex> lock(s_otaMutex);
-            s_otaStatus.bytesWritten += 16;
+            s_uploadBytesWritten += 16;
           }
         }
         if (writeLen > 0 && s_uploadHeaderLen == 16) {
@@ -728,10 +753,14 @@ void setup_ota(WebServer &server) {
             Serial.println("[OTA] Error: " + msg);
             Update.abort();
             g_otaUpdating = false;
-          } else {
-            std::lock_guard<std::mutex> lock(s_otaMutex);
-            s_otaStatus.bytesWritten += writeLen;
+            return;
           }
+          s_uploadBytesWritten += writeLen;
+        }
+        if (s_uploadHeaderLen == 16 && (s_uploadBytesWritten - s_uploadLastReportedBytes) >= 16384) {
+          s_uploadLastReportedBytes = s_uploadBytesWritten;
+          std::lock_guard<std::mutex> lock(s_otaMutex);
+          s_otaStatus.bytesWritten = s_uploadBytesWritten;
         }
       }
     }
@@ -744,6 +773,8 @@ void setup_ota(WebServer &server) {
         } else if (Update.end(true)) {
           {
             std::lock_guard<std::mutex> lock(s_otaMutex);
+            s_otaStatus.bytesWritten = s_uploadBytesWritten;
+            s_otaStatus.totalBytes = upload.totalSize > 0 ? upload.totalSize : s_uploadBytesWritten;
             s_otaStatus.state = OTA_STATE_SUCCESS;
             s_otaStatus.progressPercent = 100;
           }
